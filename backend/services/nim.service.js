@@ -69,6 +69,9 @@ export async function classifyAnnouncementWithNim(ticker, announcementText, titl
     - "deep_dive_indicator": Name the precise investment thesis risk or opportunity with context.
     - "result_date": YYYY-MM-DD if a board meeting for results is announced. Otherwise null.
     - "is_earnings_release": true only if this is the actual Q-results announcement (not just a board meeting notice).
+    - "concall_date": YYYY-MM-DD if a scheduled or rescheduled earnings conference call is mentioned. Otherwise null.
+    - "concall_time": HH:MM IST/format or null if a scheduled or rescheduled earnings conference call time is mentioned (e.g. "16:00 IST"). Otherwise null.
+    - "is_rescheduled": true if the earnings conference call is explicitly rescheduled, postponed, or revised from a previous date. Otherwise false.
 
     Return ONLY a valid JSON object:
     {
@@ -79,7 +82,10 @@ export async function classifyAnnouncementWithNim(ticker, announcementText, titl
       "key_data": "All specific figures and numbers extracted.",
       "deep_dive_indicator": "Precise thesis risk/opportunity with context.",
       "result_date": "YYYY-MM-DD or null",
-      "is_earnings_release": true | false
+      "is_earnings_release": true | false,
+      "concall_date": "YYYY-MM-DD or null",
+      "concall_time": "HH:MM or format or null",
+      "is_rescheduled": true | false
     }
 
     Announcement Text:

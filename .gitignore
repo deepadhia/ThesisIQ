@@ -17,9 +17,6 @@ data_node/
 data/
 
 # Environment files (never commit real secrets)
-.env
-.env.local
-.env.production
 node_downloader/.env
 
 # Google / service account credentials (never commit)
@@ -29,7 +26,6 @@ backend/secrets/
 backend/services/*.json
 
 # Editor directories and files
-.vscode/*
 !.vscode/extensions.json
 .idea
 .DS_Store
@@ -38,3 +34,4 @@ backend/services/*.json
 *.njsproj
 *.sln
 *.sw?
+config.bat

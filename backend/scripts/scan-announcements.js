@@ -204,7 +204,7 @@ export async function scan({ isDryRun = false, runUrl = null } = {}) {
 
         // 7. Alert if High Priority or Earnings Release or Concall/Transcript
         let sentToTelegram = false;
-        const concallType = getConcallType(title);
+        const concallType = getConcallType(title, announcementText);
         if (concallType || aiResult.is_earnings_release || aiResult.priority === "HIGH" || (aiResult.priority === "MEDIUM" && aiResult.impact !== "NEUTRAL")) {
           if (alertsSent >= MAX_ALERTS_PER_RUN) {
             console.warn(`[LIMIT] Max alerts reached for this run. Skipping telegram for ${ticker}`);
@@ -224,6 +224,9 @@ export async function scan({ isDryRun = false, runUrl = null } = {}) {
                 result_date: aiResult.result_date,
                 is_earnings_release: aiResult.is_earnings_release,
                 concall_type: concallType,
+                concall_date: aiResult.concall_date,
+                concall_time: aiResult.concall_time,
+                is_rescheduled: aiResult.is_rescheduled,
                 category: stock.category,
                 exchangeTimestamp: timestamp,
                 docUrl,

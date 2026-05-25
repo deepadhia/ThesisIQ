@@ -79,84 +79,146 @@ export function shouldProcessAnnouncement(title) {
 }
 
 /**
- * Classifies an announcement title into concall categories: "transcript", "audio", "scheduled", or "done".
- * Returns null if the announcement is not concall-related.
+ * Classifies an announcement title and optional raw text into concall categories: "transcript", "audio", "scheduled", or "done".
+ * Returns null if the announcement is not a genuine public earnings concall.
  */
-export function getConcallType(title) {
+export function getConcallType(title, rawText = "") {
   const t = String(title || "").toLowerCase();
-  
+  const body = String(rawText || "").toLowerCase();
+  const combined = `${t} ${body}`;
+
   // 1. Check for Transcript (most specific)
-  if (t.includes("transcript")) {
+  if (t.includes("transcript") || body.includes("transcript")) {
+    const isGenericMeet =
+      combined.includes("investor meet") ||
+      combined.includes("analyst meet") ||
+      combined.includes("investor meeting") ||
+      combined.includes("analyst meeting") ||
+      combined.includes("investor/analyst meet") ||
+      combined.includes("analyst / institutional investor meeting") ||
+      combined.includes("meeting with") ||
+      combined.includes("interaction with") ||
+      combined.includes("one on one") ||
+      combined.includes("one-on-one") ||
+      combined.includes("group meeting") ||
+      combined.includes("group meet") ||
+      combined.includes("fund meeting") ||
+      combined.includes("roadshow");
+
+    const hasEarningsKeywords =
+      combined.includes("earnings") ||
+      combined.includes("results") ||
+      combined.includes("financial results") ||
+      /q[1-4]/.test(combined) ||
+      /fy\d{2}/.test(combined);
+
+    if (isGenericMeet && !hasEarningsKeywords) {
+      return null; // Ignore transcripts of private / generic investor meets
+    }
     return "transcript";
   }
-  
+
   // 2. Check for Audio Recording / Audio Link (indicates concall is completed)
   if (
-    t.includes("audio recording") ||
-    t.includes("audio link") ||
-    t.includes("link of audio") ||
-    t.includes("recording of")
+    combined.includes("audio recording") ||
+    combined.includes("audio link") ||
+    combined.includes("link of audio") ||
+    combined.includes("recording of")
   ) {
+    const isGenericMeet =
+      combined.includes("investor meet") ||
+      combined.includes("analyst meet") ||
+      combined.includes("investor meeting") ||
+      combined.includes("analyst meeting") ||
+      combined.includes("investor/analyst meet") ||
+      combined.includes("analyst / institutional investor meeting") ||
+      combined.includes("meeting with") ||
+      combined.includes("interaction with") ||
+      combined.includes("one on one") ||
+      combined.includes("one-on-one") ||
+      combined.includes("group meeting") ||
+      combined.includes("group meet") ||
+      combined.includes("fund meeting") ||
+      combined.includes("roadshow");
+
+    const hasEarningsKeywords =
+      combined.includes("earnings") ||
+      combined.includes("results") ||
+      combined.includes("financial results") ||
+      /q[1-4]/.test(combined) ||
+      /fy\d{2}/.test(combined);
+
+    if (isGenericMeet && !hasEarningsKeywords) {
+      return null; // Ignore audio of private / generic investor meets
+    }
     return "audio";
   }
-  
-  // 3. Exclude private fund / institutional investor meetings (no public share impact)
-  const isPrivateFundMeet =
-    t.includes("meeting with") ||
-    t.includes("interaction with") ||
-    t.includes("one on one") ||
-    t.includes("one-on-one") ||
-    t.includes("group meeting") ||
-    t.includes("group meet") ||
-    t.includes("investor meeting") ||
-    t.includes("fund meeting") ||
-    t.includes("one on one meet");
 
-  if (isPrivateFundMeet) {
-    const hasPublicConcallKeywords = 
-      t.includes("conference call") || 
-      t.includes("concall") || 
-      t.includes("con call") || 
-      t.includes("earnings call");
-      
-    if (!hasPublicConcallKeywords) {
-      return null; // Skip private investor / fund meets
-    }
+  // 3. General concall / conference call check
+  const hasConcallKeywords =
+    combined.includes("concall") ||
+    combined.includes("con call") ||
+    combined.includes("con. call") ||
+    combined.includes("con-call") ||
+    combined.includes("conference call") ||
+    combined.includes("earnings call");
+
+  if (!hasConcallKeywords) {
+    return null; // Not concall related at all
   }
-  
-  // 4. Check for other concall or analyst meeting keywords
-  const isConcallRelated = 
-    t.includes("concall") ||
-    t.includes("con call") ||
-    t.includes("conference call") ||
-    t.includes("analyst call") ||
-    t.includes("investor call") ||
-    t.includes("earnings call") ||
-    t.includes("analyst meet") ||
-    t.includes("investor meet") ||
-    t.includes("analyst / institutional investor meeting");
 
-  if (isConcallRelated) {
-    // If it contains completed / outcome / concluded, it is done
-    if (t.includes("outcome") || t.includes("completed") || t.includes("concluded")) {
-      return "done";
-    }
-    // If it contains scheduling keywords, it is upcoming
-    if (t.includes("schedule") || t.includes("intimation")) {
-      return "scheduled";
-    }
-    // Default to completed / done
+  // 4. Exclude private fund meets, roadshows, or generic broker-led investor conferences
+  const isGenericMeet =
+    combined.includes("investor meet") ||
+    combined.includes("analyst meet") ||
+    combined.includes("investor meeting") ||
+    combined.includes("analyst meeting") ||
+    combined.includes("investor/analyst meet") ||
+    combined.includes("analyst / institutional investor meeting") ||
+    combined.includes("meeting with") ||
+    combined.includes("interaction with") ||
+    combined.includes("one on one") ||
+    combined.includes("one-on-one") ||
+    combined.includes("group meeting") ||
+    combined.includes("group meet") ||
+    combined.includes("fund meeting") ||
+    combined.includes("roadshow") ||
+    combined.includes("participating in") ||
+    combined.includes("organized by");
+
+  const hasEarningsKeywords =
+    combined.includes("earnings") ||
+    combined.includes("results") ||
+    combined.includes("financial results") ||
+    /q[1-4]/.test(combined) ||
+    /fy\d{2}/.test(combined);
+
+  if (isGenericMeet && !hasEarningsKeywords) {
+    return null; // Ignore broker/private group meets
+  }
+
+  // 5. Determine scheduled vs completed
+  const isCompleted =
+    t.includes("outcome") || 
+    t.includes("completed") || 
+    t.includes("concluded") ||
+    body.includes("outcome") ||
+    body.includes("completed") ||
+    body.includes("concluded");
+
+  if (isCompleted) {
     return "done";
   }
-  
-  return null;
+
+  // Otherwise, default to scheduled (since simple "Earnings Call" is upcoming, not completed)
+  return "scheduled";
 }
 
 /**
- * Detects if an announcement title is related to a concall, transcript, or audio recording.
+ * Detects if an announcement title and text is related to a concall, transcript, or audio recording.
  */
-export function isConcallOrTranscript(title) {
-  return !!getConcallType(title);
+export function isConcallOrTranscript(title, rawText = "") {
+  return !!getConcallType(title, rawText);
 }
 
 

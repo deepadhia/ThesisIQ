@@ -113,7 +113,7 @@ export async function sendTelegramMessage(text) {
 export async function sendAnnouncementAlert({
   ticker, title, priority, impact, summary, confidence,
   key_data, deep_dive_indicator, result_date,
-  is_earnings_release, concall_type, category, exchangeTimestamp, docUrl, source = "BSE"
+  is_earnings_release, concall_type, concall_date, concall_time, is_rescheduled, category, exchangeTimestamp, docUrl, source = "BSE"
 }) {
   const priorityEmoji  = priority === "HIGH" ? "🔴" : priority === "MEDIUM" ? "🟡" : "⚪";
   const impactEmoji    = impact === "POSITIVE" ? "📈" : impact === "NEGATIVE" ? "📉" : "⚖️";
@@ -144,11 +144,32 @@ export async function sendAnnouncementAlert({
     } else if (concall_type === "audio") {
       message += `🎧 *CONCALL AUDIO RECORDING OUT* 🎧\n`;
     } else if (concall_type === "scheduled") {
-      message += `📅 *CONCALL SCHEDULED / INTIMATION* 📅\n`;
+      if (is_rescheduled) {
+        message += `🔄 *CONCALL RESCHEDULED* 🔄\n`;
+      } else {
+        message += `📅 *CONCALL SCHEDULED / INTIMATION* 📅\n`;
+      }
     } else {
       message += `🎤 *CONCALL COMPLETED* 🎤\n`;
     }
     message += `─────────────────────────\n`;
+
+    // Add concall date/time info if available
+    if (concall_date) {
+      let dateStr = concall_date;
+      try {
+        const parsedDate = new Date(concall_date);
+        if (!isNaN(parsedDate.getTime())) {
+          dateStr = parsedDate.toLocaleDateString("en-IN", { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
+        }
+      } catch (e) {
+        // use raw date string if parsing fails
+      }
+      
+      const timeStr = concall_time ? ` at ${concall_time}` : "";
+      message += `🎙️ *Concall Details:* ${dateStr}${timeStr}\n`;
+      message += `─────────────────────────\n`;
+    }
   }
 
   // ── Summary ───────────────────────────────────────────────────────────────
