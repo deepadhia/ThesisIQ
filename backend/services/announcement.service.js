@@ -602,12 +602,12 @@ export async function isEventAlertRecentlySent({ ticker, title, concall_type, is
  */
 export async function saveAnnouncement({
   stock_id, ticker, source_id, title_hash, title, raw_text, priority, impact, confidence, summary, status, sent_to_telegram, is_earnings_release, attachment_url, filing_date,
-  filing_category = "GENERAL", event_analysis = null, deep_dive_status = "not_required"
+  filing_category = "GENERAL", event_analysis = null, deep_dive_status = "not_required", key_data = null, deep_dive_indicator = null
 }) {
   await pool.query(
     `INSERT INTO corporate_announcements 
-      (stock_id, ticker, source_id, title_hash, title, raw_text, priority, impact, confidence, summary, status, sent_to_telegram, is_earnings_release, processed_at, attachment_url, filing_date, filing_category, event_analysis, deep_dive_status)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NOW(), $14, $15, $16, $17, $18)
+      (stock_id, ticker, source_id, title_hash, title, raw_text, priority, impact, confidence, summary, status, sent_to_telegram, is_earnings_release, processed_at, attachment_url, filing_date, filing_category, event_analysis, deep_dive_status, key_data, deep_dive_indicator)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NOW(), $14, $15, $16, $17, $18, $19, $20)
      ON CONFLICT (ticker, source_id) DO UPDATE
        SET status = CASE
              -- Promote if currently pending (capped mid-run) OR failed (NIM outage, now recovered)
@@ -618,10 +618,38 @@ export async function saveAnnouncement({
              WHEN corporate_announcements.status IN ('pending', 'failed') THEN EXCLUDED.sent_to_telegram
              ELSE corporate_announcements.sent_to_telegram
            END,
+           summary = CASE
+             WHEN corporate_announcements.status IN ('pending', 'failed') OR corporate_announcements.summary LIKE 'AI classification failed%' THEN EXCLUDED.summary
+             ELSE corporate_announcements.summary
+           END,
+           priority = CASE
+             WHEN corporate_announcements.status IN ('pending', 'failed') OR corporate_announcements.summary LIKE 'AI classification failed%' THEN EXCLUDED.priority
+             ELSE corporate_announcements.priority
+           END,
+           impact = CASE
+             WHEN corporate_announcements.status IN ('pending', 'failed') OR corporate_announcements.summary LIKE 'AI classification failed%' THEN EXCLUDED.impact
+             ELSE corporate_announcements.impact
+           END,
+           confidence = CASE
+             WHEN corporate_announcements.status IN ('pending', 'failed') OR corporate_announcements.summary LIKE 'AI classification failed%' THEN EXCLUDED.confidence
+             ELSE corporate_announcements.confidence
+           END,
+           key_data = CASE
+             WHEN corporate_announcements.status IN ('pending', 'failed') OR corporate_announcements.summary LIKE 'AI classification failed%' THEN EXCLUDED.key_data
+             ELSE corporate_announcements.key_data
+           END,
+           deep_dive_indicator = CASE
+             WHEN corporate_announcements.status IN ('pending', 'failed') OR corporate_announcements.summary LIKE 'AI classification failed%' THEN EXCLUDED.deep_dive_indicator
+             ELSE corporate_announcements.deep_dive_indicator
+           END,
+           raw_text = CASE
+             WHEN corporate_announcements.status IN ('pending', 'failed') OR LENGTH(COALESCE(corporate_announcements.raw_text, '')) <= LENGTH(COALESCE(corporate_announcements.title, '')) THEN EXCLUDED.raw_text
+             ELSE corporate_announcements.raw_text
+           END,
            filing_category = EXCLUDED.filing_category,
            event_analysis = COALESCE(EXCLUDED.event_analysis, corporate_announcements.event_analysis),
            deep_dive_status = CASE
-             WHEN corporate_announcements.deep_dive_status = 'completed' AND EXCLUDED.deep_dive_status = 'pending_stage2' THEN 'pending_stage2'
+             WHEN corporate_announcements.deep_dive_status = 'completed' AND EXCLUDED.deep_dive_status IN ('pending_stage2', 'pending_audio') THEN EXCLUDED.deep_dive_status
              WHEN corporate_announcements.deep_dive_status IN ('not_required', 'failed') THEN EXCLUDED.deep_dive_status
              ELSE corporate_announcements.deep_dive_status
            END,
@@ -630,7 +658,7 @@ export async function saveAnnouncement({
              ELSE corporate_announcements.processed_at
            END
     `,
-    [stock_id, ticker, source_id, title_hash, title, raw_text, priority, impact, confidence, summary, status, sent_to_telegram, is_earnings_release, attachment_url, filing_date, filing_category, event_analysis ? JSON.stringify(event_analysis) : null, deep_dive_status]
+    [stock_id, ticker, source_id, title_hash, title, raw_text, priority, impact, confidence, summary, status, sent_to_telegram, is_earnings_release, attachment_url, filing_date, filing_category, event_analysis ? JSON.stringify(event_analysis) : null, deep_dive_status, key_data, deep_dive_indicator]
   ).catch(err => {
     // Silently handle title_hash unique constraint violations (cross-exchange dedup race).
     // These are not real errors — the announcement was already processed from the other exchange.

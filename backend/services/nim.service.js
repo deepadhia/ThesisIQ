@@ -81,10 +81,10 @@ export async function classifyAnnouncementWithNim(ticker, announcementText, titl
     3. FACTUAL EXECUTIVE SUMMARY: Your summary must be 2-3 concise, highly analytical sentences. Sentence 1: The core operational, corporate, or financial event (with exact numbers: Revenue ₹Cr, EBITDA ₹Cr & %, PAT ₹Cr & %, Deal Value ₹Cr, Stake %). Sentence 2: The direct business rationale and how it impacts operational execution or capacity. Sentence 3: Concrete takeaway for the investor without robotic cliché phrases.
 
     ── Priority Rules ──
-    HIGH: Earnings Results / Financial Results, Large orders (>10% of annual revenue), M&A / demergers / restructuring, material CXO/auditor exits, capex >20% net worth, credit downgrades, regulatory actions, Product Approvals, Patents, Licenses, Large contract wins, Awards, MOU signings with strategic partners.
-    MEDIUM: Dividends, board meeting notices, credit rating upgrades/downgrades on debt instruments, material allotments, medium-sized orders, general business updates, scheduled earnings conference calls / concalls.
-    LOW: Routine compliance filings, share certificate loss, voting results, AGM notices, window closure notices, newspaper publications.
-    LOW (ALWAYS, NO EXCEPTIONS): ESG rating updates/certificates, BRSR / sustainability reports, ISO certifications, credit rating affirmations (without upgrade/downgrade), routine non-director staff changes, loss of share certificates, duplicate share certificates, postal ballot notices, AGM/EGM notices, director re-appointment notices, commission to non-executive directors, shareholders meeting notices, newspaper publication intimations, voting results, scrutinizer reports, compliance certificates, board meeting notices that do NOT announce actual financial results. Private analyst/investor meets, one-on-one meetings with mutual funds or institutional investors, management interaction meetings, analyst roadshows, investor days organized by brokers, fund house meetings. These do NOT move the share price and must ALWAYS be classified LOW NEUTRAL regardless of any other content.
+    HIGH: Earnings Results / Financial Results, Large orders (>10% of annual revenue), M&A / demergers / restructuring, material CXO/auditor exits, capex >20% net worth, credit downgrades, regulatory actions, Product Approvals, Patents, Licenses, Large contract wins, Awards, MOU signings with strategic partners, Completed AGMs with substantive Chairman/MD addresses, forward guidance, or major multi-year capacity/revenue targets.
+    MEDIUM: Dividends, board meeting notices, credit rating upgrades/downgrades on debt instruments, material allotments, medium-sized orders, general business updates, scheduled earnings conference calls / concalls, Completed AGMs with general operational reviews or management commentary.
+    LOW: Routine compliance filings, share certificate loss, voting results, future AGM notices, window closure notices, newspaper publications.
+    LOW (ALWAYS, NO EXCEPTIONS): ESG rating updates/certificates, BRSR / sustainability reports, ISO certifications, credit rating affirmations (without upgrade/downgrade), routine non-director staff changes, loss of share certificates, duplicate share certificates, postal ballot notices, future AGM/EGM scheduling notices (without completed proceedings), director re-appointment notices, commission to non-executive directors, routine shareholders meeting attendance notices (pure quorum formalities without management speech/guidance), newspaper publication intimations, voting results, scrutinizer reports (without speeches), compliance certificates, board meeting notices that do NOT announce actual financial results. Private analyst/investor meets, one-on-one meetings with mutual funds or institutional investors, management interaction meetings, analyst roadshows, investor days organized by brokers, fund house meetings. These do NOT move the share price and must ALWAYS be classified LOW NEUTRAL regardless of any other content.
 
     ── Output Rules ──
     - "summary": A concise 2-3 sentence factual summary that clearly outlines the event, exact numbers, and direct operational impact.
@@ -95,9 +95,9 @@ export async function classifyAnnouncementWithNim(ticker, announcementText, titl
     - "concall_date": YYYY-MM-DD if a scheduled or rescheduled earnings conference call is mentioned. Otherwise null.
     - "concall_time": HH:MM IST/format or null if a scheduled or rescheduled earnings conference call time is mentioned (e.g. "16:00 IST"). Otherwise null.
     - "is_rescheduled": true if the earnings conference call is explicitly rescheduled, postponed, or revised from a previous date. Otherwise false.
-    - "is_agm": true if the filing is an AGM/EGM notice, proceedings, outcome, annual report, or postal ballot notice. Otherwise false.
+    - "is_agm": true if the filing is an AGM/EGM notice, proceedings, outcome, annual report, shareholders meeting intimation, or postal ballot notice. Otherwise false.
     - "agm_status": "scheduled" if it is a notice/schedule for a future meeting, or "completed" if it is the proceedings/outcome of a meeting that has already occurred. Otherwise null.
-    - "agm_highlights": A bulleted 2-4 point summary of key resolutions, management takeaways, or Q&A if agm_status is "completed". Otherwise null.
+    - "agm_highlights": A bulleted 2-4 point summary of key resolutions, Chairman/MD speech points, capex, or forward guidance if agm_status is "completed". If the filing is a purely procedural quorum notice with no speech or numbers disclosed (e.g. routine attendance slip), set to null.
 
     Return ONLY a valid JSON object:
     {
@@ -124,10 +124,9 @@ export async function classifyAnnouncementWithNim(ticker, announcementText, titl
   `;
 
   const ACTIVE_MODELS = [
-    "openai/gpt-oss-120b",
-    "nvidia/nemotron-3-super-120b-a12b",
     "meta/llama-3.2-11b-vision-instruct",
-    "openai/gpt-oss-20b"
+    "openai/gpt-oss-20b",
+    "nvidia/nemotron-3-super-120b-a12b"
   ];
   const MAX_RETRIES = 4;
   const BASE_DELAY_MS = 2000;

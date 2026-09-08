@@ -5,16 +5,25 @@
  * and emits actionable ADD / HOLD / TRIM Telegram alerts.
  */
 
+import fs from "fs";
+import path from "path";
 import { pool } from "../db/pool.js";
 import { compareFiscalQuartersDesc } from "../utils/fiscal-quarter.js";
 import { extractTextFromPdfUrl } from "../services/announcement.service.js";
-import { sendTelegramMessage } from "../services/telegram.service.js";
+import { sendTelegramMessage, sendAnnouncementAlert, sendConcallDiscrepancyAlert } from "../services/telegram.service.js";
 import { NVIDIA_API_KEY } from "../config/env.js";
 import { extractDeterministicFinancials } from "../services/financial-validator.service.js";
 import { applyInstitutionalGuard } from "../services/institutional-guard.service.js";
 import { getVerifiedGroundTruth } from "../services/verified-data-layer.service.js";
 import { evaluateDualLayerActionGate } from "../services/thesis-gate-evaluator.service.js";
 import { buildFactRegistry, validateSynthesisClaims, calculateProgrammaticCommitmentStatus } from "../services/fact-registry.service.js";
+import { 
+  extractAudioUrlFromFiling, 
+  downloadAndExtractMp3, 
+  analyzeAudioWithGemini, 
+  analyzeTranscriptWithGemini, 
+  auditDiscrepancies 
+} from "../services/audio-transcript-analyzer.service.js";
 
 const NIM_BASE_URL = "https://integrate.api.nvidia.com/v1/chat/completions";
 
@@ -380,7 +389,7 @@ export async function processPendingDeepDives(options = {}) {
             s.investment_thesis, s.company_name
      FROM corporate_announcements ca
      JOIN stocks s ON s.id = ca.stock_id
-     WHERE ca.deep_dive_status IN ('pending_stage1', 'pending_stage2')
+     WHERE ca.deep_dive_status IN ('pending_stage1', 'pending_stage2', 'pending_audio')
        AND s.category = 'Core'`;
 
   if (!allowHistorical && !suppressTelegram) {
@@ -415,6 +424,78 @@ export async function processPendingDeepDives(options = {}) {
       }
       if (!docText || docText.length < 50) {
         docText = item.title;
+      }
+
+      // ── STAGE AUDIO: Concall / AGM Media Processing ──
+      if (item.deep_dive_status === "pending_audio") {
+        console.log(`[WORKER AUDIO] Ingesting concall audio for ${item.ticker}...`);
+        const audioUrl = extractAudioUrlFromFiling(docText, item.attachment_url);
+        if (!audioUrl) {
+          console.warn(`[WORKER AUDIO] No media link found in filing for ${item.ticker}. Marking completed.`);
+          await pool.query("UPDATE corporate_announcements SET deep_dive_status = 'completed' WHERE id = $1", [item.id]);
+          return { success: true, skipped: true };
+        }
+
+        const scratchDir = path.resolve(process.cwd(), "scratch");
+        if (!fs.existsSync(scratchDir)) fs.mkdirSync(scratchDir, { recursive: true });
+        const mp3Path = path.resolve(scratchDir, `${item.ticker}_audio_${item.id.slice(0, 8)}.mp3`);
+
+        try {
+          await downloadAndExtractMp3(audioUrl, mp3Path);
+          const audioAudit = await analyzeAudioWithGemini(mp3Path, item.ticker, item.company_name, item.investment_thesis);
+
+          const eventAnalysisObj = {
+            audio_analysis: audioAudit,
+            investment_memo: audioAudit.investment_memo_markdown || null,
+            processed_stage: "audio"
+          };
+
+          if (audioAudit.commitments && Array.isArray(audioAudit.commitments)) {
+            for (const comm of audioAudit.commitments) {
+              if (!comm.statement || isProceduralNoise(comm.statement, comm.metric)) continue;
+              const quarter = getIndianFiscalQuarter(item.filing_date);
+              await pool.query(
+                `INSERT INTO management_commitments 
+                  (stock_id, ticker, quarter, statement, metric, target_value, timeline, status, evidence_summary, credibility_impact)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, 'Pending', $8, 'positive')
+                 ON CONFLICT DO NOTHING`,
+                [item.stock_id, item.ticker, quarter, comm.statement, comm.metric || "Operational", comm.target_value || "As stated", comm.timeline || "Medium Term", audioAudit.executive_summary]
+              ).catch(err => console.warn(`[WORKER AUDIO] Commitment save warning:`, err.message));
+            }
+          }
+
+          await pool.query(
+            `UPDATE corporate_announcements 
+             SET deep_dive_status = 'completed',
+                 summary = COALESCE($1, summary),
+                 event_analysis = COALESCE(event_analysis, '{}'::jsonb) || $2::jsonb
+             WHERE id = $3`,
+            [audioAudit.executive_summary, JSON.stringify(eventAnalysisObj), item.id]
+          );
+
+          if (!suppressTelegram) {
+            const sent = await sendAnnouncementAlert({
+              ticker: item.ticker,
+              title: item.title,
+              priority: "HIGH",
+              impact: "POSITIVE",
+              summary: audioAudit.executive_summary,
+              confidence: 90,
+              concall_type: "audio",
+              agm_highlights: audioAudit.catalysts,
+              docUrl: item.attachment_url
+            });
+            if (sent) {
+              await pool.query("UPDATE corporate_announcements SET sent_to_telegram = true WHERE id = $1", [item.id]);
+            }
+          }
+
+          return { success: true, ticker: item.ticker, stage: "audio" };
+        } catch (audioErr) {
+          console.error(`[WORKER AUDIO ERROR] Failed for ${item.ticker}:`, audioErr);
+          await pool.query("UPDATE corporate_announcements SET deep_dive_status = 'failed' WHERE id = $1", [item.id]);
+          return { success: false, error: audioErr.message };
+        }
       }
 
       // ── FAST CONTENT PRE-FILTER: Instant 1ms skip for routine cover letters ──
@@ -663,6 +744,38 @@ export async function processPendingDeepDives(options = {}) {
           const ch = await generateStructuredConcallHighlights(item.ticker, item.company_name, docText);
           if (ch && ch.segment_highlights && ch.segment_highlights.length > 0) {
             verdict.concall_highlights = ch;
+          }
+
+          // Audio-vs-Transcript Discrepancy Cross-Audit
+          try {
+            const { rows: prevAudio } = await pool.query(
+              `SELECT id, event_analysis FROM corporate_announcements 
+               WHERE ticker = $1 
+                 AND event_analysis->'audio_analysis' IS NOT NULL 
+               ORDER BY created_at DESC LIMIT 1`,
+              [item.ticker]
+            );
+
+            if (prevAudio.length > 0 && prevAudio[0].event_analysis?.audio_analysis) {
+              console.log(`[WORKER AUDIT] Running Audio-vs-Transcript Discrepancy check for ${item.ticker}...`);
+              const transcriptAnalysis = await analyzeTranscriptWithGemini(docText, item.ticker, item.company_name, item.investment_thesis);
+              const discrepancyAudit = await auditDiscrepancies(prevAudio[0].event_analysis.audio_analysis, transcriptAnalysis, item.ticker);
+              verdict.discrepancy_audit = discrepancyAudit;
+
+              if (discrepancyAudit?.has_material_discrepancy && !suppressTelegram) {
+                console.log(`[WORKER AUDIT] Material discrepancy flagged! Dispatching Telegram alert for ${item.ticker}...`);
+                await sendConcallDiscrepancyAlert({
+                  ticker: item.ticker,
+                  companyName: item.company_name,
+                  discrepancyScore: discrepancyAudit.discrepancy_score,
+                  summaryVerdict: discrepancyAudit.summary_verdict,
+                  discrepancies: discrepancyAudit.discrepancies,
+                  docUrl: item.attachment_url
+                });
+              }
+            }
+          } catch (auditErr) {
+            console.warn(`[WORKER AUDIT WARN] Discrepancy audit error for ${item.ticker}:`, auditErr.message);
           }
         }
 

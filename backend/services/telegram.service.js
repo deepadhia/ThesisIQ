@@ -164,6 +164,16 @@ export async function sendAnnouncementAlert(params) {
     message += `📋 *EXECUTIVE SUMMARY*\n${formatToBullets(summary)}\n\n`;
   }
 
+  // ── 3b. AGM Highlights & Speech Takeaways ──────────────────────────────────
+  if (is_agm && agm_status === "completed" && agm_highlights) {
+    const highlightsText = Array.isArray(agm_highlights) 
+      ? agm_highlights.map(h => `• ${h}`).join("\n") 
+      : formatToBullets(agm_highlights);
+    if (highlightsText && !highlightsText.toLowerCase().includes("null")) {
+      message += `🏛️ *AGM HIGHLIGHTS & MANAGEMENT SPEECH*\n${highlightsText}\n\n`;
+    }
+  }
+
   // ── 4. Key Financial & Operational Data ──────────────────────────────────
   if (key_data && key_data !== "No specific figures disclosed." && key_data !== "No specific figures extracted.") {
     message += `📊 *KEY METRICS & MECHANICS*\n${formatToBullets(key_data)}\n\n`;
@@ -306,6 +316,45 @@ export async function sendRunSummary({
     message += `\n[View Workflow Run →](${runUrl})\n`;
   }
 
+  message += `_🕐 ${timestamp}_`;
+
+  return sendTelegramMessage(message);
+}
+
+/**
+ * Sends a high-priority Telegram alert when a discrepancy is detected
+ * between live Concall Audio and the official Written Transcript.
+ */
+export async function sendConcallDiscrepancyAlert({
+  ticker,
+  companyName,
+  discrepancyScore = 5,
+  summaryVerdict,
+  discrepancies = [],
+  docUrl
+}) {
+  const timestamp = getIstTimestamp();
+  let message = `⚠️ *CONCALL AUDIT: DISCREPANCY DETECTED*\n`;
+  message += `🏢 *${(companyName || ticker).toUpperCase()}* (${ticker.toUpperCase()})\n`;
+  message += `⚖️ *Forensic Audit Severity:* ${discrepancyScore}/10\n`;
+  message += `─────────────────────────\n`;
+  message += `🔍 *Audit Summary:*\n${summaryVerdict}\n\n`;
+
+  if (discrepancies && discrepancies.length > 0) {
+    message += `📋 *Identified Variances:*\n`;
+    for (const d of discrepancies.slice(0, 4)) {
+      message += `• *${d.category || "VARIANCE"}:*\n`;
+      if (d.audio_claim) message += `  🎙️ _Live Audio:_ "${d.audio_claim.slice(0, 140)}"\n`;
+      if (d.written_transcript_claim) message += `  📄 _Transcript:_ "${d.written_transcript_claim.slice(0, 140)}"\n`;
+      if (d.investor_implication) message += `  💡 _Impact:_ ${d.investor_implication.slice(0, 140)}\n`;
+      message += `\n`;
+    }
+  }
+
+  message += `─────────────────────────\n`;
+  if (docUrl) {
+    message += `📄 [View Official Transcript Filing](${docUrl})\n`;
+  }
   message += `_🕐 ${timestamp}_`;
 
   return sendTelegramMessage(message);

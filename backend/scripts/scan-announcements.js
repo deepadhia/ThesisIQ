@@ -272,6 +272,8 @@ export async function scan({ isDryRun = false, runUrl = null, targetTicker = nul
         const concallType = getConcallType(title, announcementText);
         if (aiResult.is_earnings_release || filingCategory === "QUARTERLY_EARNINGS") {
           deepDiveStatus = "pending_stage1";
+        } else if (concallType === "audio") {
+          deepDiveStatus = "pending_audio";
         } else if (concallType === "transcript") {
           // If transcript arrives, check if Stage 1 already ran for this stock
           const prevCompleted = await pool.query(
@@ -284,12 +286,32 @@ export async function scan({ isDryRun = false, runUrl = null, targetTicker = nul
         // 7. Alert ONLY if non-earnings routine/regulatory event (Earnings Results & Concalls are deferred to Quarterly Deep-Dive Worker for full multi-page PDF verification)
         let sentToTelegram = false;
         const isRegulatoryOrCredit = ["REGULATORY_ACTION", "CREDIT_EVENT"].includes(filingCategory);
-        const isAgm = eventAnalysis?.is_agm || title.toUpperCase().includes("AGM") || title.toUpperCase().includes("ANNUAL GENERAL MEETING");
-        const isAgmCompleted = isAgm && (title.toUpperCase().includes("OUTCOME") || title.toUpperCase().includes("PROCEEDINGS") || title.toUpperCase().includes("VOTING RESULTS"));
+        const isAgm = Boolean(
+          aiResult?.is_agm || 
+          eventAnalysis?.is_agm || 
+          title.toUpperCase().includes("AGM") || 
+          title.toLowerCase().includes("shareholders meeting") ||
+          title.toUpperCase().includes("ANNUAL GENERAL MEETING") ||
+          (ann.attachment && ann.attachment.toLowerCase().includes("agm"))
+        );
+        const isAgmCompleted = isAgm && (
+          aiResult?.agm_status === "completed" ||
+          title.toUpperCase().includes("OUTCOME") || 
+          title.toUpperCase().includes("PROCEEDINGS") || 
+          title.toUpperCase().includes("VOTING RESULTS") ||
+          (ann.attachment && (ann.attachment.toLowerCase().includes("outcome") || ann.attachment.toLowerCase().includes("proceedings")))
+        );
 
-        // Defer Stage 1 results and Stage 2 concall alerts to quarterly-deepdive-worker.js
-        const isQueuedForDeepDive = deepDiveStatus === "pending_stage1" || deepDiveStatus === "pending_stage2";
-        const shouldHaveAlerted = !isQueuedForDeepDive && (isAgmCompleted || aiResult.priority === "HIGH");
+        // Defer Stage 1 results, Stage 2 concall, and audio deep dives to quarterly-deepdive-worker.js
+        const isQueuedForDeepDive = deepDiveStatus === "pending_stage1" || deepDiveStatus === "pending_stage2" || deepDiveStatus === "pending_audio";
+        const hasMaterialAgmHighlights = isAgmCompleted && Boolean(
+          (aiResult?.agm_highlights && (Array.isArray(aiResult.agm_highlights) ? aiResult.agm_highlights.length > 0 : (aiResult.agm_highlights.trim().length > 20 && !aiResult.agm_highlights.toLowerCase().includes("null")))) ||
+          (aiResult?.key_data && aiResult.key_data !== "No specific figures disclosed." && aiResult.key_data.length > 10)
+        );
+        const shouldHaveAlerted = !isQueuedForDeepDive && (
+          aiResult.priority === "HIGH" ||
+          (isAgmCompleted && (aiResult.priority === "MEDIUM" || hasMaterialAgmHighlights))
+        );
 
         // 7a. Event-level Deduplication Guard (Check if alert sent recently for same ticker & event identity)
         let isDuplicateEvent = false;
@@ -336,8 +358,8 @@ export async function scan({ isDryRun = false, runUrl = null, targetTicker = nul
                 exchangeTimestamp: timestamp,
                 docUrl,
                 source: annSource,
-                is_agm: aiResult.is_agm,
-                agm_status: aiResult.agm_status,
+                is_agm: isAgm,
+                agm_status: isAgmCompleted ? "completed" : (aiResult.agm_status || "scheduled"),
                 agm_highlights: aiResult.agm_highlights
               }), "Telegram Alert");
               sentToTelegram = true;
@@ -359,7 +381,7 @@ export async function scan({ isDryRun = false, runUrl = null, targetTicker = nul
           source_id: sourceId,
           title_hash: hash,
           title,
-          raw_text: title,
+          raw_text: (announcementText && announcementText.length > 50) ? announcementText.substring(0, 4000) : title,
           priority: aiResult.priority,
           impact: aiResult.impact,
           confidence: aiResult.confidence,
@@ -369,10 +391,46 @@ export async function scan({ isDryRun = false, runUrl = null, targetTicker = nul
           is_earnings_release: aiResult.is_earnings_release || false,
           attachment_url: docUrl,
           filing_date: timestamp,
-          filing_category: filingCategory,
+          filing_category: isAgmCompleted ? "AGM_DISCLOSURE" : filingCategory,
           event_analysis: eventAnalysis,
-          deep_dive_status: deepDiveStatus
+          deep_dive_status: deepDiveStatus,
+          key_data: aiResult.key_data,
+          deep_dive_indicator: aiResult.deep_dive_indicator
         });
+
+        // 8b. Ingest into interquarter_events if completed AGM contains strategic commentary
+        if (isAgmCompleted && hasMaterialAgmHighlights && !isDryRun) {
+          try {
+            const eventTitle = `AGM Proceedings: ${ticker} (${new Date().getFullYear()})`;
+            const existing = await pool.query(
+              `SELECT id FROM interquarter_events WHERE stock_id = $1 AND title = $2 LIMIT 1`,
+              [stock.id, eventTitle]
+            );
+            const highlightsText = Array.isArray(aiResult.agm_highlights)
+              ? aiResult.agm_highlights.map(h => `• ${h}`).join("\n")
+              : (aiResult.agm_highlights || aiResult.key_data || "");
+
+            if (existing.rows.length === 0) {
+              await pool.query(
+                `INSERT INTO interquarter_events 
+                  (stock_id, ticker, event_date, event_type, title, description, bse_filing_url, credibility_impact)
+                 VALUES ($1, $2, $3, 'AGM_DISCLOSURE', $4, $5, $6, $7)`,
+                [
+                  stock.id,
+                  ticker,
+                  timestamp ? new Date(timestamp) : new Date(),
+                  eventTitle,
+                  `${aiResult.summary}\n\nKey Highlights:\n${highlightsText}`,
+                  docUrl,
+                  aiResult.impact === "POSITIVE" ? "STRENGTHENED" : (aiResult.impact === "NEGATIVE" ? "WEAKENED" : "NEUTRAL")
+                ]
+              );
+              console.log(`[AGM] Recorded interquarter AGM disclosure for ${ticker}`);
+            }
+          } catch (e) {
+            console.warn(`[AGM] Failed to record interquarter event for ${ticker}:`, e.message);
+          }
+        }
 
         // 9. Update Result Date if found
         if (aiResult.result_date) {
