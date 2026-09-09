@@ -13,7 +13,7 @@ echo "================================================================"
 
 # 1. Update system & install Node.js 20 LTS
 sudo apt-get update -y
-sudo apt-get install -y curl git build-essential
+sudo apt-get install -y curl git build-essential ffmpeg
 
 if ! command -v node &> /dev/null; then
   echo "Installing Node.js 20 LTS..."
@@ -73,11 +73,19 @@ if [ ! -f .env.local ]; then
     INPUT_NVIDIA_KEY="$NVIDIA_API_KEY"
   fi
 
+  if [ -z "$GEMINI_API_KEY" ]; then
+    read -sp "Enter GEMINI_API_KEY: " INPUT_GEMINI_KEY
+    echo ""
+  else
+    INPUT_GEMINI_KEY="$GEMINI_API_KEY"
+  fi
+
   cat <<EOT > .env.local
 DATABASE_URL=${INPUT_DB_URL}
 TELEGRAM_BOT_TOKEN=${INPUT_BOT_TOKEN}
 TELEGRAM_CHAT_ID=${INPUT_CHAT_ID}
 NVIDIA_API_KEY=${INPUT_NVIDIA_KEY}
+GEMINI_API_KEY=${INPUT_GEMINI_KEY}
 PORT=4000
 EOT
   echo ".env.local created securely!"

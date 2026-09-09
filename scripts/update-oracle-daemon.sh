@@ -17,6 +17,23 @@ cd "$(dirname "$0")/.."
 echo "Pulling latest code from origin main..."
 git pull origin main
 
+# 1b. Ensure system dependencies (ffmpeg) are installed automatically
+if ! command -v ffmpeg &> /dev/null; then
+  echo "Installing ffmpeg for audio processing..."
+  sudo apt-get update -y && sudo apt-get install -y ffmpeg
+fi
+
+# 1c. Ensure GEMINI_API_KEY is set in .env.local
+if [ -f .env.local ]; then
+  if ! grep -q "GEMINI_API_KEY" .env.local; then
+    echo "GEMINI_API_KEY is missing from .env.local."
+    read -sp "Enter GEMINI_API_KEY: " INPUT_GEMINI_KEY
+    echo ""
+    echo "GEMINI_API_KEY=${INPUT_GEMINI_KEY}" >> .env.local
+    echo "Added GEMINI_API_KEY to .env.local successfully!"
+  fi
+fi
+
 # 2. Install any new npm packages
 echo "Installing dependencies..."
 npm install
