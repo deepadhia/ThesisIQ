@@ -1,305 +1,461 @@
-# 🏛️ Multibagger Live — Institutional Equity Thesis Watchdog
+# 🧠 ThesisIQ — Fundamental Research & Decision Intelligence Platform
 
-A production-grade fundamental research platform for long-term equity investing. Combines **quarterly thesis governance**, **dual-lens valuation architecture**, and an **asymmetric dislocation watchdog** to track whether the investment thesis of each portfolio company is strengthening, intact, or breaking — and whether any are currently mispriced relative to their underwritten growth runway.
+A production-oriented research and decision platform for long-term equity analysis.
+
+ThesisIQ combines **quarterly thesis governance**, **dual-lens valuation analysis**, **multi-source financial data reconciliation**, and an **asymmetric valuation watchdog** to determine whether an investment thesis is strengthening, intact, under pressure, or breaking — while continuously evaluating whether the market's expectations remain consistent with the underlying business runway.
+
+> **Core principle:** Separate *business quality*, *evidence*, *valuation expectations*, and *capital allocation* instead of collapsing them into a single stock score.
 
 ---
 
 ## What This System Does
 
-```
-CORE OPERATING QUESTION:
-"If I were deciding whether to own this company today, is the original reason
-I bought it MORE credible, EQUALLY credible, or LESS credible than 3 months ago?
-And is the market currently pricing in less growth than I've underwritten?"
-```
+### Core Operating Question
+
+> **If I were deciding whether to own this company today, is the original reason I bought it MORE credible, EQUALLY credible, or LESS credible than 3 months ago?**
+>
+> **And does the current valuation leave sufficient room for execution error?**
+
+ThesisIQ evaluates these questions through two independent analytical lenses.
 
 ### The Two Independent Lenses
 
-| Lens | Purpose |
-|---|---|
-| **1. Business Thesis State** | Is the reason I own this company still valid? |
-| **2. Dual-Lens Valuation Watchdog** | Is the market pricing in less growth than I've underwritten (Reverse-DCF)? |
+| Lens                                  | Purpose                                                              |
+| ------------------------------------- | -------------------------------------------------------------------- |
+| **1. Business Thesis State**          | Is the fundamental reason for owning the company still valid?        |
+| **2. Valuation Expectation Analysis** | How much future growth is already embedded in the current valuation? |
 
-These two lenses are evaluated **independently** and synthesized only at the capital allocation decision point.
-
----
-
-## System Architecture
-
-```
-═══════════════════════════════════════════════════════════════════════════
-                  MULTI-SOURCE STATUTORY INGESTION PIPELINES
-═══════════════════════════════════════════════════════════════════════════
-  1. Concall Transcripts & Presentations   → Management Commitments & Guidance
-  2. Statutory XBRL Filings (NSE/BSE)      → Normalized P&L, Balance Sheet
-  3. LODR Corporate Announcements (Live)   → NIM Llama-3.3-70B LLM Pipeline
-  4. Daily Market Prices                   → Corporate Action Adjusted Price Sync
-                                          │
-                                          ▼
-                       PostgreSQL (Supabase) — Point-in-Time Storage
-                                          │
-                                          ▼
-═══════════════════════════════════════════════════════════════════════════
-                         4-LAYER DECISION ENGINE
-═══════════════════════════════════════════════════════════════════════════
-
- LAYER 1 — FROZEN QUANTITATIVE RANKING
- • Pure mathematical portfolio rank (18 stocks, invariant, zero runtime mutation)
-
- LAYER 2 — SHADOW KPI & ROLLING PRICE ENGINE
- • Trailing 365-day 52W High/Low | P/E denominator consistency | Unit margin tracking
-
- LAYER 3 — DRIVER CONTRACTS & FALSIFICATION KILL-SWITCHES
- • 3–6 explicit falsifiable drivers per company evaluated against NIM-extracted evidence
- • Canonical 6-state thesis enum: STRENGTHENING | INTACT | WATCH | AT_RISK | BROKEN | INSUFFICIENT_EVIDENCE
-
- LAYER 4 — DUAL-LENS CAPITAL ALLOCATION DECISION SURFACE
- • Synthesizes Thesis State + Reverse-DCF Expectation Gap → Capital allocation tier
-                                          │
-                                          ▼
-═══════════════════════════════════════════════════════════════════════════
-               ASYMMETRIC VALUATION DISLOCATION WATCHDOG (DAILY)
-═══════════════════════════════════════════════════════════════════════════
- • Reverse-DCF Solver: Derives market-implied growth from trailing P/E
- • Expectation Gap: Underwritten CAGR − Market-Implied Growth
- • Stressed Cushion: Gap after -20% growth haircut → Thesis robustness classification
- • 6 Risk Controls: Valuation gate | Asymmetry gate | Stress cushion | Thesis health | ROCE | Cash conversion
- • 7-Day Anti-Spam Cooldown: Immutable PostgreSQL cooldown per ticker
- • State Transition Justification: What changed + why it justifies attention now
-```
+The two lenses remain independent until the **capital-allocation decision surface**, preventing valuation from overriding a deteriorating thesis or business quality from automatically justifying an expensive entry.
 
 ---
 
-## Opportunity Tier Classification
+# System Architecture
 
-| Tier | Condition | Capital Action |
-|---|---|---|
-| 🟢 `TOP_CONVICTION_DISLOCATION` | Score ≥ 80, pristine cash flow, wide stressed gap | **Prime fresh capital deployment** |
-| 🟡 `COMPOUNDING_AT_FAIR_PRICE` | Healthy business, balanced risk/reward | **Hold core position** |
-| 🔵 `OVERVALUED_COMPOUNDER` | Superb execution, but priced for perfection | **Capital protection trim** |
-| 🟠 `WATCHLIST_FRICTION` | Thesis or evidence under pressure | **Pause additions** |
-| 🔴 `STRUCTURAL_VALUE_TRAP` | Broken/weakening thesis | **Zero allocation / Systematic exit** |
-
-### Verified Benchmark Behaviour (5-Case Dry Run)
-
-| Stock | TTM P/E | Stressed Cushion | Cash Integrity | Tier | Watchdog Decision |
-|---|---|---|---|---|---|
-| **HBL Engineering** | 25.0× | +10.4% `HIGHLY_RESILIENT` | 0.90 CFO/PAT, 70d | `TOP_CONVICTION_DISLOCATION` | 🟢 Alert Dispatched |
-| **Time Technoplast** | 18.2× | +6.7% `RESILIENT` | 0.85 CFO/PAT, 75d | `TOP_CONVICTION_DISLOCATION` | 🟢 Alert Dispatched |
-| **CCL Products** | 33.4× | 0.0% `SENSITIVE` | 0.80 CFO/PAT, 80d | `COMPOUNDING_AT_FAIR_PRICE` | 🟡 Gated — Fair Price |
-| **Transrail Lighting** | 13.2× | +12.8% `HIGHLY_RESILIENT` | **0.55 CFO/PAT, 115d** | `COMPOUNDING_AT_FAIR_PRICE` | 🟠 Gated — Cash Watch |
-| **Shakti Pumps** | 16.0× | N/A `BROKEN` | **0.15 CFO/PAT, 140d** | `STRUCTURAL_VALUE_TRAP` | 🔴 Gated — Value Trap |
-
----
-
-## Production Invariant Test Suites
-
-All test suites run against the live PostgreSQL database with zero mocks:
-
-```bash
-# Asymmetric Mispricing Ranking — 22/22 PASS
-node --env-file=.env.local backend/scripts/test-asymmetric-mispricing-ranking.js
-
-# Market Valuation Integrity (trailing vs. forward P/E isolation) — 33/33 PASS
-node --env-file=.env.local backend/scripts/test-market-valuation-integrity.js
-
-# Valuation Dislocation Watchdog & 7-Day Anti-Spam Cooldown — 29/29 PASS
-node --env-file=.env.local backend/scripts/test-valuation-dislocation-watchdog.js
-
-# Thesis State Engine — 8/8 PASS
-node --env-file=.env.local backend/scripts/test-thesis-state-engine.js
-
-# Driver-Level Thesis Contracts — 5/5 PASS
-node --env-file=.env.local backend/scripts/test-driver-contracts.js
-
-# Walk-Forward Replay (no future-info leakage) — 5/5 PASS
-node --env-file=.env.local backend/scripts/test-walk-forward-replay.js
-
-# Price Drawdown Avoidance & Alpha Validation — 4/4 PASS
-node --env-file=.env.local backend/scripts/test-price-drawdown-validation.js
-
-# Vitest unit tests
-npm test
+```text
+                         DATA SOURCES
+                              │
+        ┌─────────────────────┼─────────────────────┐
+        │                     │                     │
+   XBRL / Filings       Corporate Events      Market Prices
+        │                     │                     │
+   Concall Data         Management Guidance    Price History
+        │                     │                     │
+        └─────────────────────┼─────────────────────┘
+                              ▼
+                 ┌─────────────────────────┐
+                 │   INGESTION & NORMALIZE │
+                 │                         │
+                 │ • Deduplication         │
+                 │ • Validation             │
+                 │ • Point-in-time storage  │
+                 └────────────┬────────────┘
+                              ▼
+                    PostgreSQL / Supabase
+                              │
+                              ▼
+                 ┌─────────────────────────┐
+                 │     DECISION ENGINE     │
+                 ├─────────────────────────┤
+                 │ 1. Quantitative Ranking │
+                 │ 2. KPI / Price Engine   │
+                 │ 3. Thesis State Engine  │
+                 │ 4. Valuation Engine     │
+                 └────────────┬────────────┘
+                              ▼
+                 ┌─────────────────────────┐
+                 │ CAPITAL ALLOCATION      │
+                 │ DECISION SURFACE        │
+                 └────────────┬────────────┘
+                              ▼
+                 ┌─────────────────────────┐
+                 │ VALUATION WATCHDOG      │
+                 │                         │
+                 │ • Risk gates             │
+                 │ • Stress testing         │
+                 │ • State transitions      │
+                 │ • Alert qualification    │
+                 └────────────┬────────────┘
+                              ▼
+                    Notification / Telegram
 ```
 
 ---
 
-## NPM Scripts Reference
+# Decision Engine
 
-```bash
-# Development
-npm run dev                       # Start Vite frontend dev server
-npm run server:dev                # Start Express backend (with .env.local)
-npm run server                    # Start Express backend (production)
+## Layer 1 — Quantitative Ranking
 
-# Nightly Automation
-npm run reconcile:nightly         # Run full nightly reconciliation pipeline
+Pure mathematical ranking across the portfolio universe.
 
-# Valuation Watchdog
-npm run watchdog:daily            # Run daily dislocation watchdog (LIVE — sends Telegram)
-npm run watchdog:daily:dryrun     # Run daily watchdog in dry-run mode (no Telegram)
-npm run watchdog:benchmark        # Run 5-case production benchmark dry-run
+* Deterministic calculations
+* No runtime mutation of ranking inputs
+* Explicit valuation and growth assumptions
+* Reproducible outputs
 
-# Ranking & Analysis
-npm run ranking                   # Run asymmetric mispricing ranking across 18 holdings
+## Layer 2 — Market & KPI Integrity
 
-# Portfolio Universe
-npm run ranks:quarterly           # Compute quarterly universe ranks
-npm run ranks:quarterly:apply     # Compute and persist quarterly ranks to DB
+Maintains consistent market and trailing financial metrics.
 
-# Database
-npm run db:migrate                # Run database migrations
-npm run db:seed                   # Seed initial portfolio data
-npm run onboard:stock             # Onboard a new stock to the universe
+* Corporate-action-adjusted prices
+* Rolling 52-week high/low
+* TTM earnings
+* P/E denominator consistency
+* Margin and unit-economics tracking
+* Point-in-time market snapshots
+* Mathematical valuation invariants
 
-# Tests
-npm test                          # Run vitest unit tests
+## Layer 3 — Thesis Governance
+
+Each company has explicit falsifiable business drivers.
+
+```text
+STRENGTHENING
+      ↓
+INTACT
+      ↓
+WATCH
+      ↓
+AT_RISK
+      ↓
+BROKEN
+```
+
+`INSUFFICIENT_EVIDENCE` is used when the available evidence is inadequate to make a reliable state determination.
+
+Drivers are evaluated against evidence extracted from filings, announcements, presentations, and management commentary.
+
+## Layer 4 — Decision Surface
+
+The system combines:
+
+```text
+Business Thesis State
+        +
+Valuation Expectation Gap
+        +
+Quality / Cash Controls
+        ↓
+Capital Allocation Tier
 ```
 
 ---
 
-## Server Deployment (Oracle Cloud)
+# Dual-Lens Valuation Architecture
 
-The backend runs continuously on Oracle Cloud. All automation runs **on the server**, not GitHub Actions.
+ThesisIQ does not treat valuation as an absolute truth.
 
-### Nightly Cron (23:30 IST)
+Instead it asks:
 
-```bash
-# /etc/cron.d/multibagger or crontab -e
-30 23 * * * cd /path/to/multibagger-live && npm run reconcile:nightly >> /var/log/reconciliation.log 2>&1
+> **What growth is the current market price already demanding, and how much room exists between that requirement and the underwritten business trajectory?**
+
+### Reverse-DCF
+
+The valuation engine derives market-implied growth from the current trailing valuation.
+
+```text
+Expectation Gap
+=
+Underwritten CAGR
+-
+Market-Implied Growth
 ```
 
-The nightly reconciliation executes:
-1. **Daily Price Refresh** — Refreshes closing prices & trailing 365-day 52W High/Low in PostgreSQL
-2. **Async Gap Reconciler** — Ingests concall transcripts filed days after board results
-3. **BSE/NSE Announcement Scanner** — Real-time LODR ingestion via NIM Llama-3.3-70B
-4. **Commitment Reconciler** — Tracks management guidance fulfilment per quarter
-5. **Valuation Dislocation Watchdog** — Evaluates all 18 holdings against 6 risk controls; dispatches Telegram alerts for `TOP_CONVICTION_DISLOCATION` candidates with 7-day anti-spam cooldown
+### Stress Testing
 
-### Cloudflare Dispatcher
+The underwritten growth assumption is deliberately reduced by 20%.
 
-A lightweight Cloudflare Worker (`cloudflare-dispatcher/`) acts as a secure bridge for triggering backend operations via authenticated HTTP calls from external automations.
+```text
+Stress CAGR
+=
+Underwritten CAGR × 0.80
+
+Stress Cushion
+=
+Stress CAGR − Market-Implied Growth
+```
+
+This produces a deterministic robustness classification:
+
+```text
+HIGHLY_RESILIENT
+RESILIENT
+SENSITIVE
+VULNERABLE
+```
+
+The stress test is an underwriting-risk control, not a prediction of future returns.
 
 ---
 
-## Tech Stack
+# Asymmetric Valuation Watchdog
 
-| Layer | Technology |
-|---|---|
-| **Frontend** | React 18 + Vite + TypeScript + Tailwind CSS + shadcn/ui |
-| **Backend** | Node.js / Express (ESM) |
-| **Database** | Supabase (PostgreSQL) with Row Level Security |
-| **LLM Pipeline** | NVIDIA NIM — Llama-3.3-70B (filing extraction & classification) |
-| **Edge Dispatcher** | Cloudflare Workers |
-| **Charts** | Recharts + TanStack React Query |
-| **Valuation Engine** | Programmatic Reverse-DCF solver (10-year horizon, forward-discounting) |
+The daily watchdog evaluates the portfolio for candidates that simultaneously satisfy multiple risk controls.
 
----
+### Qualification Gates
 
-## Local Setup
+1. Opportunity-tier threshold
+2. Trailing valuation limit
+3. Expectation-gap threshold
+4. Minimum stressed cushion
+5. Healthy thesis state
+6. ROCE quality
+7. Cash-conversion / working-capital controls
 
-### Prerequisites
-- Node.js v18+
-- A Supabase project (PostgreSQL) with `DATABASE_URL` configured
+A candidate must pass the required controls before an alert can be dispatched.
 
-### Setup
+### State-Transition Justification
 
-```bash
-# 1. Install dependencies
-npm install
+Alerts are not generated merely because a formula remains true.
 
-# 2. Configure environment
-cp .env.example .env.local
-# Fill in SUPABASE_URL, SUPABASE_ANON_KEY, DATABASE_URL, TELEGRAM_BOT_TOKEN, GEMINI_API_KEY
+Each alert attempts to answer:
 
-# 3. Run frontend dev server
-npm run dev
+```text
+What changed?
+        +
+Why does that change justify attention now?
+```
 
-# 4. Run backend server (separate terminal)
-npm run server:dev
+This reduces repetitive notifications and makes alerts actionable.
+
+### Anti-Spam / Idempotency
+
+Telegram alerts use a PostgreSQL-backed per-ticker cooldown.
+
+```text
+Candidate qualifies
+       ↓
+Check previous dispatch
+       ↓
+ ┌─────┴─────┐
+ │           │
+Recent      Expired
+alert        cooldown
+ │           │
+ ▼           ▼
+Suppress    Dispatch
+             │
+             ▼
+        Persist event
 ```
 
 ---
 
-## Database Schema (Key Tables)
+# Opportunity Classification
 
-| Table | Description |
-|---|---|
-| `stocks` | Portfolio universe — thesis state, conviction, capital action directives |
-| `prices` | Daily corporate-action adjusted price history |
-| `quarterly_snapshots` | Consolidated quarterly TTM metrics per stock (PAT, EPS, P/E, ROCE, CFO/PAT) |
-| `market_data_snapshots` | Point-in-time market data with math-verified invariants (MCap = Price × Shares) |
-| `valuation_dislocation_alerts` | Immutable log of watchdog alert dispatches with 7-day cooldown enforcement |
-| `xbrl_filings` | Statutory quarterly & annual exchange filing records |
-| `xbrl_metrics_quarterly` | Normalized XBRL balance sheet & P&L metrics |
-| `financial_results` | Consolidated quarterly financial performance |
-| `management_promises` | Tracked management commitments & fulfillment status |
-| `corporate_announcements` | Real-time BSE/NSE LODR filings |
-| `transcript_analysis` | Concall transcript extraction & credibility scoring |
-
-For detailed schema documentation, see [`docs/DATABASE_SCHEMA_GUIDE.md`](docs/DATABASE_SCHEMA_GUIDE.md).
+| Tier                            | Meaning                                                       | Capital Action                     |
+| ------------------------------- | ------------------------------------------------------------- | ---------------------------------- |
+| 🟢 `TOP_CONVICTION_DISLOCATION` | Strong asymmetry with required risk controls satisfied        | Prime fresh-capital candidate      |
+| 🟡 `COMPOUNDING_AT_FAIR_PRICE`  | Healthy business with balanced risk/reward                    | Hold core position                 |
+| 🔵 `OVERVALUED_COMPOUNDER`      | Strong business but valuation leaves limited margin of safety | Capital protection / avoid chasing |
+| 🟠 `WATCHLIST_FRICTION`         | Thesis or evidence requires additional validation             | Pause incremental capital          |
+| 🔴 `STRUCTURAL_VALUE_TRAP`      | Broken or materially deteriorating thesis                     | Zero allocation / systematic exit  |
 
 ---
 
-## Repository Structure
+# Production Benchmark Cases
 
+The watchdog is tested against deliberately constructed scenarios representing different failure modes.
+
+| Case               | Valuation | Stress Cushion | Cash Integrity     | Result             |
+| ------------------ | --------: | -------------: | ------------------ | ------------------ |
+| HBL Engineering    |     25.0× |         +10.4% | 0.90 CFO/PAT, 70d  | 🟢 Qualified       |
+| Time Technoplast   |     18.2× |          +6.7% | 0.85 CFO/PAT, 75d  | 🟢 Qualified       |
+| CCL Products       |     33.4× |           0.0% | 0.80 CFO/PAT, 80d  | 🟡 Fair-price gate |
+| Transrail Lighting |     13.2× |         +12.8% | 0.55 CFO/PAT, 115d | 🟠 Cash-flow gate  |
+| Shakti Pumps       |         — |  Broken thesis | 0.15 CFO/PAT, 140d | 🔴 Structural gate |
+
+The benchmark cases demonstrate that **cheap valuation alone does not produce an actionable allocation signal**.
+
+---
+
+# Data Reliability & Integrity
+
+ThesisIQ treats data correctness as a first-class system concern.
+
+### Key invariants
+
+* No manual database patching
+* Point-in-time financial snapshots
+* Trailing and forward valuation isolation
+* Corporate-action-aware price history
+* Mathematical market-cap validation
+* No static ticker-specific decision branches
+* Explicit evidence provenance
+* Deterministic decision rules
+
+### Example
+
+```text
+Incorrect:
+Forward PAT → TTM P/E → Reverse DCF
+
+Correct:
+TTM PAT → TTM P/E
+                 │
+                 ▼
+          Market-implied growth
+                 │
+                 ▼
+        Compare against independently
+        underwritten future growth
 ```
-multibagger-live/
+
+This prevents forward earnings assumptions from contaminating the trailing valuation layer.
+
+---
+
+# Testing
+
+ThesisIQ uses invariant-driven testing rather than relying exclusively on happy-path unit tests.
+
+```text
+Asymmetric Mispricing Ranking       22/22 PASS
+Market Valuation Integrity          33/33 PASS
+Valuation Watchdog                  29/29 PASS
+Thesis State Engine                  8/8 PASS
+Driver-Level Contracts               5/5 PASS
+Walk-Forward Replay                  5/5 PASS
+Drawdown / Alpha Validation          4/4 PASS
+Production Benchmark                 5/5 PASS
+Vitest                                PASS
+```
+
+### Walk-Forward Validation
+
+Historical replay is used to verify that decision logic does not consume information that would not have been available at the decision point.
+
+This is particularly important for financial systems where accidental future-information leakage can make backtests appear significantly better than they actually are.
+
+---
+
+# Automation
+
+The backend runs continuously on Oracle Cloud.
+
+### Nightly reconciliation
+
+```text
+Daily Price Refresh
+        ↓
+Inter-Quarter Data Reconciliation
+        ↓
+Corporate Announcement Processing
+        ↓
+Management Commitment Reconciliation
+        ↓
+Valuation Watchdog
+        ↓
+Qualified Notifications
+```
+
+The system also supports standalone daily watchdog execution and benchmark dry-runs.
+
+---
+
+# Cloudflare Dispatcher
+
+A lightweight Cloudflare Worker provides an authenticated bridge for triggering backend operations externally without exposing the backend execution surface directly.
+
+---
+
+# Tech Stack
+
+| Layer          | Technology                                       |
+| -------------- | ------------------------------------------------ |
+| Frontend       | React, Vite, TypeScript, Tailwind CSS, shadcn/ui |
+| Backend        | Node.js, Express, ESM                            |
+| Database       | PostgreSQL / Supabase                            |
+| LLM Pipeline   | NVIDIA NIM / Llama-3.3-70B                       |
+| Edge           | Cloudflare Workers                               |
+| Data Access    | SQL / PostgreSQL                                 |
+| Charts         | Recharts                                         |
+| Client State   | TanStack React Query                             |
+| Valuation      | Programmatic Reverse-DCF                         |
+| Notifications  | Telegram                                         |
+| Infrastructure | Oracle Cloud                                     |
+
+---
+
+# Database Model
+
+Core tables include:
+
+```text
+stocks
+prices
+quarterly_snapshots
+market_data_snapshots
+valuation_dislocation_alerts
+xbrl_filings
+xbrl_metrics_quarterly
+financial_results
+management_promises
+corporate_announcements
+transcript_analysis
+```
+
+The database acts as the **point-in-time source of truth** for financial, market, evidence, and decision-state data.
+
+---
+
+# Repository Structure
+
+```text
+thesis-iq/
+│
 ├── backend/
-│   ├── scripts/            ← Production runners & test suites
-│   │   ├── archive/        ← One-off backfill/migration scripts (preserved, not active)
-│   │   ├── run-nightly-reconciliation.js       ← Core nightly pipeline
-│   │   ├── run-daily-valuation-watchdog.js     ← Daily dislocation watchdog
-│   │   ├── run-asymmetric-mispricing-ranking.js ← Interactive ranking runner
-│   │   ├── test-*.js                           ← Invariant test suites
+│   ├── scripts/
+│   │   ├── archive/
+│   │   ├── run-nightly-reconciliation.js
+│   │   ├── run-daily-valuation-watchdog.js
+│   │   ├── run-asymmetric-mispricing-ranking.js
+│   │   └── test-*.js
+│   │
+│   ├── services/
+│   │   ├── asymmetric-mispricing-ranking.service.js
+│   │   ├── valuation-dislocation-watchdog.service.js
+│   │   ├── portfolio-market-valuation.service.js
+│   │   ├── thesis-state-engine.service.js
+│   │   ├── announcement.service.js
 │   │   └── ...
-│   ├── services/           ← Core business logic services
-│   │   ├── asymmetric-mispricing-ranking.service.js    ← Reverse-DCF & opportunity tier engine
-│   │   ├── valuation-dislocation-watchdog.service.js   ← Alert dispatch & cooldown engine
-│   │   ├── portfolio-market-valuation.service.js       ← TTM ingestion & math invariants
-│   │   ├── thesis-state-engine.service.js              ← 6-state thesis classification
-│   │   ├── announcement.service.js                     ← BSE/NSE LODR scanner
-│   │   └── ...
-│   ├── workers/            ← Background processing workers
-│   ├── routes/             ← Express API routes
-│   ├── controllers/        ← Route handlers
-│   ├── db/                 ← Database pool & utilities
-│   └── server.js           ← Express app entrypoint
-├── cloudflare-dispatcher/  ← Cloudflare Worker (secure HTTP trigger bridge)
-├── docs/                   ← Architecture docs & engineering learnings
-│   ├── LEARNINGS_VALUATION_DUAL_LENS.md
-│   └── DATABASE_SCHEMA_GUIDE.md
-├── node_downloader/        ← BSE/NSE filing downloader (independent Node service)
-├── src/                    ← React frontend (Vite + TypeScript)
-└── supabase/               ← Supabase migrations & config
+│   │
+│   ├── workers/
+│   ├── routes/
+│   ├── controllers/
+│   ├── db/
+│   └── server.js
+│
+├── cloudflare-dispatcher/
+├── docs/
+├── node_downloader/
+├── src/
+└── supabase/
 ```
 
 ---
 
-## Key Design Invariants
+# Engineering Design Principles
 
-1. **No Manual Database Patching** — Never run ad-hoc SQL `UPDATE`/`DELETE` to override data. Fix the underlying code.
-2. **Multi-Stage Corporate Actions** — Board approval ≠ `Achieved`. Only final regulatory clearance (NCLT, SEBI) can close a commitment.
-3. **No Static Ticker Branches** — No hardcoded `if (ticker === "ANANTRAJ")` logic anywhere in the codebase.
-4. **Trailing TTM Isolation** — Trailing and forward P/E are strictly isolated; the Reverse-DCF forward-discounts estimates to avoid double-counting growth.
-5. **Calibrated Language** — The watchdog says `CANDIDATE MEETS ASYMMETRIC-DISLOCATION CRITERIA`, not `MISPRICING DETECTED`. Risk controls, not valuation truth.
-6. **7-Day Anti-Spam** — Telegram alerts enforce an immutable 7-day per-ticker cooldown in PostgreSQL.
-
----
-
-## Documentation
-
-| Document | Description |
-|---|---|
-| [`docs/LEARNINGS_VALUATION_DUAL_LENS.md`](docs/LEARNINGS_VALUATION_DUAL_LENS.md) | Institutional learnings: CCL, HSCL trailing vs. forward, Transrail cash-flow gate |
-| [`docs/DATABASE_SCHEMA_GUIDE.md`](docs/DATABASE_SCHEMA_GUIDE.md) | Full database schema reference |
-| [`docs/INTER_QUARTER_EVENT_RECONCILER_SPEC.md`](docs/INTER_QUARTER_EVENT_RECONCILER_SPEC.md) | Interquarter event reconciliation specification |
-| [`docs/GOOGLE_DRIVE_SETUP.md`](docs/GOOGLE_DRIVE_SETUP.md) | Google Drive integration setup |
+1. **Data integrity before decision logic**
+2. **Point-in-time correctness**
+3. **Deterministic decision surfaces**
+4. **No manual database overrides**
+5. **No ticker-specific hardcoded business logic**
+6. **Trailing and forward valuation isolation**
+7. **Explicit falsifiable thesis drivers**
+8. **Risk controls before capital-allocation signals**
+9. **Idempotent notification behaviour**
+10. **Calibrated language — models produce candidates, not valuation truth**
+11. **Historical replay must not leak future information**
+12. **Failures should be observable and recoverable**
 
 ---
 
-## Status
+# Status
 
-**Status**: Production  
-**Universe**: 18 portfolio holdings  
-**License**: Private / Proprietary
+**Status:** Production
+**Current Universe:** 18 companies
+**Architecture:** Full-stack / data-processing platform
+**License:** Private / Proprietary
+
+> ThesisIQ is a personal research and engineering project. It is not investment advice.
