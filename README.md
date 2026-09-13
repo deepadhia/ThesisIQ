@@ -1,295 +1,305 @@
-# 🏛️ MULTIBAGGER LIVE — QUARTERLY FUNDAMENTAL THESIS WATCHDOG
+# 🏛️ Multibagger Live — Institutional Equity Thesis Watchdog
 
-```text
-========================================================================================
- STATUS: FROZEN GOVERNANCE V1.0 (PRODUCTION THESIS WATCHDOG)
-========================================================================================
+A production-grade fundamental research platform for long-term equity investing. Combines **quarterly thesis governance**, **dual-lens valuation architecture**, and an **asymmetric dislocation watchdog** to track whether the investment thesis of each portfolio company is strengthening, intact, or breaking — and whether any are currently mispriced relative to their underwritten growth runway.
 
-PRODUCT DEFINITION:
-A point-in-time research system that tracks whether the fundamental thesis of each 
-portfolio/watchlist company is strengthening, intact, weakening, or broken based on 
-quarterly financials, management execution, order book/business developments, 
-balance-sheet changes, and previously stated commitments.
+---
 
+## What This System Does
+
+```
 CORE OPERATING QUESTION:
 "If I were deciding whether to own this company today, is the original reason
-I bought it MORE credible, EQUALLY credible, or LESS credible than 3 months ago?"
-
-WHAT THIS IS:
-• Point-in-time fundamental thesis watchdog & quarterly governance assistant
-• Systematic business deterioration filter & downside guardrail
-• Historical point-in-time evidence reconstruction and audit tool
-• Clear separation between Business Thesis State and Valuation Context
-
-WHAT THIS IS NOT:
-• NOT an automated algorithmic trading engine
-• NOT a stop-loss / trailing-exit price generator
-• NOT a price-timing or entry/exit optimizer
-• NOT a historical backtest optimization toy
-
-THE TWO INDEPENDENT LENSES:
-┌──────────────────────────────────────────────────────────────────────────────────────┐
-│ 1. BUSINESS THESIS STATE (Did the reason I own this company change?)                 │
-│    • 🟢 STRENGTHENING: Specific evidence supporting the core growth catalyst surged.  │
-│    • 🟢 INTACT: Original thesis is working; no material deterioration.               │
-│    • 🟡 WATCH: Temporary margin friction, 1-quarter noise, or evidence quality gap.  │
-│    • 🟠 AT RISK: Multiple structural pillars deteriorating (e.g. margin collapse).   │
-│    • 🔴 BROKEN: Original thesis demonstrably invalidated.                            │
-│    • ⚪ INSUFFICIENT EVIDENCE: Missing statutory disclosure (Never invent data).     │
-├──────────────────────────────────────────────────────────────────────────────────────┤
-│ 2. VALUATION CONTEXT (What expectations are already priced in?)                      │
-│    • Cheap / Deep Value Dislocation                                                  │
-│    • Fair / Re-rated Multiple                                                        │
-│    • Expensive / Priced for Perfection                                               │
-│    • Vulnerable / Multiple Squeeze                                                   │
-├──────────────────────────────────────────────────────────────────────────────────────┤
-│ 3. HUMAN CAPITAL ALLOCATION DECISION                                                 │
-│    • Strengthening + Fair/Cheap  ➔ Consider adding capital                           │
-│    • Strengthening + Expensive   ➔ Hold core position; do not chase at ATH           │
-│    • Intact + Fair/Cheap         ➔ Maintain core allocation to compound              │
-│    • At Risk                     ➔ Stop adding capital; review for turnaround        │
-│    • Broken                      ➔ Exit candidate                                    │
-└──────────────────────────────────────────────────────────────────────────────────────┘
-========================================================================================
+I bought it MORE credible, EQUALLY credible, or LESS credible than 3 months ago?
+And is the market currently pricing in less growth than I've underwritten?"
 ```
+
+### The Two Independent Lenses
+
+| Lens | Purpose |
+|---|---|
+| **1. Business Thesis State** | Is the reason I own this company still valid? |
+| **2. Dual-Lens Valuation Watchdog** | Is the market pricing in less growth than I've underwritten (Reverse-DCF)? |
+
+These two lenses are evaluated **independently** and synthesized only at the capital allocation decision point.
 
 ---
 
-## 🚀 Unified System Architecture: Multi-Source Ingestion & 4-Layer Decision Engine
+## System Architecture
 
-The platform integrates **AI-Powered Multi-Source Ingestion** with a **Strict 4-Layer Decision Engine**, ensuring real-time news extraction, empirical valuation context, driver falsification, and capital allocation complement each other harmoniously:
-
-```text
-═══════════════════════════════════════════════════════════════════════════════════════════════
-                      🏛️ MULTI-SOURCE STATUTORY INGESTION PIPELINES
-═══════════════════════════════════════════════════════════════════════════════════════════════
-  1. Concall Transcripts & Presentations   ➔ Map-Reduce Parser (Management Commitments & Guidance)
-  2. Statutory XBRL Filings (NSE/BSE)       ➔ Deep XML Parser (P&L, Unit Margins, Balance Sheet)
-  3. LODR Corporate Announcements (Live)    ➔ NIM Llama-3.3-70B Pipeline (Order Wins, Schemes, AGMs)
-  4. Daily Market Prices & Volumes          ➔ Corporate Action Adjusted Daily Price Sync
+```
+═══════════════════════════════════════════════════════════════════════════
+                  MULTI-SOURCE STATUTORY INGESTION PIPELINES
+═══════════════════════════════════════════════════════════════════════════
+  1. Concall Transcripts & Presentations   → Management Commitments & Guidance
+  2. Statutory XBRL Filings (NSE/BSE)      → Normalized P&L, Balance Sheet
+  3. LODR Corporate Announcements (Live)   → NIM Llama-3.3-70B LLM Pipeline
+  4. Daily Market Prices                   → Corporate Action Adjusted Price Sync
                                           │
                                           ▼
-                      Point-in-Time Data Storage & Provenance
-               (Cryptographic File Hashes + Discrepancy Audit Log)
+                       PostgreSQL (Supabase) — Point-in-Time Storage
                                           │
                                           ▼
-═══════════════════════════════════════════════════════════════════════════════════════════════
-                             🏛️ THE 4 CANONICAL DECISION LAYERS
-═══════════════════════════════════════════════════════════════════════════════════════════════
- ┌─────────────────────────────────────────────────────────────────────────────────────────────┐
- │ 🟢 LAYER 1: FROZEN QUANTITATIVE RANKING LAYER (v1.0 Immutable Baseline)                     │
- │ • Pure mathematical quantitative portfolio rank (18/18 invariant, zero runtime mutation).   │
- └──────────────────────────────────────────────┬──────────────────────────────────────────────┘
-                                                │
-                                                ▼
- ┌─────────────────────────────────────────────────────────────────────────────────────────────┐
- │ 🔍 LAYER 2: SHADOW KPI & ROLLING PRICE ENGINE (Data Reliability)                            │
- │ • Trailing 365-day Rolling 52-Week High/Low calculation (No lifetime peak bugs).            │
- │ • Point-in-time PE denominator consistency & unit margin quality tracking (>10% EBITDA).    │
- └──────────────────────────────────────────────┬──────────────────────────────────────────────┘
-                                                │
-                                                ▼
- ┌─────────────────────────────────────────────────────────────────────────────────────────────┐
- │ 🛡️ LAYER 3: DRIVER CONTRACTS, VALUATION CONTEXT & FALSIFICATION KILL-SWITCHES               │
- │ • 3–6 explicit falsifiable drivers per company evaluated against NIM-extracted evidence.   │
- │ • Calibrated Kill-Switches:                                                                 │
- │   - HBLENGINE: Quarterly rev < ₹700 Cr OR Kavach pace < 1,000 km/yr (Q1-FY27 pass).         │
- │   - GRAVITA: Anchor Lead spread < ₹19k/MT OR Copper util < 50% for 2Q (Sustainable).        │
- │   - HSCL: Failure to convert Sample B to binding off-takes in 18M (Sample testing active).  │
- │   - SHAKTIPUMP: Corrected ₹1,000 Cr executable book; gated on EBITDA margin recovery >14%.  │
- │ • Context Lenses: Valuation Context (Deep Value, Fair, Priced for Perfection).              │
- │ • Canonical 6-State Enum: STRENGTHENING | STABLE | UNDER_EVALUATION | WEAKENING | BROKEN    │
- └──────────────────────────────────────────────┬──────────────────────────────────────────────┘
-                                                │
-                                                ▼
- ┌─────────────────────────────────────────────────────────────────────────────────────────────┐
- │ 🎯 LAYER 4: CAPITAL ALLOCATION DECISION SURFACE (Actionability Matrix)                      │
- │ • Synthesizes Layer 3 Thesis State + Layer 2 Consolidation Depth & Unit Margins:            │
- │   🟢 STRONG ADD / BUY (4): HBLENGINE (-37%), TIMETECHNO (-25%), HSCL (-20%), ANANTRAJ (-16%)│
- │   🔵 ACCUMULATE ON DIPS (7): GRAVITA, SKIPPER, LUMAXTECH, JYOTICNC, POLICYBZR, SBCL, CCL    │
- │   🟡 HOLD / MONITOR CORE (3): SJS, QPOWER, INOXINDIA                                        │
- │   🟠 HOLD / ACTIVE WATCH (4 Gated): ELECON (Benzlers margin), JSLL, TRANSRAILL, SHAKTIPUMP  │
- └─────────────────────────────────────────────────────────────────────────────────────────────┘
+═══════════════════════════════════════════════════════════════════════════
+                         4-LAYER DECISION ENGINE
+═══════════════════════════════════════════════════════════════════════════
+
+ LAYER 1 — FROZEN QUANTITATIVE RANKING
+ • Pure mathematical portfolio rank (18 stocks, invariant, zero runtime mutation)
+
+ LAYER 2 — SHADOW KPI & ROLLING PRICE ENGINE
+ • Trailing 365-day 52W High/Low | P/E denominator consistency | Unit margin tracking
+
+ LAYER 3 — DRIVER CONTRACTS & FALSIFICATION KILL-SWITCHES
+ • 3–6 explicit falsifiable drivers per company evaluated against NIM-extracted evidence
+ • Canonical 6-state thesis enum: STRENGTHENING | INTACT | WATCH | AT_RISK | BROKEN | INSUFFICIENT_EVIDENCE
+
+ LAYER 4 — DUAL-LENS CAPITAL ALLOCATION DECISION SURFACE
+ • Synthesizes Thesis State + Reverse-DCF Expectation Gap → Capital allocation tier
+                                          │
+                                          ▼
+═══════════════════════════════════════════════════════════════════════════
+               ASYMMETRIC VALUATION DISLOCATION WATCHDOG (DAILY)
+═══════════════════════════════════════════════════════════════════════════
+ • Reverse-DCF Solver: Derives market-implied growth from trailing P/E
+ • Expectation Gap: Underwritten CAGR − Market-Implied Growth
+ • Stressed Cushion: Gap after -20% growth haircut → Thesis robustness classification
+ • 6 Risk Controls: Valuation gate | Asymmetry gate | Stress cushion | Thesis health | ROCE | Cash conversion
+ • 7-Day Anti-Spam Cooldown: Immutable PostgreSQL cooldown per ticker
+ • State Transition Justification: What changed + why it justifies attention now
 ```
 
 ---
 
-## 🏛️ System Evolution & Milestone Engineering Architecture
+## Opportunity Tier Classification
 
-The platform's governance and watchdog capabilities are structured across certified engineering modules:
+| Tier | Condition | Capital Action |
+|---|---|---|
+| 🟢 `TOP_CONVICTION_DISLOCATION` | Score ≥ 80, pristine cash flow, wide stressed gap | **Prime fresh capital deployment** |
+| 🟡 `COMPOUNDING_AT_FAIR_PRICE` | Healthy business, balanced risk/reward | **Hold core position** |
+| 🔵 `OVERVALUED_COMPOUNDER` | Superb execution, but priced for perfection | **Capital protection trim** |
+| 🟠 `WATCHLIST_FRICTION` | Thesis or evidence under pressure | **Pause additions** |
+| 🔴 `STRUCTURAL_VALUE_TRAP` | Broken/weakening thesis | **Zero allocation / Systematic exit** |
 
-### 1. Phase 1 — Evidence Lineage & Provenance Certification
-* **Objective:** Ensure every thesis claim is anchored to statutory exchange filings with strict cryptographic provenance.
-* **Core Artifacts:** [`reports/thesis_board/EVIDENCE_LINEAGE_CERTIFICATION_18_STOCKS.md`](file:///f:/Personal%20Projects/multibagger-live/reports/thesis_board/EVIDENCE_LINEAGE_CERTIFICATION_18_STOCKS.md) & `.json`
-* **Invariant:** Unanchored/unprovenanced claims fail-closed to `INSUFFICIENT_EVIDENCE`. Zero speculative assertions.
+### Verified Benchmark Behaviour (5-Case Dry Run)
 
-### 2. Phase 2 — Multi-Source Asynchronous Gap Reconciliation
-* **Objective:** Synchronize LODR board outcome filings, detailed quarterly financial XBRLs, and concall transcripts filed days later.
-* **Core Service:** [`backend/services/transcripts.service.js`](file:///f:/Personal%20Projects/multibagger-live/backend/services/transcripts.service.js) & [`backend/workers/commitment-reconciler-worker.js`](file:///f:/Personal%20Projects/multibagger-live/backend/workers/commitment-reconciler-worker.js).
-
-### 3. Phase 3 — Driver-Level Falsifiable Thesis Contracts
-* **Objective:** Deconstruct each stock's investment thesis into 3–6 explicit, falsifiable operational drivers with strict kill-switches.
-* **Core Artifacts:** [`reports/thesis_board/DRIVER_LEVEL_THESIS_CONTRACTS_18_STOCKS.md`](file:///f:/Personal%20Projects/multibagger-live/reports/thesis_board/DRIVER_LEVEL_THESIS_CONTRACTS_18_STOCKS.md) & [`reports/thesis_board/FALSIFIABLE_THESIS_TRACKING_FRAMEWORK.md`](file:///f:/Personal%20Projects/multibagger-live/reports/thesis_board/FALSIFIABLE_THESIS_TRACKING_FRAMEWORK.md).
-* **Test Suite:** [`backend/scripts/test-driver-contracts.js`](file:///f:/Personal%20Projects/multibagger-live/backend/scripts/test-driver-contracts.js) (5/5 PASS).
-
-### 4. Phase 4b — Longitudinal Point-in-Time Walk-Forward Replay
-* **Objective:** Replay the thesis engine quarter-by-quarter across 10 quarters (FY24-Q1 through Q1-FY27) with zero future-information leakage.
-* **Core Artifacts:** [`reports/thesis_board/WALK_FORWARD_REPLAY_FY24_Q1FY27_18_STOCKS.md`](file:///f:/Personal%20Projects/multibagger-live/reports/thesis_board/WALK_FORWARD_REPLAY_FY24_Q1FY27_18_STOCKS.md) & `.json`.
-* **Test Suite:** [`backend/scripts/test-walk-forward-replay.js`](file:///f:/Personal%20Projects/multibagger-live/backend/scripts/test-walk-forward-replay.js) (5/5 PASS).
-
-### 5. Phase 4c — 3-Layer Disagreement Diagnostic & Trajectory Independence Audit
-* **Objective:** Prove statistical independence between Layer 1 numerical ranking bonuses and Layer 3 fundamental thesis states.
-* **Core Artifacts:** [`reports/thesis_board/RANK_VS_THESIS_DISAGREEMENT_AUDIT.md`](file:///f:/Personal%20Projects/multibagger-live/reports/thesis_board/RANK_VS_THESIS_DISAGREEMENT_AUDIT.md) & [`reports/thesis_board/THREE_LAYER_DISAGREEMENT_MATRIX.md`](file:///f:/Personal%20Projects/multibagger-live/reports/thesis_board/THREE_LAYER_DISAGREEMENT_MATRIX.md).
-
-### 6. Phase 4e — Thesis-State vs Price-Drawdown & Operational Alpha Validation
-* **Objective:** Empirically validate that deterioration flags precede stock price drawdowns (avoiding 72.5% drawdown in Elecon and 87.2% in Shakti) while strengthening states lead operational compounding.
-* **Core Artifacts:** [`reports/thesis_board/THESIS_STATE_PRICE_DRAWDOWN_VALIDATION_18_STOCKS.md`](file:///f:/Personal%20Projects/multibagger-live/reports/thesis_board/THESIS_STATE_PRICE_DRAWDOWN_VALIDATION_18_STOCKS.md) & `.json`.
-* **Test Suite:** [`backend/scripts/test-price-drawdown-validation.js`](file:///f:/Personal%20Projects/multibagger-live/backend/scripts/test-price-drawdown-validation.js) (4/4 PASS).
-
-### 7. Phase 4f — Master Capital Allocation & Actionability Framework
-* **Objective:** Synthesize ranking, trailing 365-day 52-week cycle windowing, and thesis health into actionable decision tiers (Strong Add, Dips, Hold, Active Watch).
-* **Core Artifacts:** [`reports/thesis_board/CAPITAL_ALLOCATION_ACTIONABILITY_FRAMEWORK_18_STOCKS.md`](file:///f:/Personal%20Projects/multibagger-live/reports/thesis_board/CAPITAL_ALLOCATION_ACTIONABILITY_FRAMEWORK_18_STOCKS.md) & `.json`.
-* **Master Orchestrator:** `npm run watchdog:quarterly` ([`backend/scripts/run-quarterly-watchdog-review.js`](file:///f:/Personal%20Projects/multibagger-live/backend/scripts/run-quarterly-watchdog-review.js)).
+| Stock | TTM P/E | Stressed Cushion | Cash Integrity | Tier | Watchdog Decision |
+|---|---|---|---|---|---|
+| **HBL Engineering** | 25.0× | +10.4% `HIGHLY_RESILIENT` | 0.90 CFO/PAT, 70d | `TOP_CONVICTION_DISLOCATION` | 🟢 Alert Dispatched |
+| **Time Technoplast** | 18.2× | +6.7% `RESILIENT` | 0.85 CFO/PAT, 75d | `TOP_CONVICTION_DISLOCATION` | 🟢 Alert Dispatched |
+| **CCL Products** | 33.4× | 0.0% `SENSITIVE` | 0.80 CFO/PAT, 80d | `COMPOUNDING_AT_FAIR_PRICE` | 🟡 Gated — Fair Price |
+| **Transrail Lighting** | 13.2× | +12.8% `HIGHLY_RESILIENT` | **0.55 CFO/PAT, 115d** | `COMPOUNDING_AT_FAIR_PRICE` | 🟠 Gated — Cash Watch |
+| **Shakti Pumps** | 16.0× | N/A `BROKEN` | **0.15 CFO/PAT, 140d** | `STRUCTURAL_VALUE_TRAP` | 🔴 Gated — Value Trap |
 
 ---
 
-## 🖥️ Server Deployment & Nightly Reconciliation Cron
+## Production Invariant Test Suites
 
-The platform runs continuously on the production Oracle Cloud Server. All scheduled crons run **on the server**, not on GitHub Actions.
-
-### 1. In-Process 24/7 Server Daemon (Recommended)
-Starting the Express server automatically arms the in-process nightly scheduler ([`backend/services/nightly-scheduler.service.js`](file:///f:/Personal%20Projects/multibagger-live/backend/services/nightly-scheduler.service.js)):
-```bash
-# Start backend server via PM2 or node:
-npm run server
-# or in dev mode:
-npm run server:dev
-```
-
-### 2. Standalone System Crontab (Server Crons)
-If running via Linux system crontab on the production server (`crontab -e`):
+All test suites run against the live PostgreSQL database with zero mocks:
 
 ```bash
-# 🌙 1. Nightly Price Refresh & Ingestion Cron (Every night at 23:30 IST / 18:00 UTC)
-30 23 * * * cd /path/to/multibagger-live && npm run reconcile:nightly >> /var/log/reconciliation.log 2>&1
+# Asymmetric Mispricing Ranking — 22/22 PASS
+node --env-file=.env.local backend/scripts/test-asymmetric-mispricing-ranking.js
 
-# 🏛️ 2. Bi-Monthly / Quarterly Thesis Watchdog Review (Runs on the 15th of post-earnings months: Feb, May, Aug, Nov at 02:00 IST)
-0 2 15 2,5,8,11 * cd /path/to/multibagger-live && npm run watchdog:quarterly >> /var/log/watchdog_quarterly.log 2>&1
+# Market Valuation Integrity (trailing vs. forward P/E isolation) — 33/33 PASS
+node --env-file=.env.local backend/scripts/test-market-valuation-integrity.js
 
-# ⏱️ 3. Alternative: Bi-Monthly Schedule (Runs on the 1st of every 2nd month at 02:00 IST)
-0 2 1 */2 * cd /path/to/multibagger-live && npm run watchdog:quarterly >> /var/log/watchdog_quarterly.log 2>&1
-```
+# Valuation Dislocation Watchdog & 7-Day Anti-Spam Cooldown — 29/29 PASS
+node --env-file=.env.local backend/scripts/test-valuation-dislocation-watchdog.js
 
-### 3. What the Server Executes Every Night at 23:30 IST
-1. **Daily Price Refresh**: Refreshes closing prices and computes trailing 365-day Rolling 52W Highs/Lows in PostgreSQL.
-2. **Asynchronous Gap Reconciler**: Ingests concall transcripts & presentations filed days after board results.
-3. **Announcement & AGM Scanner**: Ingests LODR filings across NSE + BSE (`Analyst / Investor Meet`, `Company Update`, `Result`, etc.) via NIM Llama 3.3.
-4. **Multi-Year Growth Catalyst Audit**: Identifies major order wins and 2-year revenue roadmaps.
-5. **Layer 4 Actionability Matrix Update**: Recomputes consolidation depths and updates `CAPITAL_ALLOCATION_ACTIONABILITY_FRAMEWORK_18_STOCKS.md` with new closing prices.
-6. **Idempotent Morning Digest**: Deduplicates alerts using SHA-256 hashes; sends a clean morning digest to Telegram with zero repetitions.
-
-### 4. What the Server Executes During Quarterly/Bi-Monthly Reviews
-1. **Driver Contract Evaluation**: Re-evaluates 3–6 explicit drivers per stock against freshly filed quarterly financials.
-2. **Falsification Trigger Testing**: Tests live metrics against explicit threshold kill-switches (e.g. margin floors, volume milestones).
-3. **Layer 4 Capital Allocation Matrix**: Filters universe by 52W high consolidation depth, unit margin quality (>10% EBITDA), and debt trends.
-4. **Automated Regression Test Run**: Executes the 4-layer invariant test suite (Thesis State, Contracts, Replay, Drawdown Validation) to verify 100% compliance.
-
----
-
-## 📊 Live Master Watchdog Report Generation
-
-To generate the comprehensive 18-stock quarterly thesis review & capital allocation matrix at any time:
-```bash
-npm run watchdog:quarterly
-```
-This automatically updates:
-- [`reports/thesis_board/CAPITAL_ALLOCATION_ACTIONABILITY_FRAMEWORK_18_STOCKS.md`](file:///f:/Personal%20Projects/multibagger-live/reports/thesis_board/CAPITAL_ALLOCATION_ACTIONABILITY_FRAMEWORK_18_STOCKS.md)
-- [`reports/thesis_board/FALSIFIABLE_THESIS_TRACKING_FRAMEWORK.md`](file:///f:/Personal%20Projects/multibagger-live/reports/thesis_board/FALSIFIABLE_THESIS_TRACKING_FRAMEWORK.md)
-- [`reports/thesis_board/DRIVER_LEVEL_THESIS_CONTRACTS_18_STOCKS.md`](file:///f:/Personal%20Projects/multibagger-live/reports/thesis_board/DRIVER_LEVEL_THESIS_CONTRACTS_18_STOCKS.md)
-- [`reports/thesis_board/capital-allocation-actionability-framework.json`](file:///f:/Personal%20Projects/multibagger-live/reports/thesis_board/capital-allocation-actionability-framework.json)
-
----
-
-## 🛡️ Verified Universe Data Quality
-
-- **Total Files Audited**: 587 statutory filings across 20 focus compounders (`FY24-Q1` through `FY27-Q1`).
-- **Binary Integrity**: 479 valid binary `%PDF` documents, 108 valid XBRL `<?xml` documents.
-- **Data Quality**: 0 corrupted files, 0 zero-byte placeholders, 0 unparsed HTML error redirects.
-
----
-
-## 🧪 Production Invariant Test & Verification Suites
-
-The repository contains canonical, zero-dependency Node.js invariant regression test suites:
-
-```bash
-# 1. Thesis State Engine v2.0 Invariant Suite (8/8 PASS)
+# Thesis State Engine — 8/8 PASS
 node --env-file=.env.local backend/scripts/test-thesis-state-engine.js
 
-# 2. Driver-Level Thesis Contracts Invariant Suite (5/5 PASS)
+# Driver-Level Thesis Contracts — 5/5 PASS
 node --env-file=.env.local backend/scripts/test-driver-contracts.js
 
-# 3. Historical Walk-Forward Replay Invariant Suite (5/5 PASS)
+# Walk-Forward Replay (no future-info leakage) — 5/5 PASS
 node --env-file=.env.local backend/scripts/test-walk-forward-replay.js
 
-# 4. Price Drawdown Avoidance & Alpha Validation Suite (4/4 PASS)
+# Price Drawdown Avoidance & Alpha Validation — 4/4 PASS
 node --env-file=.env.local backend/scripts/test-price-drawdown-validation.js
 
-# 5. Master Orchestrated Quarterly Watchdog Review (All 4 Suites + Report Generation)
-npm run watchdog:quarterly
+# Vitest unit tests
+npm test
 ```
 
 ---
 
-## 💻 Tech Stack & Local Setup
+## NPM Scripts Reference
 
-### Tech Stack
-- **Frontend**: React + Vite + TypeScript + Tailwind CSS + shadcn/ui
-- **Backend**: Node.js / Express + Supabase (Postgres with RLS)
-- **Data Pipelines**: Official NSE/BSE XBRL Engine + PDF Transcript Map-Reduce Parser
-- **Charts & Visualization**: Recharts + TanStack React Query
+```bash
+# Development
+npm run dev                       # Start Vite frontend dev server
+npm run server:dev                # Start Express backend (with .env.local)
+npm run server                    # Start Express backend (production)
+
+# Nightly Automation
+npm run reconcile:nightly         # Run full nightly reconciliation pipeline
+
+# Valuation Watchdog
+npm run watchdog:daily            # Run daily dislocation watchdog (LIVE — sends Telegram)
+npm run watchdog:daily:dryrun     # Run daily watchdog in dry-run mode (no Telegram)
+npm run watchdog:benchmark        # Run 5-case production benchmark dry-run
+
+# Ranking & Analysis
+npm run ranking                   # Run asymmetric mispricing ranking across 18 holdings
+
+# Portfolio Universe
+npm run ranks:quarterly           # Compute quarterly universe ranks
+npm run ranks:quarterly:apply     # Compute and persist quarterly ranks to DB
+
+# Database
+npm run db:migrate                # Run database migrations
+npm run db:seed                   # Seed initial portfolio data
+npm run onboard:stock             # Onboard a new stock to the universe
+
+# Tests
+npm test                          # Run vitest unit tests
+```
+
+---
+
+## Server Deployment (Oracle Cloud)
+
+The backend runs continuously on Oracle Cloud. All automation runs **on the server**, not GitHub Actions.
+
+### Nightly Cron (23:30 IST)
+
+```bash
+# /etc/cron.d/multibagger or crontab -e
+30 23 * * * cd /path/to/multibagger-live && npm run reconcile:nightly >> /var/log/reconciliation.log 2>&1
+```
+
+The nightly reconciliation executes:
+1. **Daily Price Refresh** — Refreshes closing prices & trailing 365-day 52W High/Low in PostgreSQL
+2. **Async Gap Reconciler** — Ingests concall transcripts filed days after board results
+3. **BSE/NSE Announcement Scanner** — Real-time LODR ingestion via NIM Llama-3.3-70B
+4. **Commitment Reconciler** — Tracks management guidance fulfilment per quarter
+5. **Valuation Dislocation Watchdog** — Evaluates all 18 holdings against 6 risk controls; dispatches Telegram alerts for `TOP_CONVICTION_DISLOCATION` candidates with 7-day anti-spam cooldown
+
+### Cloudflare Dispatcher
+
+A lightweight Cloudflare Worker (`cloudflare-dispatcher/`) acts as a secure bridge for triggering backend operations via authenticated HTTP calls from external automations.
+
+---
+
+## Tech Stack
+
+| Layer | Technology |
+|---|---|
+| **Frontend** | React 18 + Vite + TypeScript + Tailwind CSS + shadcn/ui |
+| **Backend** | Node.js / Express (ESM) |
+| **Database** | Supabase (PostgreSQL) with Row Level Security |
+| **LLM Pipeline** | NVIDIA NIM — Llama-3.3-70B (filing extraction & classification) |
+| **Edge Dispatcher** | Cloudflare Workers |
+| **Charts** | Recharts + TanStack React Query |
+| **Valuation Engine** | Programmatic Reverse-DCF solver (10-year horizon, forward-discounting) |
+
+---
+
+## Local Setup
 
 ### Prerequisites
-- Node.js (v18+)
-- Supabase CLI & Docker
+- Node.js v18+
+- A Supabase project (PostgreSQL) with `DATABASE_URL` configured
 
-### Setup Instructions
+### Setup
+
 ```bash
 # 1. Install dependencies
 npm install
 
-# 2. Start local Supabase instance
-supabase start
+# 2. Configure environment
+cp .env.example .env.local
+# Fill in SUPABASE_URL, SUPABASE_ANON_KEY, DATABASE_URL, TELEGRAM_BOT_TOKEN, GEMINI_API_KEY
 
-# 3. Configure environment
-# Copy .env.example to .env.local and update SUPABASE keys
-
-# 4. Run development server
+# 3. Run frontend dev server
 npm run dev
+
+# 4. Run backend server (separate terminal)
+npm run server:dev
 ```
 
 ---
 
-## 📋 Database Architecture
-
-Key database tables with Row Level Security (RLS) enabled:
+## Database Schema (Key Tables)
 
 | Table | Description |
-| :--- | :--- |
-| `stocks` | Portfolio universe with thesis & tracking directives |
+|---|---|
+| `stocks` | Portfolio universe — thesis state, conviction, capital action directives |
 | `prices` | Daily corporate-action adjusted price history |
+| `quarterly_snapshots` | Consolidated quarterly TTM metrics per stock (PAT, EPS, P/E, ROCE, CFO/PAT) |
+| `market_data_snapshots` | Point-in-time market data with math-verified invariants (MCap = Price × Shares) |
+| `valuation_dislocation_alerts` | Immutable log of watchdog alert dispatches with 7-day cooldown enforcement |
 | `xbrl_filings` | Statutory quarterly & annual exchange filing records |
-| `xbrl_metrics_quarterly` | Deep normalized XBRL balance sheet & P&L metrics |
+| `xbrl_metrics_quarterly` | Normalized XBRL balance sheet & P&L metrics |
 | `financial_results` | Consolidated quarterly financial performance |
-| `financial_metrics` | Multi-year annual financial metrics (ROCE, ROE, FCF) |
 | `management_promises` | Tracked management commitments & fulfillment status |
+| `corporate_announcements` | Real-time BSE/NSE LODR filings |
 | `transcript_analysis` | Concall transcript extraction & credibility scoring |
-| `corporate_announcements` | Real-time BSE/NSE corporate actions and LODR filings |
+
+For detailed schema documentation, see [`docs/DATABASE_SCHEMA_GUIDE.md`](docs/DATABASE_SCHEMA_GUIDE.md).
 
 ---
 
-## 📄 License & Status
+## Repository Structure
 
-**Status**: FROZEN / PRODUCTION RESEARCH TOOL  
-**Epistemic Classification**: `HISTORICAL_SIMULATION_CERTIFIED`  
+```
+multibagger-live/
+├── backend/
+│   ├── scripts/            ← Production runners & test suites
+│   │   ├── archive/        ← One-off backfill/migration scripts (preserved, not active)
+│   │   ├── run-nightly-reconciliation.js       ← Core nightly pipeline
+│   │   ├── run-daily-valuation-watchdog.js     ← Daily dislocation watchdog
+│   │   ├── run-asymmetric-mispricing-ranking.js ← Interactive ranking runner
+│   │   ├── test-*.js                           ← Invariant test suites
+│   │   └── ...
+│   ├── services/           ← Core business logic services
+│   │   ├── asymmetric-mispricing-ranking.service.js    ← Reverse-DCF & opportunity tier engine
+│   │   ├── valuation-dislocation-watchdog.service.js   ← Alert dispatch & cooldown engine
+│   │   ├── portfolio-market-valuation.service.js       ← TTM ingestion & math invariants
+│   │   ├── thesis-state-engine.service.js              ← 6-state thesis classification
+│   │   ├── announcement.service.js                     ← BSE/NSE LODR scanner
+│   │   └── ...
+│   ├── workers/            ← Background processing workers
+│   ├── routes/             ← Express API routes
+│   ├── controllers/        ← Route handlers
+│   ├── db/                 ← Database pool & utilities
+│   └── server.js           ← Express app entrypoint
+├── cloudflare-dispatcher/  ← Cloudflare Worker (secure HTTP trigger bridge)
+├── docs/                   ← Architecture docs & engineering learnings
+│   ├── LEARNINGS_VALUATION_DUAL_LENS.md
+│   └── DATABASE_SCHEMA_GUIDE.md
+├── node_downloader/        ← BSE/NSE filing downloader (independent Node service)
+├── src/                    ← React frontend (Vite + TypeScript)
+└── supabase/               ← Supabase migrations & config
+```
+
+---
+
+## Key Design Invariants
+
+1. **No Manual Database Patching** — Never run ad-hoc SQL `UPDATE`/`DELETE` to override data. Fix the underlying code.
+2. **Multi-Stage Corporate Actions** — Board approval ≠ `Achieved`. Only final regulatory clearance (NCLT, SEBI) can close a commitment.
+3. **No Static Ticker Branches** — No hardcoded `if (ticker === "ANANTRAJ")` logic anywhere in the codebase.
+4. **Trailing TTM Isolation** — Trailing and forward P/E are strictly isolated; the Reverse-DCF forward-discounts estimates to avoid double-counting growth.
+5. **Calibrated Language** — The watchdog says `CANDIDATE MEETS ASYMMETRIC-DISLOCATION CRITERIA`, not `MISPRICING DETECTED`. Risk controls, not valuation truth.
+6. **7-Day Anti-Spam** — Telegram alerts enforce an immutable 7-day per-ticker cooldown in PostgreSQL.
+
+---
+
+## Documentation
+
+| Document | Description |
+|---|---|
+| [`docs/LEARNINGS_VALUATION_DUAL_LENS.md`](docs/LEARNINGS_VALUATION_DUAL_LENS.md) | Institutional learnings: CCL, HSCL trailing vs. forward, Transrail cash-flow gate |
+| [`docs/DATABASE_SCHEMA_GUIDE.md`](docs/DATABASE_SCHEMA_GUIDE.md) | Full database schema reference |
+| [`docs/INTER_QUARTER_EVENT_RECONCILER_SPEC.md`](docs/INTER_QUARTER_EVENT_RECONCILER_SPEC.md) | Interquarter event reconciliation specification |
+| [`docs/GOOGLE_DRIVE_SETUP.md`](docs/GOOGLE_DRIVE_SETUP.md) | Google Drive integration setup |
+
+---
+
+## Status
+
+**Status**: Production  
+**Universe**: 18 portfolio holdings  
 **License**: Private / Proprietary

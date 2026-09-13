@@ -1,5 +1,5 @@
 {
-  "name": "vite_react_shadcn_ts",
+  "name": "multibagger-live",
   "private": true,
   "version": "0.0.0",
   "type": "module",
@@ -23,7 +23,10 @@
     "db:seed:admin": "node backend/seed-admin.js",
     "ranks:quarterly": "node --env-file=.env.local backend/scripts/compute-quarterly-ranks.js",
     "ranks:quarterly:apply": "node --env-file=.env.local backend/scripts/compute-quarterly-ranks.js --apply",
-    "watchdog:quarterly": "node --env-file=.env.local backend/scripts/run-quarterly-watchdog-review.js",
+    "watchdog:daily": "node --env-file=.env.local backend/scripts/run-daily-valuation-watchdog.js",
+    "watchdog:daily:dryrun": "node --env-file=.env.local backend/scripts/run-daily-valuation-watchdog.js --dry-run",
+    "watchdog:benchmark": "node --env-file=.env.local backend/scripts/run-production-benchmark-dry-run.js",
+    "ranking": "node --env-file=.env.local backend/scripts/run-asymmetric-mispricing-ranking.js",
     "onboard:stock": "node --env-file=.env.local backend/scripts/onboard-new-stock.js"
   },
   "dependencies": {
