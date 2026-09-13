@@ -1,5 +1,5 @@
 # Logs
-logs
+logs/
 *.log
 npm-debug.log*
 yarn-debug.log*
@@ -28,8 +28,11 @@ node_downloader/.env
 **/client_secret*apps.googleusercontent.com.json
 backend/secrets/
 backend/services/*.json
-backend/scratch
+
+# Scratch directories (exploratory scripts — never commit)
+backend/scratch/
 scratch/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
@@ -41,7 +44,19 @@ scratch/
 *.sln
 *.sw?
 
-# Experimental / Phase Replay Scripts
+# Generated root-level data files (must never be committed)
+quarterly-ranks.json
+screener_links_node.json
+check-drive-status.js
+
+# Large media files (never commit)
+*.mp3
+*.mp4
+*.wav
+*.avi
+*.mov
+
+# Experimental / Phase Replay Scripts (root-level scripts/)
 scripts/mbd*/
 scripts/run_1*
 scripts/run_a*
@@ -64,16 +79,11 @@ scripts/audit_morepen*
 scripts/scrape_and_download*
 !scripts/run_server_nim_ingest_pipeline.js
 
-# Generated Research Reports & Runtime Dossiers
+# Generated Research Reports & Runtime Dossiers (runtime output — not source code)
 reports/
-
-
-# Temporary Output & Artifacts
 artifacts/
 audit_output/
 audit/
 scripts/telegram_alerts_audit*.md
 scripts/test_truth_layer_invariants.js
 scripts/update_all_live_prices.js
-
-
