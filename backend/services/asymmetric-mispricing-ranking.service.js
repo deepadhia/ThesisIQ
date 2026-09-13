@@ -57,6 +57,45 @@ export function evaluateEquityMispricing(auditedEquity) {
   const growthAsymmetryDelta = parseFloat((expectedCagr - impliedGrowth).toFixed(1));
 
   // -------------------------------------------------------------------------
+  // 1b. Reverse-DCF Sensitivity Analysis & Stress-Testing
+  // Stress Test: What happens to the thesis if evidence growth is 20% lower than underwritten estimate?
+  // -------------------------------------------------------------------------
+  const stressTestedEvidenceGrowth = parseFloat((expectedCagr * 0.80).toFixed(1));
+  const stressTestedExpectationGap = parseFloat((stressTestedEvidenceGrowth - impliedGrowth).toFixed(1));
+  const evidenceConfidence = parseFloat(((currentConviction || 5.0) / 10.0).toFixed(2));
+  const confidenceWeightedGap = parseFloat((expectationGap * evidenceConfidence).toFixed(1));
+
+  let thesisRobustness = 'MODERATE';
+  if (stressTestedExpectationGap >= 10.0) {
+    thesisRobustness = 'HIGHLY_RESILIENT'; // Remains double-digit gap even after 20% growth cut!
+  } else if (stressTestedExpectationGap >= 5.0) {
+    thesisRobustness = 'RESILIENT';        // Remains solidly positive and attractive
+  } else if (stressTestedExpectationGap >= 0.0) {
+    thesisRobustness = 'SENSITIVE';        // Margin of safety evaporates under 20% growth cut
+  } else {
+    thesisRobustness = 'VULNERABLE';       // Turns negative under 20% growth cut
+  }
+
+  // -------------------------------------------------------------------------
+  // 1c. Three-Pillar ROCE Regime Shift Verification
+  // Pillar A: Current ROCE
+  // Pillar B: Incremental ROCE / Capital Efficiency
+  // Pillar C: Persistence & Balance Sheet Protection
+  // -------------------------------------------------------------------------
+  const revGrowth = financialEvidence.revenueGrowthYoY || 0;
+  const roce = financialEvidence.roce || 15.0;
+  const debtEquity = cashFlowEvidence.debtToEquity || 0.0;
+
+  let roceRegimeClassification = 'CYCLICAL_UNPROVEN';
+  if (roce >= 22.0 && revGrowth >= 20.0 && debtEquity <= 0.20) {
+    roceRegimeClassification = 'CONFIRMED_STRUCTURAL';
+  } else if (roce >= 16.0 && debtEquity <= 0.40) {
+    roceRegimeClassification = 'STABLE_EXPANDING';
+  } else {
+    roceRegimeClassification = 'CYCLICAL_CAPITAL_INTENSIVE';
+  }
+
+  // -------------------------------------------------------------------------
   // 2. Factor 1: Expectation Asymmetry & Margin of Safety (35% Weight)
   // -------------------------------------------------------------------------
   let asymmetryScore = 50.0;
@@ -82,8 +121,6 @@ export function evaluateEquityMispricing(auditedEquity) {
   // -------------------------------------------------------------------------
   // 4. Factor 3: Earnings Acceleration & ROIC / ROCE (20% Weight)
   // -------------------------------------------------------------------------
-  const revGrowth = financialEvidence.revenueGrowthYoY || 0;
-  const roce = financialEvidence.roce || 15.0;
   let earningsQualityScore = 50.0;
   if (revGrowth >= 25.0 && roce >= 22.0) earningsQualityScore = 100.0;
   else if (revGrowth >= 20.0 && roce >= 18.0) earningsQualityScore = 85.0;
@@ -95,7 +132,6 @@ export function evaluateEquityMispricing(auditedEquity) {
   // -------------------------------------------------------------------------
   const cfoPat = cashFlowEvidence.cfoPatRatio !== undefined ? cashFlowEvidence.cfoPatRatio : 0.8;
   const recDays = cashFlowEvidence.receivableDays || 75;
-  const debtEquity = cashFlowEvidence.debtToEquity || 0.0;
   let cashQualityScore = 50.0;
 
   if (cfoPat >= 0.80 && recDays <= 75 && debtEquity <= 0.20) cashQualityScore = 100.0;
@@ -114,7 +150,7 @@ export function evaluateEquityMispricing(auditedEquity) {
   );
 
   // Hard Structural Gates:
-  if (thesisHealth === 'BROKEN') {
+  if (thesisHealth === 'BROKEN' || thesisHealth === 'WEAKENING' || capitalAction === 'SYSTEMATIC_EXIT') {
     compositeScore = 0.0;
   } else if (thesisHealth === 'UNDER_PRESSURE' || evidenceSufficiency === 'INSUFFICIENT') {
     compositeScore = Math.min(35.0, compositeScore);
@@ -127,14 +163,14 @@ export function evaluateEquityMispricing(auditedEquity) {
   const finalScore = parseFloat(compositeScore.toFixed(1));
 
   // -------------------------------------------------------------------------
-  // 7. Determine Mispricing Opportunity Tier
+  // 7. Determine Mispricing Opportunity Tier (Non-Binary Calibrated Thresholds)
   // -------------------------------------------------------------------------
   let opportunityTier = MISPRICING_OPPORTUNITY_TIER.COMPOUNDING_AT_FAIR_PRICE;
   let strategicActionNarrative = "";
 
-  if (thesisHealth === 'BROKEN') {
+  if (thesisHealth === 'BROKEN' || thesisHealth === 'WEAKENING' || capitalAction === 'SYSTEMATIC_EXIT') {
     opportunityTier = MISPRICING_OPPORTUNITY_TIER.STRUCTURAL_VALUE_TRAP;
-    strategicActionNarrative = "STRUCTURAL VALUE TRAP: Headline multiple may appear cheap, but business model or cash conversion is broken. Zero allocation.";
+    strategicActionNarrative = "STRUCTURAL VALUE TRAP: Headline multiple may appear cheap, but business model, margin structure, or cash conversion is broken/weakening. Zero allocation / systematic exit.";
   } else if (valuationState === 'EXTREME' && (thesisHealth === 'STRENGTHENING' || thesisHealth === 'INTACT')) {
     opportunityTier = MISPRICING_OPPORTUNITY_TIER.OVERVALUED_COMPOUNDER;
     strategicActionNarrative = "OVERVALUED COMPOUNDER: Superb business execution, but market multiple has priced in multi-year perfection. Capital protection trim recommended.";
@@ -146,7 +182,12 @@ export function evaluateEquityMispricing(auditedEquity) {
   ) {
     opportunityTier = MISPRICING_OPPORTUNITY_TIER.WATCHLIST_FRICTION;
     strategicActionNarrative = "WATCHLIST FRICTION: Operational or reporting friction under observation. Pause incremental capital until resolution.";
-  } else if (finalScore >= 80.0 && (valuationState === 'ATTRACTIVE' || valuationState === 'REASONABLE') && (thesisHealth === 'STRENGTHENING' || thesisHealth === 'INTACT')) {
+  } else if (
+    finalScore >= 80.0 && 
+    (valuationState === 'ATTRACTIVE' || valuationState === 'REASONABLE') && 
+    (thesisHealth === 'STRENGTHENING' || thesisHealth === 'INTACT') &&
+    (expectationGap >= 10.0 || (expectationGap >= 5.0 && (thesisRobustness === 'HIGHLY_RESILIENT' || thesisRobustness === 'RESILIENT')))
+  ) {
     opportunityTier = MISPRICING_OPPORTUNITY_TIER.TOP_CONVICTION_DISLOCATION;
     strategicActionNarrative = "TOP CONVICTION DISLOCATION: Exceptional business compounding at a significant discount to intrinsic growth runway. Prime capital deployment opportunity.";
   } else {
@@ -172,6 +213,11 @@ export function evaluateEquityMispricing(auditedEquity) {
       expectedCagr,
       impliedGrowth,
       growthAsymmetryDelta,
+      stressTestedEvidenceGrowth,
+      stressTestedExpectationGap,
+      confidenceWeightedGap,
+      thesisRobustness,
+      roceRegimeClassification,
       revenueGrowthYoY: revGrowth,
       roce,
       cfoPatRatio: cfoPat,
