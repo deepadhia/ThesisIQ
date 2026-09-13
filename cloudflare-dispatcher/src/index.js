@@ -1,4 +1,4 @@
-const GITHUB_OWNER = "Deep-Adhia";
+const GITHUB_OWNER = "deepadhia";
 const GITHUB_REPO  = "multibagger-live";
 const GITHUB_REF   = "main";
 
@@ -14,10 +14,12 @@ const SCHEDULE = {
 };
 
 async function dispatchWorkflow(env, workflowFile, inputs = {}) {
-  const url = `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/actions/workflows/${workflowFile}/dispatches`;
-  const token = env.GITHUB_PAT;
+  const owner = env.GITHUB_OWNER || GITHUB_OWNER;
+  const repo  = env.GITHUB_REPO || GITHUB_REPO;
+  const url = `https://api.github.com/repos/${owner}/${repo}/actions/workflows/${workflowFile}/dispatches`;
+  const token = env.GITHUB_PAT || env.GITHUB_TOKEN || env.DEEPADHIA_GITHUB_TOKEN;
   if (!token) {
-    throw new Error("Missing GITHUB_PAT secret in Cloudflare environment");
+    throw new Error("Missing GITHUB_PAT (or GITHUB_TOKEN) secret in Cloudflare environment");
   }
 
   const response = await fetch(url, {

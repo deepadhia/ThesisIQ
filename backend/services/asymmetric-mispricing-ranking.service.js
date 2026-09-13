@@ -64,9 +64,10 @@ export function evaluateEquityMispricing(auditedEquity) {
     if (expectationGap >= 20.0) asymmetryScore = 100.0;
     else if (expectationGap >= 15.0) asymmetryScore = 90.0;
     else if (expectationGap >= 10.0) asymmetryScore = 80.0;
-    else if (expectationGap >= 0.0) asymmetryScore = 65.0;
-    else if (expectationGap >= -15.0) asymmetryScore = 45.0;
-    else if (expectationGap >= -30.0) asymmetryScore = 25.0;
+    else if (expectationGap >= 5.0) asymmetryScore = 65.0;
+    else if (expectationGap >= 0.0) asymmetryScore = 50.0;
+    else if (expectationGap >= -15.0) asymmetryScore = 30.0;
+    else if (expectationGap >= -30.0) asymmetryScore = 15.0;
     else asymmetryScore = 5.0;
   }
 
@@ -112,11 +113,15 @@ export function evaluateEquityMispricing(auditedEquity) {
     (cashQualityScore * 0.20)
   );
 
-  // Hard Structural Gate: If thesis is broken, composite score is 0
+  // Hard Structural Gates:
   if (thesisHealth === 'BROKEN') {
     compositeScore = 0.0;
   } else if (thesisHealth === 'UNDER_PRESSURE' || evidenceSufficiency === 'INSUFFICIENT') {
     compositeScore = Math.min(35.0, compositeScore);
+  } else if (valuationState === 'EXTREME') {
+    compositeScore = Math.min(50.0, compositeScore);
+  } else if (valuationState === 'FULL') {
+    compositeScore = Math.min(75.0, compositeScore);
   }
 
   const finalScore = parseFloat(compositeScore.toFixed(1));
