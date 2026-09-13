@@ -63,7 +63,10 @@ async function runWatchdogTestSuite() {
   });
 
   const formattedMsg = formatDislocationTelegramMessage(mockHbl);
-  assert(formattedMsg.includes('ASYMMETRIC MISPRICING DISLOCATION DETECTED'), 'Message contains dislocation header');
+  assert(formattedMsg.includes('STATE TRANSITION & ALERT JUSTIFICATION'), 'Message contains state transition & alert justification header');
+  assert(formattedMsg.includes('What Changed:'), 'Message contains explicit What Changed section');
+  assert(formattedMsg.includes('Actionable Justification:'), 'Message contains Actionable Justification');
+  assert(formattedMsg.includes('RISK CONTROLS & CASH CONVERSION (PASSED)'), 'Message frames checks as risk controls');
   assert(formattedMsg.includes('HBLENGINE'), 'Message contains ticker');
   assert(formattedMsg.includes('25x'), 'Message contains verified trailing P/E 25x');
   assert(formattedMsg.includes('+16%'), 'Message contains raw expectation gap +16%');
@@ -127,6 +130,23 @@ async function runWatchdogTestSuite() {
   });
   assert(mockTransrail.opportunityTier === MISPRICING_OPPORTUNITY_TIER.COMPOUNDING_AT_FAIR_PRICE, 'Transrail is gated out of TOP_CONVICTION_DISLOCATION due to cash conversion');
   assert(mockTransrail.strategicActionNarrative.includes('CASH CONVERSION WATCH'), 'Transrail narrative explicitly indicates Cash Conversion Watch');
+
+  // Shakti Pumps: 16.0x P/E, broken thesis -> Gated into STRUCTURAL_VALUE_TRAP
+  const mockShakti = evaluateEquityMispricing({
+    ticker: 'SHAKTIPUMP',
+    companyName: 'Shakti Pumps (India)',
+    thesisHealth: 'BROKEN',
+    currentConviction: 2.0,
+    evidenceSufficiency: 'SUFFICIENT',
+    valuationBasis: 'TRAILING_TTM',
+    currentPrice: 4100.0,
+    currentPE: 16.0,
+    expectedGrowthTrajectory: '12% CAGR',
+    financialEvidence: { revenueGrowthYoY: -5.0, roce: 8.5 },
+    cashFlowEvidence: { cfoPatRatio: 0.15, receivableDays: 140, debtToEquity: 0.85 }
+  });
+  assert(mockShakti.opportunityTier === MISPRICING_OPPORTUNITY_TIER.STRUCTURAL_VALUE_TRAP, 'Shakti Pumps is gated into STRUCTURAL_VALUE_TRAP due to broken thesis');
+  assert(mockShakti.mispricingScore === 0.0, 'Shakti Pumps mispricing score is strictly clamped to 0.0');
 
   // -------------------------------------------------------------------------
   // Test 3: 7-Day Anti-Spam Cooldown Invariant
