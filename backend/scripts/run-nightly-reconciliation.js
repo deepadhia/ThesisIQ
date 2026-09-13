@@ -19,6 +19,7 @@ import { downloadTranscriptsPipeline } from "../services/transcripts.service.js"
 import { scan } from "./scan-announcements.js";
 import { generateCapitalAllocationFramework } from "./generate-capital-allocation-framework.js";
 import { sendTelegramMessage } from "../services/telegram.service.js";
+import { evaluateAndDispatchDislocationAlerts } from "../services/valuation-dislocation-watchdog.service.js";
 import crypto from "crypto";
 
 // Table to guarantee strict idempotency across nightly/morning runs
@@ -174,6 +175,21 @@ export async function runNightlyReconciliation({ isDryRun = false } = {}) {
   } catch (err) {
     console.error("[ERROR] Step 5 Capital Allocation Framework update failed:", err.message);
   }
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // STEP 5b: Asymmetric Valuation Dislocation Watchdog (HBL/Time Techno Alert with 7-Day Cooldown)
+  // ──────────────────────────────────────────────────────────────────────────
+  console.log("\n--- 🎯 Step 5b: Auditing Asymmetric Valuation Dislocations (7-Day Anti-Spam Cooldown) ---");
+  try {
+    const dislocationRes = await evaluateAndDispatchDislocationAlerts({
+      pool,
+      isDryRun
+    });
+    console.log(`✅ Valuation Dislocation Watchdog: ${dislocationRes.alertsDispatched} dispatched, ${dislocationRes.alertsSuppressed} suppressed under 7-day cooldown.`);
+  } catch (err) {
+    console.error("[ERROR] Step 5b Valuation Dislocation Watchdog failed:", err.message);
+  }
+
 
   // ──────────────────────────────────────────────────────────────────────────
   // STEP 6: Idempotent Morning Alert Compilation & Dispatch

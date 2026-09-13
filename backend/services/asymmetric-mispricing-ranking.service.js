@@ -28,6 +28,52 @@ const TIER_PRIORITY = {
 };
 
 /**
+ * Solves for market-implied growth rate using a rigorous 10-year Reverse-DCF model.
+ * 
+ * Invariants:
+ * - Prevents forward-vs-trailing double-counting error:
+ *   If a forward multiple is passed, explicitly discounts by forwardHorizonYears.
+ */
+export function solveImpliedGrowthFromPE(pe, options = {}) {
+  const r = options.discountRate || 0.12;      // 12% Cost of Capital
+  const gt = options.terminalGrowth || 0.05;   // 5% Terminal Growth
+  const years = options.holdingYears || 10;
+  const isForward = options.isForwardEstimate || false;
+  const forwardYears = options.forwardHorizonYears || 2;
+
+  if (!pe || pe <= 0 || isNaN(pe)) return 15.0;
+
+  let low = -0.20;
+  let high = 0.80;
+  let bestG = 0.10;
+
+  for (let iter = 0; iter < 40; iter++) {
+    const mid = (low + high) / 2;
+    let pv = 0;
+    let eps_t = 1;
+    for (let t = 1; t <= years; t++) {
+      eps_t *= (1 + mid);
+      pv += eps_t / Math.pow(1 + r, t);
+    }
+    const terminalValue = (eps_t * (1 + gt)) / (r - gt);
+    pv += terminalValue / Math.pow(1 + r, years);
+
+    if (isForward) {
+      pv = pv / Math.pow(1 + mid, forwardYears);
+    }
+
+    if (pv >= pe) {
+      bestG = mid;
+      high = mid;
+    } else {
+      low = mid;
+    }
+  }
+
+  return parseFloat((bestG * 100).toFixed(1));
+}
+
+/**
  * Computes Asymmetric Mispricing Score and Opportunity Tier for a single equity dossier.
  */
 export function evaluateEquityMispricing(auditedEquity) {
@@ -38,23 +84,49 @@ export function evaluateEquityMispricing(auditedEquity) {
     thesisHealth,
     currentConviction,
     evidenceSufficiency,
-    valuationState,
+    valuationState: inputValuationState,
     capitalAction,
     financialEvidence = {},
     cashFlowEvidence = {},
     currentPrice,
     currentPE,
-    expectationGap = 0,
+    valuationBasis = 'TRAILING_TTM',
+    isForwardEstimate = false,
+    forwardHorizonYears = 2,
+    expectationGap: inputExpectationGap,
     expectedGrowthTrajectory = '20% CAGR',
-    impliedGrowthRate = '15%'
+    impliedGrowthRate: inputImpliedGrowthRate
   } = auditedEquity;
 
   // -------------------------------------------------------------------------
-  // 1. Parse Underwritten vs Implied Growth Rates
+  // 1. Programmatic Reverse-DCF Implied Growth & Expectation Gap
   // -------------------------------------------------------------------------
   const expectedCagr = parseFloat(String(expectedGrowthTrajectory).replace(/[^0-9.]/g, '')) || 20.0;
-  const impliedGrowth = parseFloat(String(impliedGrowthRate).replace(/[^0-9.]/g, '')) || 15.0;
+  
+  // Dynamically calculate implied growth from PE if not provided or to verify
+  let impliedGrowth = inputImpliedGrowthRate 
+    ? parseFloat(String(inputImpliedGrowthRate).replace(/[^0-9.]/g, '')) 
+    : solveImpliedGrowthFromPE(currentPE, { isForwardEstimate, forwardHorizonYears });
+
+  if (isNaN(impliedGrowth)) {
+    impliedGrowth = solveImpliedGrowthFromPE(currentPE, { isForwardEstimate, forwardHorizonYears });
+  }
+
   const growthAsymmetryDelta = parseFloat((expectedCagr - impliedGrowth).toFixed(1));
+  const expectationGap = (inputExpectationGap !== undefined && inputExpectationGap !== null)
+    ? inputExpectationGap
+    : growthAsymmetryDelta;
+
+  // Dynamic Valuation State Classification (if not manually pinned)
+  let valuationState = inputValuationState;
+  if (!valuationState && currentPE) {
+    if (currentPE < 20.0) valuationState = 'ATTRACTIVE';
+    else if (currentPE <= 35.0) valuationState = 'REASONABLE';
+    else if (currentPE <= 60.0) valuationState = 'FULL';
+    else valuationState = 'EXTREME';
+  } else if (!valuationState) {
+    valuationState = 'REASONABLE';
+  }
 
   // -------------------------------------------------------------------------
   // 1b. Reverse-DCF Sensitivity Analysis & Stress-Testing
@@ -182,17 +254,25 @@ export function evaluateEquityMispricing(auditedEquity) {
   ) {
     opportunityTier = MISPRICING_OPPORTUNITY_TIER.WATCHLIST_FRICTION;
     strategicActionNarrative = "WATCHLIST FRICTION: Operational or reporting friction under observation. Pause incremental capital until resolution.";
-  } else if (
-    finalScore >= 80.0 && 
-    (valuationState === 'ATTRACTIVE' || valuationState === 'REASONABLE') && 
-    (thesisHealth === 'STRENGTHENING' || thesisHealth === 'INTACT') &&
-    (expectationGap >= 10.0 || (expectationGap >= 5.0 && (thesisRobustness === 'HIGHLY_RESILIENT' || thesisRobustness === 'RESILIENT')))
-  ) {
-    opportunityTier = MISPRICING_OPPORTUNITY_TIER.TOP_CONVICTION_DISLOCATION;
-    strategicActionNarrative = "TOP CONVICTION DISLOCATION: Exceptional business compounding at a significant discount to intrinsic growth runway. Prime capital deployment opportunity.";
   } else {
-    opportunityTier = MISPRICING_OPPORTUNITY_TIER.COMPOUNDING_AT_FAIR_PRICE;
-    strategicActionNarrative = "COMPOUNDING AT FAIR PRICE: Healthy business compounding steadily with balanced risk-reward. Core holding.";
+    // Pristine Cash Flow Gate for Top Conviction Dislocation
+    const isCashConversionPristine = (cfoPat >= 0.70 && recDays <= 90);
+
+    if (
+      finalScore >= 80.0 && 
+      (valuationState === 'ATTRACTIVE' || valuationState === 'REASONABLE') && 
+      (thesisHealth === 'STRENGTHENING' || thesisHealth === 'INTACT') &&
+      isCashConversionPristine &&
+      (expectationGap >= 10.0 || (expectationGap >= 5.0 && (thesisRobustness === 'HIGHLY_RESILIENT' || thesisRobustness === 'RESILIENT')))
+    ) {
+      opportunityTier = MISPRICING_OPPORTUNITY_TIER.TOP_CONVICTION_DISLOCATION;
+      strategicActionNarrative = "TOP CONVICTION DISLOCATION: Exceptional business compounding at a significant discount to intrinsic growth runway. Prime capital deployment opportunity.";
+    } else {
+      opportunityTier = MISPRICING_OPPORTUNITY_TIER.COMPOUNDING_AT_FAIR_PRICE;
+      strategicActionNarrative = (!isCashConversionPristine && (recDays > 90 || cfoPat < 0.70))
+        ? "COMPOUNDING AT FAIR PRICE (CASH CONVERSION WATCH): Attractive earnings compounding; monitor working capital cycle and CFO/PAT conversion."
+        : "COMPOUNDING AT FAIR PRICE: Healthy business compounding steadily with balanced risk-reward. Core holding.";
+    }
   }
 
   return {

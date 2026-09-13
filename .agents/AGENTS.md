@@ -17,3 +17,12 @@
 ## 4. Zero Automatic Git Commits or Pushes Rule
 - **NEVER** execute `git commit` or `git push` automatically without getting explicit user confirmation and approval first.
 - Always show the exact proposed commit message and changed files to the user, and wait for explicit permission before attempting to commit or push to GitHub.
+
+## 5. Automated Execution & Confirmation Boundary
+- **NEVER** execute ad-hoc inline terminal scripts (`node -e "..."`) which defeat IDE security whitelists and trigger repeated permission modals.
+- Non-destructive commands (read-only queries, invariant test runners, linting, build verification) must run automatically without interrupting the user.
+- The agent **MUST ONLY** ask for user confirmation before destructive or state-mutating actions:
+  - Database `UPDATE` / `DELETE` / `DROP` queries
+  - File deletions or destructive migrations
+  - Git commits and pushes
+
