@@ -133,7 +133,12 @@ export function evaluateEquityMispricing(auditedEquity) {
   } else if (valuationState === 'EXTREME' && (thesisHealth === 'STRENGTHENING' || thesisHealth === 'INTACT')) {
     opportunityTier = MISPRICING_OPPORTUNITY_TIER.OVERVALUED_COMPOUNDER;
     strategicActionNarrative = "OVERVALUED COMPOUNDER: Superb business execution, but market multiple has priced in multi-year perfection. Capital protection trim recommended.";
-  } else if (thesisHealth === 'UNDER_PRESSURE' || evidenceSufficiency === 'INSUFFICIENT') {
+  } else if (
+    thesisHealth === 'UNDER_PRESSURE' || 
+    evidenceSufficiency === 'INSUFFICIENT' ||
+    capitalAction === 'PAUSE_ADDITIONS' ||
+    capitalAction === 'HOLD_ACTIVE_WATCH'
+  ) {
     opportunityTier = MISPRICING_OPPORTUNITY_TIER.WATCHLIST_FRICTION;
     strategicActionNarrative = "WATCHLIST FRICTION: Operational or reporting friction under observation. Pause incremental capital until resolution.";
   } else if (finalScore >= 80.0 && (valuationState === 'ATTRACTIVE' || valuationState === 'REASONABLE') && (thesisHealth === 'STRENGTHENING' || thesisHealth === 'INTACT')) {
