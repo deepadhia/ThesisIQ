@@ -40,7 +40,7 @@ export function AppSidebar() {
             <Activity className="h-6 w-6 text-primary terminal-glow" />
             {!collapsed && (
               <span className="font-mono font-bold text-primary terminal-glow text-lg">
-                MBIQ
+                ThesisIQ
               </span>
             )}
           </div>

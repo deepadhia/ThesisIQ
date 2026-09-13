@@ -47,7 +47,7 @@ export default function LoginPage() {
             <Lock className="h-5 w-5" />
             <CardTitle className="font-mono text-lg">Admin sign in</CardTitle>
           </div>
-          <CardDescription>Multibagger Insights — backend access only.</CardDescription>
+          <CardDescription>ThesisIQ — backend access only.</CardDescription>
         </CardHeader>
         <CardContent>
           <form onSubmit={handleSubmit} className="space-y-4">

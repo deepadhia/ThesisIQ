@@ -1,5 +1,5 @@
 {
-  "name": "multibagger-workflow-dispatcher",
+  "name": "thesisiq-workflow-dispatcher",
   "version": "1.0.0",
   "description": "Cloudflare Worker to trigger GitHub Action workflows on cron schedule",
   "main": "src/index.js",

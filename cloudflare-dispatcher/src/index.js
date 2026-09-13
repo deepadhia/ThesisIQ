@@ -1,5 +1,5 @@
 const GITHUB_OWNER = "deepadhia";
-const GITHUB_REPO  = "multibagger-live";
+const GITHUB_REPO  = "thesisiq";
 const GITHUB_REF   = "main";
 
 // Schedule map containing HH:MM UTC times, their target workflows, and whether they allow Sunday execution.
@@ -115,7 +115,7 @@ export default {
     return new Response(
       JSON.stringify({
         ok: true,
-        message: "Multibagger Workflow Dispatcher is healthy",
+        message: "ThesisIQ Workflow Dispatcher is healthy",
         owner: GITHUB_OWNER,
         repo: GITHUB_REPO,
         ref: GITHUB_REF
