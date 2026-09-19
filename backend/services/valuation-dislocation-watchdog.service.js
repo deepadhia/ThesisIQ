@@ -198,6 +198,9 @@ export function formatDislocationTelegramMessage(equity, triggerInfo = {}) {
       year: 'numeric'
     });
 
+  const hf = equity.hedgeFundScorecard || {};
+  const hasHf = Boolean(hf.fairValuePrice);
+
   let msg = `🎯 *CANDIDATE MEETS ASYMMETRIC-DISLOCATION CRITERIA*\n`;
   msg += `─────────────────────────\n`;
   msg += `🏢 *${ticker.toUpperCase()}* | *${companyName}*\n`;
@@ -211,18 +214,36 @@ export function formatDislocationTelegramMessage(equity, triggerInfo = {}) {
 
   msg += `💰 *VALUATION ENTRY POINT*\n`;
   msg += `• Current Price: *₹${price.toFixed(2)}*\n`;
-  msg += `• Trailing P/E: *${pe}x* (Consolidated Trailing TTM)\n\n`;
+  msg += `• Trailing P/E: *${pe}x* (Consolidated Trailing TTM)\n`;
+  if (hasHf) {
+    msg += `• Intrinsic Fair Value: *₹${hf.fairValuePrice}* (2-Stage FCF Base Case)\n`;
+    msg += `• Buy Below Price: *₹${hf.buyBelowPrice}* (MoS ≥ 25% + 3:1 Asymmetry)\n`;
+    msg += `• Worst-Case Bear Floor: *₹${hf.bearFloorPrice}* (-20% Growth & Multiple Derate)\n`;
+    msg += `• Asymmetry Risk/Reward: *${hf.asymmetryRatio}:1* (Hurdle ≥ 3.0:1)\n`;
+    msg += `• Projected 3-Year IRR: *${hf.projected3YrIrr > 0 ? '+' : ''}${hf.projected3YrIrr}% p.a.*\n`;
+  }
+  msg += `\n`;
 
-  msg += `📈 *DUAL-LENS EXPECTATION ASYMMETRY*\n`;
-  msg += `• Underwritten Runway: *${metrics.expectedCagr}% CAGR*\n`;
-  msg += `• Market-Implied Growth: *${metrics.impliedGrowth}% CAGR*\n`;
-  msg += `• Raw Expectation Gap: *+${metrics.expectationGap}%*\n`;
+  const expGapSign = (metrics.expectationGap || 0) > 0 ? '+' : '';
+  const underwrittenNopat = metrics.underwrittenNopatCagr || metrics.expectedCagr || 20.0;
+  const expRegime = metrics.expectationsRegime || 'POTENTIAL_UNDEREXPECTATION';
+
+  msg += `📈 *LAYER 4: MARKET EXPECTATIONS GAP*\n`;
+  msg += `• Underwritten NOPAT CAGR: *${underwrittenNopat}% CAGR*\n`;
+  msg += `• Market-Implied CAGR: *${metrics.impliedGrowth}% CAGR*\n`;
+  msg += `• Expectations Gap: *${expGapSign}${metrics.expectationGap}% pts*\n`;
+  msg += `• Expectations Regime: \`${expRegime}\`\n`;
+  msg += `• 7Y 5× Required CAGR (Benchmark): *25.85%*\n`;
   msg += `• Stressed Cushion (-20% haircut): *+${metrics.stressTestedExpectationGap}%* (\`${metrics.thesisRobustness}\`)\n\n`;
 
   msg += `🛡️ *RISK CONTROLS & CASH CONVERSION (PASSED)*\n`;
   msg += `• ROCE: *${metrics.roce}%* (\`${metrics.roceRegimeClassification}\`)\n`;
   msg += `• Debt/Equity: *${metrics.debtToEquity.toFixed(2)}*\n`;
-  msg += `• Cash Flow: *CFO/PAT ${metrics.cfoPatRatio.toFixed(2)}* | *Rec Days: ${metrics.receivableDays}*\n\n`;
+  msg += `• Cash Flow: *CFO/PAT ${metrics.cfoPatRatio.toFixed(2)}* | *Rec Days: ${metrics.receivableDays}*\n`;
+  if (hasHf && hf.thesisBreakerMetric) {
+    msg += `• 🚨 *Thesis-Breaker Red Line*: \`${hf.thesisBreakerMetric}\`\n`;
+  }
+  msg += `\n`;
 
   msg += `⚖️ *ALLOCATION STATUS*\n`;
   msg += `• Opportunity Tier: \`TOP_CONVICTION_DISLOCATION\`\n`;
@@ -231,7 +252,7 @@ export function formatDislocationTelegramMessage(equity, triggerInfo = {}) {
 
   msg += `⏱️ *Anti-Spam Cooldown*: Next alert for this stock locked until *${nextCooldownDate}*.\n`;
   msg += `─────────────────────────\n`;
-  msg += `🏛️ *ThesisIQ Institutional Watchdog v2.0*`;
+  msg += `🏛️ *ThesisIQ Institutional Watchdog v3.1*`;
 
   return msg;
 }
