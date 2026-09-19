@@ -231,7 +231,7 @@ export function formatDislocationTelegramMessage(equity, triggerInfo = {}) {
 
   msg += `⏱️ *Anti-Spam Cooldown*: Next alert for this stock locked until *${nextCooldownDate}*.\n`;
   msg += `─────────────────────────\n`;
-  msg += `🏛️ *Multibagger Institutional Watchdog v2.0*`;
+  msg += `🏛️ *ThesisIQ Institutional Watchdog v2.0*`;
 
   return msg;
 }
