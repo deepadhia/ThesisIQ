@@ -283,7 +283,7 @@ export async function scan({ isDryRun = false, runUrl = null, targetTicker = nul
           deepDiveStatus = prevCompleted.rows.length > 0 ? "pending_stage2" : "pending_stage1";
         }
 
-        // 7. Alert ONLY if non-earnings routine/regulatory event (Earnings Results & Concalls are deferred to Quarterly Deep-Dive Worker for full multi-page PDF verification)
+        // 7. Alert ONLY if non-earnings routine/regulatory event (Earnings Results & Concalls/Audio are deferred to Quarterly Deep-Dive Worker for verified full-page/audio audit)
         let sentToTelegram = false;
         const isRegulatoryOrCredit = ["REGULATORY_ACTION", "CREDIT_EVENT"].includes(filingCategory);
         const isAgm = Boolean(
@@ -304,13 +304,18 @@ export async function scan({ isDryRun = false, runUrl = null, targetTicker = nul
 
         // Defer Stage 1 results, Stage 2 concall, and audio deep dives to quarterly-deepdive-worker.js
         const isQueuedForDeepDive = deepDiveStatus === "pending_stage1" || deepDiveStatus === "pending_stage2" || deepDiveStatus === "pending_audio";
-        const hasMaterialAgmHighlights = isAgmCompleted && Boolean(
+        
+        const hasMaterialAgmHighlights = isAgm && Boolean(
+          aiResult?.has_substantive_business_insights ||
           (aiResult?.agm_highlights && (Array.isArray(aiResult.agm_highlights) ? aiResult.agm_highlights.length > 0 : (aiResult.agm_highlights.trim().length > 20 && !aiResult.agm_highlights.toLowerCase().includes("null")))) ||
           (aiResult?.key_data && aiResult.key_data !== "No specific figures disclosed." && aiResult.key_data.length > 10)
         );
+
+        // Alert only on genuine business/thesis catalysts (Strict zero-spam gate)
         const shouldHaveAlerted = !isQueuedForDeepDive && (
           aiResult.priority === "HIGH" ||
-          (isAgmCompleted && (aiResult.priority === "MEDIUM" || hasMaterialAgmHighlights))
+          (isAgmCompleted && hasMaterialAgmHighlights) ||
+          (aiResult.priority === "MEDIUM" && (aiResult.has_substantive_business_insights || hasMaterialAgmHighlights))
         );
 
         // 7a. Event-level Deduplication Guard (Check if alert sent recently for same ticker & event identity)
@@ -391,7 +396,7 @@ export async function scan({ isDryRun = false, runUrl = null, targetTicker = nul
           is_earnings_release: aiResult.is_earnings_release || false,
           attachment_url: docUrl,
           filing_date: timestamp,
-          filing_category: isAgmCompleted ? "AGM_DISCLOSURE" : filingCategory,
+          filing_category: (isAgmCompleted || (isAgm && hasMaterialAgmHighlights)) ? "AGM_DISCLOSURE" : filingCategory,
           event_analysis: eventAnalysis,
           deep_dive_status: deepDiveStatus,
           key_data: aiResult.key_data,
@@ -399,7 +404,7 @@ export async function scan({ isDryRun = false, runUrl = null, targetTicker = nul
         });
 
         // 8b. Ingest into interquarter_events if completed AGM contains strategic commentary
-        if (isAgmCompleted && hasMaterialAgmHighlights && !isDryRun) {
+        if ((isAgmCompleted || isAgm) && hasMaterialAgmHighlights && !isDryRun) {
           try {
             const eventTitle = `AGM Proceedings: ${ticker} (${new Date().getFullYear()})`;
             const existing = await pool.query(
@@ -413,16 +418,15 @@ export async function scan({ isDryRun = false, runUrl = null, targetTicker = nul
             if (existing.rows.length === 0) {
               await pool.query(
                 `INSERT INTO interquarter_events 
-                  (stock_id, ticker, event_date, event_type, title, description, bse_filing_url, credibility_impact)
-                 VALUES ($1, $2, $3, 'AGM_DISCLOSURE', $4, $5, $6, $7)`,
+                  (stock_id, ticker, event_date, event_type, title, description, bse_filing_url)
+                 VALUES ($1, $2, $3, 'AGM_DISCLOSURE', $4, $5, $6)`,
                 [
                   stock.id,
                   ticker,
                   timestamp ? new Date(timestamp) : new Date(),
                   eventTitle,
                   `${aiResult.summary}\n\nKey Highlights:\n${highlightsText}`,
-                  docUrl,
-                  aiResult.impact === "POSITIVE" ? "STRENGTHENED" : (aiResult.impact === "NEGATIVE" ? "WEAKENED" : "NEUTRAL")
+                  docUrl
                 ]
               );
               console.log(`[AGM] Recorded interquarter AGM disclosure for ${ticker}`);

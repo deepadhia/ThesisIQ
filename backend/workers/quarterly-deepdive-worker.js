@@ -126,7 +126,6 @@ async function runNimPrompt(systemPrompt, userPrompt, temperature = 0.05) {
   const MAX_RETRIES = 5;
   const BASE_DELAY_MS = 3000;
   const MODELS = [
-    "openai/gpt-oss-120b",
     "nvidia/nemotron-3-super-120b-a12b",
     "meta/llama-3.2-11b-vision-instruct",
     "openai/gpt-oss-20b"
@@ -389,8 +388,8 @@ export async function processPendingDeepDives(options = {}) {
             s.investment_thesis, s.company_name
      FROM corporate_announcements ca
      JOIN stocks s ON s.id = ca.stock_id
-     WHERE ca.deep_dive_status IN ('pending_stage1', 'pending_stage2', 'pending_audio')
-       AND s.category = 'Core'`;
+      WHERE ca.deep_dive_status IN ('pending_stage1', 'pending_stage2', 'pending_audio')
+        AND (s.category IN ('Core', 'Watchlist') OR s.category IS NULL)`;
 
   if (!allowHistorical && !suppressTelegram) {
     queryText += ` AND ca.created_at >= NOW() - INTERVAL '30 days'`;

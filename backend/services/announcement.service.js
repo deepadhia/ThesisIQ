@@ -94,20 +94,26 @@ export function getConcallType(title, rawText = "") {
   const combined = `${t} ${body}`;
 
   // 0. AGM / EGM / Postal Ballot guard — must come first.
-  // These filings are NEVER earnings concalls. If the title/text contains AGM
-  // keywords without an explicit concall keyword, return null immediately.
+  // Procedural notices/ballots are not concalls, BUT AGM audio recordings,
+  // webcasts, and transcripts MUST be captured for the deep-dive audio/transcript engine.
   const AGM_PATTERNS = [
     "agm", "egm", "annual general meeting", "extraordinary general meeting",
     "shareholders meeting", "general meeting", "postal ballot",
     "board meeting notice"
   ];
-  const hasExplicitConcall =
+  const hasAudioOrTranscript =
     combined.includes("concall") ||
     combined.includes("transcript") ||
     combined.includes("conference call") ||
-    combined.includes("earnings call");
+    combined.includes("earnings call") ||
+    combined.includes("audio recording") ||
+    combined.includes("audio link") ||
+    combined.includes("link of audio") ||
+    combined.includes("recording of") ||
+    combined.includes("webcast");
+
   const isAgmOrPostalBallot = AGM_PATTERNS.some(k => combined.includes(k));
-  if (isAgmOrPostalBallot && !hasExplicitConcall) {
+  if (isAgmOrPostalBallot && !hasAudioOrTranscript) {
     return null;
   }
 
@@ -129,25 +135,28 @@ export function getConcallType(title, rawText = "") {
       combined.includes("fund meeting") ||
       combined.includes("roadshow");
 
-    const hasEarningsKeywords =
+    const hasEarningsOrAgmKeywords =
       combined.includes("earnings") ||
       combined.includes("results") ||
       combined.includes("financial results") ||
+      combined.includes("agm") ||
+      combined.includes("annual general meeting") ||
       /q[1-4]/.test(combined) ||
       /fy\d{2}/.test(combined);
 
-    if (isGenericMeet && !hasEarningsKeywords) {
-      return null; // Ignore transcripts of private / generic investor meets
+    if (isGenericMeet && !hasEarningsOrAgmKeywords) {
+      return null; // Ignore transcripts of private / generic investor meets without earnings/AGM context
     }
     return "transcript";
   }
 
-  // 2. Check for Audio Recording / Audio Link (indicates concall is completed)
+  // 2. Check for Audio Recording / Audio Link (indicates concall or AGM is completed)
   if (
     combined.includes("audio recording") ||
     combined.includes("audio link") ||
     combined.includes("link of audio") ||
-    combined.includes("recording of")
+    combined.includes("recording of") ||
+    combined.includes("webcast")
   ) {
     const isGenericMeet =
       combined.includes("investor meet") ||
@@ -165,15 +174,17 @@ export function getConcallType(title, rawText = "") {
       combined.includes("fund meeting") ||
       combined.includes("roadshow");
 
-    const hasEarningsKeywords =
+    const hasEarningsOrAgmKeywords =
       combined.includes("earnings") ||
       combined.includes("results") ||
       combined.includes("financial results") ||
+      combined.includes("agm") ||
+      combined.includes("annual general meeting") ||
       /q[1-4]/.test(combined) ||
       /fy\d{2}/.test(combined);
 
-    if (isGenericMeet && !hasEarningsKeywords) {
-      return null; // Ignore audio of private / generic investor meets
+    if (isGenericMeet && !hasEarningsOrAgmKeywords) {
+      return null; // Ignore audio of private / generic investor meets without earnings/AGM context
     }
     return "audio";
   }
