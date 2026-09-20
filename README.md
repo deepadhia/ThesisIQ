@@ -1,65 +1,61 @@
-# 🧠 ThesisIQ v3.3.1 — Market–Thesis Valuation Reconciliation & Fundamental Platform
+# 🧠 ThesisIQ v4.1-FROZEN — Transition Compounder, Duration Intelligence & Capital Deployment Platform
 
-A production-grade fundamental research, trajectory modeling, and market reconciliation platform for institutional equity compounding analysis.
+A production-grade fundamental research, duration decomposition, and capital deployment platform for institutional equity compounding analysis.
 
-ThesisIQ combines **8-Layer Reality Compounding Architecture (v3.1)**, **Fundamental Trajectory & Management Evidence Engine (v3.2)**, **Market–Thesis Valuation Reconciliation & Duration Engine (v3.3)**, **Forensic FCFF Reinvestment Modeling**, **Reverse Duration Solvers**, and a **Zero-Contradiction Deterministic Decision State Machine** to explain why market prices differ from modeled fair values, identify genuine multibaggers, and provide actionable context for portfolio managers.
+ThesisIQ combines **6-Layer Reality Compounding Architecture**, **Forensic FCFF Accounting Truth (v3.1.1)**, **Fundamental Trajectory & Management Promise Ledger (v3.2)**, **Market–Thesis Valuation Reconciliation (v3.3.1)**, **Duration & Transition Compounder Intelligence (v4.1)**, and a **Deterministic Capital Deployment Action Layer** to resolve valuation paralysis, identify genuine multi-year compounders, and provide actionable portfolio capital deployment conditions.
 
-> **Core Operating Mandate:** Disentangle *Forensic Accounting Truth*, *Forward Incremental Capital Economics (iROIC)*, *Underwritten Earnings Power*, *Management Promise Delivery*, *Market Implied Duration & Expectations*, and *Capital Allocation Directives* rather than collapsing them into an oversimplified score.
+> **Core Operating Mandate:** Disentangle *Forensic Accounting Truth*, *Forward Incremental Capital Economics (iROIC)*, *Underwritten Earnings Power*, *Management Promise Delivery*, *Market-Implied Expectations & Duration*, and *Institutional Capital Deployment Eligibility* rather than collapsing them into an oversimplified single score.
 
 ---
 
-## 🏛️ The 8 Sequential Reality Layers
+## 🏛️ The 6 Sequential Analytical Layers
 
-ThesisIQ v3.1 evaluates every company through **8 Sequential Reality Layers**:
+ThesisIQ evaluates every company through **6 Sequential Analytical Layers**:
 
 ```text
-       ┌─────────────────────────────────────────────────────────────┐
-       │ Layer 1: Forensic Truth & Cash Conversion Diagnostics       │
-       │ FCFF₀ = NOPAT₀ - ΔNOA₀ | Cash conversion risk gates         │
-       └──────────────────────────────┬──────────────────────────────┘
-                                      ▼
-       ┌─────────────────────────────────────────────────────────────┐
-       │ Layer 2: Multibagger Economic Engine                        │
-       │ Effective Forward iROIC | Contradictory evidence priority   │
-       └──────────────────────────────┬──────────────────────────────┘
-                                      ▼
-       ┌─────────────────────────────────────────────────────────────┐
-       │ Layer 3: Underwritten Future Earnings (Capacity & Orders)   │
-       │ Underwritten NOPAT CAGR | Reinvestment Rate (g / iROIC)     │
-       └──────────────────────────────┬──────────────────────────────┘
-                                      ▼
-       ┌─────────────────────────────────────────────────────────────┐
-       │ Layer 4: Market Expectations Gap & FCFF Conversion          │
-       │ Expectations Gap = Underwritten NOPAT CAGR - Implied FCFF g │
-       │ FCFF Conversion Status (4-Tier) | FCFF Conversion Drag      │
-       └──────────────────────────────┬──────────────────────────────┘
-                                      ▼
-       ┌─────────────────────────────────────────────────────────────┐
-       │ Layer 5: 5× Economic Pathway Feasibility (7-Year Horizon)   │
-       │ 25.85% CAGR benchmark | TAM Burden % | Market Share Delta   │
-       └──────────────────────────────┬──────────────────────────────┘
-                                      ▼
-       ┌─────────────────────────────────────────────────────────────┐
-       │ Layer 6: Institutional DCF (Enterprise Value Bridge)        │
-       │ FCFF_t = NOPAT_t(1 - RR_t) for t=1..10 | WACC | Net Cash    │
-       └──────────────────────────────┬──────────────────────────────┘
-                                      ▼
-       ┌─────────────────────────────────────────────────────────────┐
-       │ Layer 7: Asymmetry & Downside Risk Modeling                 │
-       │ Dual Bear Floor: min(DCF Bear, Multiple Stress) | Signed Asym│
-       └──────────────────────────────┬──────────────────────────────┘
-                                      ▼
-       ┌─────────────────────────────────────────────────────────────┐
-       │ Layer 8: Deterministic Decision Engine & Evolution          │
-       │ 3-Way Conviction Separation | Zero Contradiction Rules       │
-       └─────────────────────────────────────────────────────────────┘
+                               ┌────────────────────────────────┐
+                               │     v3.1.1 DCF Truth (FCFF)    │
+                               │ "What is provable today?"      │
+                               │ (Frozen Intrinsic Fair Value)  │
+                               └───────────────┬────────────────┘
+                                               │
+                               ┌───────────────▼────────────────┐
+                               │     v3.2 Evidence Truth        │
+                               │ "What is actually happening?"  │
+                               │ (Audited Actuals & Backlog)    │
+                               └───────────────┬────────────────┘
+                                               │
+                               ┌───────────────▼────────────────┐
+                               │  v3.3.1 Market Reconciliation  │
+                               │ "What is market demanding?"    │
+                               │ (7 Gaps & Sequential Bridge)   │
+                               └───────────────┬────────────────┘
+                                               │
+                               ┌───────────────▼────────────────┐
+                               │  v4.1 Duration Intelligence    │
+                               │ "What economic mechanism       │
+                               │  sustains market demands?"     │
+                               │  (D1-D5, Phase & 4-Quadrant)   │
+                               └───────────────┬────────────────┘
+                                               │
+                               ┌───────────────▼────────────────┐
+                               │  Causal Milestone Engine       │
+                               │ "What observation resolves the │
+                               │  missing evidence & risk?"     │
+                               └───────────────┬────────────────┘
+                                               │
+                               ┌───────────────▼────────────────┐
+                               │  Capital Deployment Layer      │
+                               │ "What conditions unlock        │
+                               │  incremental portfolio capital?"│
+                               └────────────────────────────────┘
 ```
 
 ---
 
 ## 🔍 Core Methodologies
 
-### 1. Forensic Cash Flow & Reinvestment Identity (Layer 1 & 6)
+### 1. Forensic Cash Flow & Reinvestment Identity (Layer 1)
 For statutory baseline and all forecast years $t=1..10$:
 $$\text{FCFF}_t = \text{NOPAT}_t - \Delta\text{NOA}_t = \text{NOPAT}_t \left(1 - \frac{g_t}{\text{Effective Forward iROIC}}\right)$$
 $$\text{where } \Delta\text{NOA}_t = \text{Capex}_t - \text{D\&A}_t + \Delta\text{NWC}_t = \frac{\Delta\text{NOPAT}_t}{\text{Forward iROIC}}$$
@@ -67,138 +63,147 @@ $$\text{where } \Delta\text{NOA}_t = \text{Capex}_t - \text{D\&A}_t + \Delta\tex
 * **Modeled Forward Conversion:** $\text{Modeled Conversion} = 1.0 - \frac{g_{NOPAT}}{\text{Forward iROIC}}$
 * **Reinvestment Rate:** $\text{RR} = \frac{g_{NOPAT}}{\text{Forward iROIC}} \times 100$
 
-### 2. Market Expectations Gap (Layer 4)
-Solves the market-implied growth rate embedded in current enterprise value via 2-stage reverse DCF:
-$$\text{Expectations Gap (\% pts)} = \text{Underwritten NOPAT CAGR} - \text{Market-Implied FCFF CAGR}$$
-$$\text{FCFF Conversion Drag (\% pts)} = \text{Underwritten NOPAT CAGR} - \text{Underwritten FCFF CAGR}$$
+### 2. Market–Thesis Reconciliation & Gap Deconstruction (Layer 3)
+Deconstructs the mathematical gap between current market price and underwritten DCF fair value into **7 Core Economic Gaps**:
+1. *Growth Gap*: $\Delta g = g_{\text{market}} - g_{\text{underwritten}}$ (% pts).
+2. *Duration Gap*: $\Delta T = T_{\text{req}} - T_{\text{underwritten}}$ (Years of uninterrupted compounding required).
+3. *Margin Gap*: $\Delta \text{Margin} = \text{EBITDA Margin}_{\text{req}} - \text{EBITDA Margin}_{\text{underwritten}}$ (bps).
+4. *iROIC Gap*: $\Delta \text{iROIC} = \text{iROIC}_{\text{req}} - \text{iROIC}_{\text{forward}}$ (% pts).
+5. *Reinvestment Gap*: $\Delta \text{Capital} = \text{NOA}_{\text{req}} - \text{NOA}_{\text{capacity}}$ (₹ Cr).
+6. *Optionality Gap*: Unmodeled economic value from high-voltage grid lines, megaprojects, and M&A vectors.
+7. *Terminal Economics Gap*: Terminal ROIC transformation and long-horizon multiple persistence.
 
-* **Finite CAGR Invariant:** FCFF CAGR is computed if and only if both $\text{FCFF}_0 > 0$ and $\text{FCFF}_5 > 0$. If $\text{FCFF}_5 \le 0$ or $\text{FCFF}_0 \le 0$, `underwrittenFcffCagr` is strictly clamped to `null` (`N/A`) to prevent mathematically invalid negative CAGRs.
+### 3. Duration Intelligence & 4-Quadrant Opportunity Matrix (Layer 4)
+Classifies every company across **5 Duration Quality Tiers** ($D_1 \to D_5$), **7 Lifecycle Phases**, and **4 Investment Situations**:
 
-### 3. Deterministic 4-Tier FCFF Conversion Status Hierarchy
-Configured via strict constants in `FCFF_CONVERSION_THRESHOLDS`:
-- **Tier A: `FCFF_RECOVERY_REQUIRED` (Precedence):** Triggered by working-capital stress ($\text{CFO/PAT} < 0.65$, debtor days $> 100$, or baseline $\text{FCFF}_0 \le 0$). Example: **Transrail** (115 debtor days, 0.55 CFO/PAT).
-- **Tier B: `FCFF_NEGATIVE_DURING_GROWTH`:** Triggered when growth reinvestment consumes more capital than NOPAT generates ($RR > 100\%$ or $\text{FCFF}_5 \le 0$). Examples: **Anant Raj**, **Gravita**, **Jyoti CNC**, **Policybazaar**.
-- **Tier C: `CAPITAL_INTENSIVE`:** Growth is value-accretive ($\text{iROIC} > \text{WACC}$) and terminal $\text{FCFF}_5 > 0$, but high capital absorption occurs ($RR > 65\%$ or Conversion $< 35\%$). Example: **HBL Power** (NOPAT 28%, iROIC 37.5%, RR 74.7%, Conversion 25.3%, FCFF CAGR 5.1%, Drag +22.9% pts).
-- **Tier D: `POSITIVE_CASH_COMPOUNDER`:** Conversion is strong and clean ($RR \le 65\%$, Conversion $\ge 35\%$). Examples: **INOX India**, **Quality Power**.
+```text
+┌────────────────────────────────────────────────────────────────────────────────────────┐
+│                        THESISIQ v4.1 OPPORTUNITY MATRIX (19 EQUITIES)                  │
+├────────────────────────────────────────┬───────────────────────────────────────────────┤
+│ SITUATION A: VALUE OPPORTUNITIES (4)   │ SITUATION B: COMPOUNDER OPPORTUNITIES (8)     │
+│ • Static DCF: Discounted / Aligned     │ • Static DCF: Expensive on 5Y discrete DCF   │
+│ • Duration: D1 / D2 / D3 Supported     │ • Duration: D1 Proven / D2 Transitioning     │
+│ • Capital Action: ADD / REVALIDATE     │ • Capital Action: ADD_ON_CORRECTION / NEXT_LEG│
+│ • Equities: TRANSRAILL, SKIPPER,       │ • Equities: ANANTRAJ, SJS, HSCL, GRAVITA,    │
+│   HBLENGINE, JSLL                      │   PGEL, LUMAXTECH, CCL, SBCL                  │
+├────────────────────────────────────────┼───────────────────────────────────────────────┤
+│ SITUATION C: MILESTONE OPPORTUNITIES (1)│ SITUATION D: EXPECTATION RISKS (6)           │
+│ (Validation Phase — e.g. QPower)       │ (Speculative Multiples / De-Rating Traps)    │
+│ • Static DCF: Expensive                │ • Static DCF: Expensive                       │
+│ • Duration: D2 / D3 (Physical Plant 8x)│ • Duration: D4 Speculative / D5 Broken        │
+│ • Capital Action: WAIT_FOR_MILESTONE   │ • Capital Action: HOLD / THESIS_BREAKER       │
+│ • Equities: QPOWER                     │ • Equities: INOXINDIA, POLICYBZR, ELECON,     │
+│                                        │   JYOTICNC, TIMETECHNO, SHAKTIPUMP            │
+└────────────────────────────────────────┴───────────────────────────────────────────────┘
+```
 
-### 4. 🚨 Crucial Architectural Invariant: $\text{FCFF\_CONVERSION\_STATUS} \neq \text{DECISION\_STATE}$
-Conversion status describes the operational cash economics across the forecast horizon, while the Decision Engine evaluates thesis survivability.
-- **Transrail:** `FCFF_RECOVERY_REQUIRED` + `UNDER_REVALIDATION` $\to$ **`COMPOUNDING_AT_FAIR_PRICE` (MONITOR)**
-- **Shakti Pumps:** `FCFF_RECOVERY_REQUIRED` + `BROKEN` $\to$ **`STRUCTURAL_VALUE_TRAP` (SYSTEMATIC EXIT)**
+### 4. Institutional Capital Deployment Action Layer (Layer 6)
+Translates analytical truth into **7 Deterministic Capital Deployment States** with strict hierarchical precedence:
+
+```text
+1. THESIS_BREAKER             → Structural breakdown in unit economics or cash bleed (Trim / Exit)
+2. REVALIDATE                  → Underwriting uncorroborated or WC friction; do not average down
+3. WAIT_FOR_MILESTONE          → Physical plant ready; pending commercial billing verification
+4. WAIT_FOR_NEXT_LEG_EVIDENCE  → Core compounder intact; additional capital requires next-leg dispatches
+5. ADD_ACCUMULATE_REVIEW       → Active accumulation zone; valuation attractive, fundamentals intact
+6. ADD_ON_CORRECTION           → Pre-authorized watch condition; deploy on pullback toward triggers
+7. HOLD                        → Maintain existing position; extreme multiple prevents new capital
+```
+
+#### Dual Correction Triggers:
+- **Expectations Condition (`priceAtEvidenceCeiling`)**: Price where $g_{\text{market}} = g_{\text{credible}}$.
+- **Valuation Condition (`priceAt25PctMoS`)**: Price at $25\%$ Margin of Safety to DCF Fair Value ($0.75 \times FV$).
+
+#### The 2x2 Matrix & Anti-Averaging-Down Invariant:
+```text
+                            FUNDAMENTAL TRAJECTORY & HEALTH
+                         INTACT                        DETERIORATING
+PRICE ↓
+  (Pullback)  ┌──────────────────────────────┬───────────────────────────────┐
+              │ ADD_ACCUMULATE_REVIEW /      │ REVALIDATE /                  │
+              │ ADD_ON_CORRECTION            │ THESIS_BREAKER                │
+              │ (Valuation/Expectation Clears)│ (Anti-Averaging-Down Rule)   │
+              ├──────────────────────────────┼───────────────────────────────┤
+PRICE → / ↑   │ HOLD /                       │ REVALIDATE /                  │
+  (Rally/Flat)│ WAIT_FOR_NEXT_LEG /          │ THESIS_BREAKER                │
+              │ WAIT_FOR_MILESTONE           │ (Structural Trim / Exit)      │
+              └──────────────────────────────┴───────────────────────────────┘
+```
 
 ---
 
-## 🎯 5× Economic Pathway Feasibility Model (Layer 5)
+## 🚦 Master Universe Coverage Summary (19 Equities)
 
-Evaluates whether a company can 5× its NOPAT over a standard 7-year horizon ($\approx 25.85\%$ CAGR benchmark):
-- **Required 5× Revenue:** $\frac{\text{Target 5× NOPAT}}{\text{Target Net Margin}}$
-- **Required 5× NOA:** $\frac{\text{Target 5× NOPAT}}{\text{Effective Forward iROIC}}$
-- **Incremental Capital Required:** $\max(0, \text{Required 5× NOA} - \text{Current NOA})$
-- **TAM Burden (%):** $\frac{\text{Required 5× Revenue}}{\text{Addressable TAM}} \times 100$
-- **Market Share Expansion Delta (%):** $\text{Required 5× Market Share} - \text{Current Market Share}$
-
----
-
-## 🛡️ Downside Risk & Asymmetry Modeling (Layer 7)
-
-### Dual-Methodology Bear Floor
-$$\text{Bear Floor Price} = \min(\text{DCF Bear Floor}, \text{Multiple Stress Floor})$$
-1. **DCF Bear Floor:** Formal DCF with -30% growth cut, stressed iROIC, +150 bps WACC (13.0%), 2.0% terminal growth, and 20% multiple haircut.
-2. **Multiple Stress Floor:** Cyclical trough multiple compression (40% multiple contraction, min 12x P/E) adjusted for net debt/cash bridge.
-
-### Signed Asymmetry Ratio
-$$\text{Signed Asymmetry Ratio} = \frac{\text{Intrinsic Fair Value} - \text{Current Price}}{\max(1.0, \text{Current Price} - \text{Bear Floor Price})}$$
-Preserves negative ratios when stock trades above Intrinsic Fair Value.
-
----
-
-## 🚦 Opportunity Classification Surface
-
-| Tier | Meaning | Capital Allocation Action |
-| :--- | :--- | :--- |
-| 🟢 `TOP_CONVICTION_DISLOCATION` | Asymmetry $\ge 3.0:1$, Margin of Safety $\ge 25\%$, 3-Year IRR $\ge 20\%$ | Prime Fresh-Capital Candidate (ACCUMULATE) |
-| 🟡 `COMPOUNDING_AT_FAIR_PRICE` | Proven compounder compounding steadily near fair value | Hold Core Position |
-| 🔵 `OVERVALUED_COMPOUNDER` | Outstanding execution, but multiple exceeds fair value ceiling | Capital Protection / Trim Chasing |
-| 🟠 `WATCHLIST_FRICTION` | Thesis under observation or working capital friction | Pause Incremental Capital |
-| 🔴 `STRUCTURAL_VALUE_TRAP` | Broken thesis, solvency failure, or value destruction | Zero Allocation / Systematic Exit |
+| Deployment State | Count | Equities | Core Portfolio Mandate |
+| :--- | :---: | :--- | :--- |
+| **`ADD_ACCUMULATE_REVIEW`** | 2 | `TRANSRAILL`, `SKIPPER` | Active accumulation zone; valuation attractive, fundamentals intact. |
+| **`ADD_ON_CORRECTION`** | 1 | `ANANTRAJ` | Pre-authorized watch condition; deploy on pullback toward triggers without impairment. |
+| **`WAIT_FOR_NEXT_LEG_EVIDENCE`** | 5 | `SJS`, `HSCL`, `GRAVITA`, `PGEL`, `LUMAXTECH` | Gated deployment; additional capital requires audited dispatches from next growth leg. |
+| **`WAIT_FOR_MILESTONE`** | 1 | `QPOWER` | Phased sizing; physical plant ready, awaiting commercial billing verification. |
+| **`REVALIDATE`** | 3 | `HBLENGINE`, `TIMETECHNO`, `JSLL` | Working capital friction or under-supported model; do not average down blindly. |
+| **`HOLD`** | 6 | `CCL`, `SBCL`, `INOXINDIA`, `POLICYBZR`, `ELECON`, `JYOTICNC` | Maintain existing allocation; extreme valuation premium prevents new capital addition. |
+| **`THESIS_BREAKER`** | 1 | `SHAKTIPUMP` | Structural breakdown in economics, subsidy freeze, or cash bleed. Freeze deployment. |
 
 ---
 
 ## 🧪 Invariant Test Coverage
 
-ThesisIQ enforces strict mathematical invariant test suites with **100% pass rate (142 / 142 tests passing)**:
+ThesisIQ enforces strict mathematical invariant test suites with **100% pass rate (574 / 574 tests passing)**:
 
-```text
-================================================================================================
-🧪 THESISIQ INVARIANT TEST SUITES
-================================================================================================
-1. test-fundamental-trajectory-engine.js      279/279 PASS  (Three Truths, Signals, Directives, Promise Ledger, DB Bridge, Catch-Up Dynamics, Hurdle)
-2. test-reverse-dcf-v3-integrity.js            63/63 PASS  (FCFF Identity, 4-Tier Status, Regimes)
-3. test-asymmetric-mispricing-ranking.js        22/22 PASS  (Reverse-DCF Sensitivity, Multiples)
-4. test-market-valuation-integrity.js          33/33 PASS  (Parser Math, Trailing PE, Database Loading)
-5. test-valuation-dislocation-watchdog.js      24/24 PASS  (Anti-Spam Cooldown, Gating Invariants)
-------------------------------------------------------------------------------------------------
-TOTAL TEST COVERAGE: 421/421 PASSING (100% INVARIANT SAFETY)
-================================================================================================
-```
+| Test Suite | File | Tests Passed | Key Invariants Verified |
+| :--- | :--- | :---: | :--- |
+| **v4.1 Duration & Capital Deployment** | `backend/scripts/test-v4-duration-intelligence.js` | **22 / 22 PASS** | 7 Deployment States, Dual Triggers, 2x2 Matrix Invariants, Milestone & Next-Leg Gates |
+| **v3.1.1 Reverse DCF & FCFF Integrity** | `backend/scripts/test-reverse-dcf-v3-integrity.js` | **63 / 63 PASS** | FCFF Accounting Identity, Forward iROIC, Dual Bear Floors, Asymmetry Ratios |
+| **v3.2 Fundamental Trajectory & Ledger** | `backend/scripts/test-fundamental-trajectory-engine.js` | **279 / 279 PASS** | Promise Ledger Schema, Dynamic Credibility Derivation, Database Adapter, Multi-Engine Vectors |
+| **v3.3.1 Market-Thesis Reconciliation** | `backend/scripts/test-market-thesis-reconciliation.js` | **210 / 210 PASS** | 9-State Taxonomy, Sequential Scenario Bridge, 7-Gap Deconstruction |
+| **TOTAL VERIFIED COVERAGE** | | **574 / 574 PASS** | **100% Mathematical & Invariant Safety** |
 
 ---
 
 ## ⚙️ Running the System
 
-### 1. Run v3.3 Market–Thesis Reconciliation Engine
+### 1. Run v4.1 Market–Thesis Reconciliation & Capital Deployment Engine
 ```bash
 node --env-file=.env.local backend/scripts/run-market-thesis-reconciliation.js
 ```
-Generates complete Markdown dossier at `reports/thesis_board/MARKET_THESIS_RECONCILIATION_DOSSIER_V3_3.md`.
+Generates master Markdown dossier at `reports/thesis_board/MARKET_THESIS_RECONCILIATION_DOSSIER_V3_3.md`.
 
-### 2. Run v3.2 Fundamental Trajectory & Evidence Engine
+### 2. Run Point-in-Time Walk-Forward Backtest Audit
+```bash
+node --env-file=.env.local backend/scripts/run-duration-compounder-backtest.js
+```
+Generates walk-forward backtest audit at `reports/thesis_board/DURATION_COMPOUNDER_BACKTEST_AUDIT.md`.
+
+### 3. Run Fundamental Trajectory & Management Evidence Engine
 ```bash
 node --env-file=.env.local backend/scripts/run-fundamental-trajectory-engine.js
 ```
-Generates complete Markdown dossier at `reports/thesis_board/FUNDAMENTAL_TRAJECTORY_DOSSIER_V3_2.md`.
-
-### 3. Run v3.1.1 Institutional Valuation & Asymmetry Ranking
-```bash
-node --env-file=.env.local backend/scripts/run-asymmetric-mispricing-ranking.js
-```
-Generates complete Markdown dossier at `reports/thesis_board/ASYMMETRIC_MISPRICING_RANKING_18_STOCKS.md`.
+Generates fundamental trajectory dossier at `reports/thesis_board/FUNDAMENTAL_TRAJECTORY_DOSSIER_V3_2.md`.
 
 ### 4. Run Invariant Test Suites
 ```bash
+node --env-file=.env.local backend/scripts/test-v4-duration-intelligence.js
 node --env-file=.env.local backend/scripts/test-market-thesis-reconciliation.js
 node --env-file=.env.local backend/scripts/test-fundamental-trajectory-engine.js
 node --env-file=.env.local backend/scripts/test-reverse-dcf-v3-integrity.js
-node --env-file=.env.local backend/scripts/test-asymmetric-mispricing-ranking.js
-node --env-file=.env.local backend/scripts/test-market-valuation-integrity.js
-node --env-file=.env.local backend/scripts/test-valuation-dislocation-watchdog.js
-```
-
-### 5. Start Background Server
-```bash
-npm run dev
 ```
 
 ---
 
 ## 🏛️ Engineering Design Principles
 
-1. **Forensic Accounting Truth Before Valuation Models**
-2. **5-Dimension Fundamental Reality Architecture (Credibility, Guidance, Growth, Economic Quality, Thesis Status)**
-3. **Multidimensional Action Context for Existing Position Holders**
-4. **Conditional Multi-Underwriting DCF Price Matrices**
-5. **Zero Manual Database Overrides**
-6. **No Static Ticker Branches or Hardcoded Figures**
-7. **Point-in-Time Integrity Without Future Leaks**
-8. **Modeled Reinvestment Derived Directly from Forward iROIC**
-9. **No Undefined Negative CAGRs (Clamped to Null/NA)**
-10. **Strict Separation of Cash Economics from Decision States**
-11. **Dual-Methodology Downside Anchors**
-12. **Idempotent 7-Day Anti-Spam Notification Watchdog**
-13. **Deterministic Zero-Contradiction Decision Engine**
+1. **Forensic Accounting Truth Before Valuation Models**: $\text{FCFF}_0 = \text{NOPAT}_0 - \Delta\text{NOA}_0$.
+2. **Three-Ceiling Epistemic Separation**: `MARKET_REQUIRED_GROWTH` vs `CREDIBLE_EVIDENCE_CEILING` vs `SCENARIO_CEILING`.
+3. **Translational Capital Deployment**: Capital states derive deterministically without altering underlying valuation truth.
+4. **Dual Correction Triggers**: Separate expectations condition from valuation condition; never collapse into one number.
+5. **Anti-Averaging-Down Invariant**: Price drops accompanied by fundamental deterioration route strictly to `REVALIDATE` or `THESIS_BREAKER`.
+6. **Zero Manual Database Overrides**: Data and states compute dynamically via code and prompt logic.
+7. **No Static Ticker Branches**: Pure generic mathematical rules evaluated deterministically across all equities.
+8. **Point-in-Time Integrity Without Future Leaks**: Walk-forward backtests strictly isolate historical information boundaries.
 
 ---
 
-**Status:** Production (v3.2.0 Fundamental Trajectory & Management Evidence Engine)  
-**Coverage Universe:** 18 High-Conviction Holdings  
-**License:** Private / Proprietary Research Engine
+**Status:** Production (v4.1-FROZEN Transition Compounder, Duration Intelligence & Capital Deployment Platform)  
+**Coverage Universe:** 19 High-Conviction Core Compounders  
+**Documentation:** [Architecture & Methodology Guide](docs/THESISIQ_V4_ARCHITECTURE.md)  
+**License:** Private / Proprietary Institutional Research Engine

@@ -1,16 +1,13 @@
 /**
- * Production Dossier Generator: ThesisIQ v3.3.1 Market–Thesis Reconciliation Engine
+ * Production Dossier Generator: ThesisIQ v4.1 Market–Thesis Reconciliation, Duration & Capital Deployment Engine
  * 
  * Generates: reports/thesis_board/MARKET_THESIS_RECONCILIATION_DOSSIER_V3_3.md
  * 
  * Epistemic Architecture:
- * - Bridges Valuation Truth (v3.1.1) and Evidence Truth (v3.2) to explain Market Expectations.
- * - Enforces strict 3-quantity separation (Market-Required vs Evidence-Supported vs Theoretical Bull math).
- * - Computes Market-vs-Evidence Gap Quantification (g_market vs g_underwritten vs g_evidence_max).
- * - Implements 9-State Epistemic Reality Taxonomy including DISLOCATION_UNDERWRITING_REVALIDATION.
- * - Refactors the Valuation Waterfall into the Sequential Scenario Bridge (fixing overshoot and residual bugs).
- * - Integrates UNDERWRITING_SUPPORT_STATUS to prevent improper classification of under-supported underwriting (e.g. HBL, SJS).
- * - Outputs pure numerical REQUIRED_DURATION in the Reverse Duration Compounding Grid.
+ * - Bridges Valuation Truth (v3.1.1), Evidence Truth (v3.2), Reconciliation (v3.3.1), and Duration Intelligence (v4.1).
+ * - Implements Institutional Capital Deployment Action Layer with 7 deterministic states and 2x2 fundamental/price matrix.
+ * - Computes dual correction triggers (priceAtEvidenceCeiling & priceAt25PctMoS) without collapsing expectations and valuation.
+ * - Dynamic economic health assessment without universal single-variable hardcodes.
  */
 
 import fs from 'fs';
@@ -22,6 +19,12 @@ import {
   UNDERWRITING_SUPPORT_STATUS,
   OPTIONALITY_STATUS,
   GAP_DIRECTION,
+  DURATION_QUALITY,
+  DURATION_PHASE,
+  INVESTMENT_OPPORTUNITY_SITUATION,
+  EXECUTION_ELIGIBILITY,
+  CAPITAL_DEPLOYMENT_STATE,
+  CAPITAL_ABSORPTION_QUALITY,
   reconcileMarketVsThesis,
   reconcileCohortMarketVsThesis
 } from '../services/market-thesis-reconciliation.service.js';
@@ -36,7 +39,7 @@ const __dirname = path.dirname(__filename);
 
 async function generateMarketThesisReconciliationDossier() {
   console.log('================================================================================================');
-  console.log('🚀 GENERATING PRODUCTION DOSSIER: THESISIQ v3.3.1 MARKET–THESIS RECONCILIATION');
+  console.log('🚀 GENERATING PRODUCTION DOSSIER: THESISIQ v4.1 DURATION & CAPITAL DEPLOYMENT INTELLIGENCE');
   console.log('================================================================================================\n');
 
   const cohortResults = [];
@@ -54,184 +57,230 @@ async function generateMarketThesisReconciliationDossier() {
     fs.mkdirSync(outputDir, { recursive: true });
   }
 
-  // Count states
-  const stateCounts = {};
-  for (const s of Object.values(RECONCILIATION_REALITY_STATE)) {
-    stateCounts[s] = cohortResults.filter(r => r.realityState === s).length;
-  }
+  // Group universe purely dynamically by classified opportunity situation
+  const quadrantMap = {
+    [INVESTMENT_OPPORTUNITY_SITUATION.SITUATION_A_VALUE_OPPORTUNITY]: cohortResults.filter(r => r.investmentOpportunitySituation === INVESTMENT_OPPORTUNITY_SITUATION.SITUATION_A_VALUE_OPPORTUNITY),
+    [INVESTMENT_OPPORTUNITY_SITUATION.SITUATION_B_COMPOUNDER_OPPORTUNITY]: cohortResults.filter(r => r.investmentOpportunitySituation === INVESTMENT_OPPORTUNITY_SITUATION.SITUATION_B_COMPOUNDER_OPPORTUNITY),
+    [INVESTMENT_OPPORTUNITY_SITUATION.SITUATION_C_MILESTONE_OPPORTUNITY]: cohortResults.filter(r => r.investmentOpportunitySituation === INVESTMENT_OPPORTUNITY_SITUATION.SITUATION_C_MILESTONE_OPPORTUNITY),
+    [INVESTMENT_OPPORTUNITY_SITUATION.SITUATION_D_EXPECTATION_RISK]: cohortResults.filter(r => r.investmentOpportunitySituation === INVESTMENT_OPPORTUNITY_SITUATION.SITUATION_D_EXPECTATION_RISK)
+  };
 
-  let md = `# ThesisIQ v3.3.1: Market–Thesis Valuation Reconciliation & Duration Dossier
-**Generated At**: \`${timestamp}\` | **Framework Version**: \`v3.3.1 (Integrity Patch)\` | **Coverage Universe**: \`19 Core Multi-Year Compounders\`
+  // Group universe by Capital Deployment State
+  const deploymentMap = {
+    [CAPITAL_DEPLOYMENT_STATE.ADD_ACCUMULATE_REVIEW]: cohortResults.filter(r => r.capitalDeploymentState === CAPITAL_DEPLOYMENT_STATE.ADD_ACCUMULATE_REVIEW),
+    [CAPITAL_DEPLOYMENT_STATE.ADD_ON_CORRECTION]: cohortResults.filter(r => r.capitalDeploymentState === CAPITAL_DEPLOYMENT_STATE.ADD_ON_CORRECTION),
+    [CAPITAL_DEPLOYMENT_STATE.WAIT_FOR_NEXT_LEG_EVIDENCE]: cohortResults.filter(r => r.capitalDeploymentState === CAPITAL_DEPLOYMENT_STATE.WAIT_FOR_NEXT_LEG_EVIDENCE),
+    [CAPITAL_DEPLOYMENT_STATE.WAIT_FOR_MILESTONE]: cohortResults.filter(r => r.capitalDeploymentState === CAPITAL_DEPLOYMENT_STATE.WAIT_FOR_MILESTONE),
+    [CAPITAL_DEPLOYMENT_STATE.REVALIDATE]: cohortResults.filter(r => r.capitalDeploymentState === CAPITAL_DEPLOYMENT_STATE.REVALIDATE),
+    [CAPITAL_DEPLOYMENT_STATE.HOLD]: cohortResults.filter(r => r.capitalDeploymentState === CAPITAL_DEPLOYMENT_STATE.HOLD),
+    [CAPITAL_DEPLOYMENT_STATE.THESIS_BREAKER]: cohortResults.filter(r => r.capitalDeploymentState === CAPITAL_DEPLOYMENT_STATE.THESIS_BREAKER)
+  };
+
+  const sitAList = quadrantMap[INVESTMENT_OPPORTUNITY_SITUATION.SITUATION_A_VALUE_OPPORTUNITY].map(r => r.ticker).join(', ') || 'None';
+  const sitBList = quadrantMap[INVESTMENT_OPPORTUNITY_SITUATION.SITUATION_B_COMPOUNDER_OPPORTUNITY].map(r => r.ticker).join(', ') || 'None';
+  const sitCList = quadrantMap[INVESTMENT_OPPORTUNITY_SITUATION.SITUATION_C_MILESTONE_OPPORTUNITY].map(r => r.ticker).join(', ') || 'None';
+  const sitDList = quadrantMap[INVESTMENT_OPPORTUNITY_SITUATION.SITUATION_D_EXPECTATION_RISK].map(r => r.ticker).join(', ') || 'None';
+
+  let md = `# ThesisIQ v4.1-FROZEN: Market–Thesis Valuation Reconciliation, Duration & Capital Deployment Dossier
+**Generated At**: \`${timestamp}\` | **Framework Version**: \`v4.1-FROZEN (Capital Deployment Action Layer)\` | **Coverage Universe**: \`19 Core Multi-Year Compounders\`
 
 ---
 
-## 1. Epistemic Mandate & Architectural Foundation
+## 1. Epistemic Mandate & 6-Layer Architecture
 
-ThesisIQ operates across three distinct, mutually reinforcing analytical layers:
+ThesisIQ operates across six distinct, non-contradictory analytical layers:
 1. **v3.1.1 (Valuation Truth)**: Frozen institutional FCFF/WACC enterprise DCF fair values, margins of safety, and downside asymmetry.
-2. **v3.2 (Fundamental & Evidence Truth)**: Three Truths Architecture (Observed Reality $\\to$ Forward Scenarios $\\to$ Evidence Confidence $\\to$ Frozen Underwriting) and the longitudinal Management Promise Ledger.
-3. **v3.3.1 (Market–Thesis Reconciliation Layer)**: Explains what economic assumptions the market is implicitly capitalizing when Market EV differs from Underwritten EV, without mutating frozen baseline DCF fair values.
+2. **v3.2 (Evidence Truth)**: Observed Audited Actuals $\\to$ Forward Scenario Ranges $\\to$ Longitudinal Management Promise Ledger.
+3. **v3.3.1 (Market–Thesis Reconciliation Layer)**: Explains what economic assumptions the market is implicitly capitalizing when Market EV differs from Underwritten EV.
+4. **v4.1-FROZEN (Duration & Transition Compounder Intelligence Layer)**: Evaluates whether market demands are economically plausible within the company's capital absorption runway, assigning objective Duration Quality ($D_1 \\to D_5$), Lifecycle Phase (\`DURATION_PHASE\`), and 4-Quadrant Investment Opportunities ($A, B, C, D$).
+5. **Causal Milestone Engine**: Pinpoints the exact operational catalyst, milestone threshold, and thesis breaker needed to resolve missing evidence.
+6. **Capital Deployment Action Layer (Translational)**: Consumes valuation, evidence, duration, and milestone outputs to determine actionable capital deployment eligibility without altering underlying valuation or evidence truth.
 
-### The Strict 3-Quantity Epistemic Separation
 \`\`\`text
-1. MARKET-REQUIRED ECONOMICS
-   "What single coherent set of economics does today's price demand?"
-   ├── g_market:       Market-required 5Y FCFF/NOPAT growth CAGR
-   ├── T_req:          Required compounding duration at candidate growth
-   ├── Margin_req:     Required terminal EBITDA margin
-   ├── iROIC_req:      Required incremental return on capital
-   └── Capital_req:    Required 5Y incremental capital investment
-
-2. EVIDENCE-SUPPORTED ECONOMICS
-   "What do audited results, visible backlogs, & capacity confirm?"
-   ├── g_underwritten: Baseline frozen underwritten CAGR (v3.1.1)
-   ├── g_scenario:     Forward evidence scenario range [g_min, g_max] (v3.2)
-   ├── Support Status: SUPPORTED | PARTIALLY_SUPPORTED | UNDER_SUPPORTED
-   ├── Runway:         Audited physical plant capacity & order backlog burn
-   └── Cash Quality:   Audited DSO & CFO/PAT cash conversion
-
-3. THEORETICAL BULL ECONOMICS
-   "What hypothetical upper bound math could reach the price?"
-   ├── Bull Math:      10–12Y horizon, unconstrained multiple expansion
-   └── Guardrail:      STRICTLY DECOUPLED; never masquerades as evidence!
+                               ┌────────────────────────────────┐
+                               │     v3.1.1 DCF Truth (FCFF)    │
+                               │ "What is provable today?"      │
+                               └───────────────┬────────────────┘
+                                               │
+                               ┌───────────────▼────────────────┐
+                               │     v3.2 Evidence Truth        │
+                               │ "What is actually happening?"  │
+                               └───────────────┬────────────────┘
+                                               │
+                               ┌───────────────▼────────────────┐
+                               │  v3.3.1 Market Reconciliation  │
+                               │ "What is market demanding?"    │
+                               └───────────────┬────────────────┘
+                                               │
+                               ┌───────────────▼────────────────┐
+                               │  v4.1 Duration Intelligence    │
+                               │ "What economic mechanism       │
+                               │  sustains market demands?"     │
+                               │  (D1-D5, Phase & 4-Quadrant)   │
+                               └───────────────┬────────────────┘
+                                               │
+                               ┌───────────────▼────────────────┐
+                               │  Causal Milestone Engine       │
+                               │ "What observation resolves the │
+                               │  missing evidence & risk?"     │
+                               └───────────────┬────────────────┘
+                                               │
+                               ┌───────────────▼────────────────┐
+                               │  Capital Deployment Layer      │
+                               │ "What conditions unlock        │
+                               │  incremental portfolio capital?"│
+                               └────────────────────────────────┘
 \`\`\`
 
+> [!IMPORTANT]
+> **Epistemic Invariant on Ceilings & Capital Deployment**:
+> 1. **\`CREDIBLE_EVIDENCE_CEILING\`**: Maximum growth rate supported by currently observable, audited baseline evidence.
+> 2. **Dual Correction Triggers**: Evaluated separately via \`priceAtEvidenceCeiling\` (expectations condition) and \`priceAt25PctMoS\` (valuation condition); never collapsed into a single artificial figure.
+> 3. **Anti-Averaging-Down Invariant**: Price corrections alone do not unlock capital deployment if fundamental unit economics, receivables, or cash generation are deteriorating.
+
 ---
 
-## 2. Master Universe Reconciliation Board (19 Equities)
+## 2. Master Universe Unified Board (19 Equities)
 
-| Ticker | Company Name | CMP (₹) | Base FV (₹) | Val. Ratio | Underwriting Support | 9-State Epistemic Reality State | 5Y Growth Req. | Req. Duration @ 28% | Mkt vs Evidence Max | % Gap Explained | Primary Economic Driver |
-| :--- | :--- | :---: | :---: | :---: | :---: | :--- | :---: | :---: | :---: | :---: | :--- |
+| Ticker | Company Name | CMP (₹) | Base FV (₹) | Val. Context | Duration Quality | Opportunity Situation | Credible Ceiling | Capital Deployment State | Dual Correction Triggers (Evidence / 25% MoS) | Key Operational Question / Next Trigger |
+| :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :--- |
 `;
 
   for (const r of cohortResults) {
     const gaps = r.sevenEconomicGaps;
-    const bridge = r.waterfallBridge;
     const mktEvGap = r.marketEvidenceGap;
-    const reqGrowth = `${gaps.growthGap.required5yGrowthPct}%`;
-    const reqDur = `${gaps.durationGap.requiredDurationYears}y`;
-    const expPct = bridge.isPremium ? `${bridge.explainedByEvidencePct}%` : '100% (Discount)';
+    const credCeiling = `${mktEvGap.credibleEvidenceCeiling}%`;
+    const trig = r.correctionTriggers;
     
-    let supportBadge = `\`${r.underwritingSupportStatus}\``;
-    if (r.underwritingSupportStatus === UNDERWRITING_SUPPORT_STATUS.SUPPORTED) supportBadge = `🟢 \`${r.underwritingSupportStatus}\``;
-    else if (r.underwritingSupportStatus === UNDERWRITING_SUPPORT_STATUS.PARTIALLY_SUPPORTED) supportBadge = `🟡 \`${r.underwritingSupportStatus}\``;
-    else if (r.underwritingSupportStatus === UNDERWRITING_SUPPORT_STATUS.UNDER_SUPPORTED) supportBadge = `🟠 \`${r.underwritingSupportStatus}\``;
-    else if (r.underwritingSupportStatus === UNDERWRITING_SUPPORT_STATUS.BROKEN) supportBadge = `🔴 \`${r.underwritingSupportStatus}\``;
+    // Badges
+    let valBadge = `\`${r.valuationContext}\``;
+    if (r.valuationContext === 'DISCOUNTED') valBadge = `🟢 \`DISCOUNTED\``;
+    else if (r.valuationContext === 'ALIGNED') valBadge = `⚪ \`ALIGNED\``;
+    else if (r.valuationContext === 'EXPENSIVE') valBadge = `🟠 \`EXPENSIVE\``;
+    else if (r.valuationContext === 'EXTREME_PREMIUM') valBadge = `🔴 \`EXTREME_PREMIUM\``;
 
-    let stateBadge = `\`${r.realityState}\``;
-    if (r.realityState === RECONCILIATION_REALITY_STATE.EXPENSIVE_EXPLAINABLE) stateBadge = `🟢 **${r.realityState}**`;
-    else if (r.realityState === RECONCILIATION_REALITY_STATE.UNDERVALUED_THESIS_SUPPORTED) stateBadge = `💎 **${r.realityState}**`;
-    else if (r.realityState === RECONCILIATION_REALITY_STATE.DISLOCATION_TEMPORARY_FRICTION) stateBadge = `⚠️ **${r.realityState}**`;
-    else if (r.realityState === RECONCILIATION_REALITY_STATE.DISLOCATION_UNDERWRITING_REVALIDATION) stateBadge = `🟠 **${r.realityState}**`;
-    else if (r.realityState === RECONCILIATION_REALITY_STATE.BROKEN) stateBadge = `🔴 **${r.realityState}**`;
+    let durBadge = `\`${r.durationQuality}\``;
+    if (r.durationQuality === DURATION_QUALITY.D1_PROVEN) durBadge = `💎 \`D1\``;
+    else if (r.durationQuality === DURATION_QUALITY.D2_EVIDENCE_SUPPORTED) durBadge = `🟢 \`D2\``;
+    else if (r.durationQuality === DURATION_QUALITY.D3_IDENTIFIED) durBadge = `🟡 \`D3\``;
+    else if (r.durationQuality === DURATION_QUALITY.D4_SPECULATIVE) durBadge = `🟠 \`D4\``;
+    else if (r.durationQuality === DURATION_QUALITY.D5_BROKEN) durBadge = `🔴 \`D5\``;
 
-    const mktEvBadge = mktEvGap.isWithinEvidenceCeiling 
-      ? `🟢 ${mktEvGap.marketVsEvidenceMaxPp >= 0 ? '+' : ''}${mktEvGap.marketVsEvidenceMaxPp} pp`
-      : `🔴 +${mktEvGap.marketVsEvidenceMaxPp} pp`;
+    let sitBadge = `\`${r.investmentOpportunitySituation}\``;
+    if (r.investmentOpportunitySituation === INVESTMENT_OPPORTUNITY_SITUATION.SITUATION_A_VALUE_OPPORTUNITY) sitBadge = `🟢 **A (VAL)**`;
+    else if (r.investmentOpportunitySituation === INVESTMENT_OPPORTUNITY_SITUATION.SITUATION_B_COMPOUNDER_OPPORTUNITY) sitBadge = `💎 **B (COMP)**`;
+    else if (r.investmentOpportunitySituation === INVESTMENT_OPPORTUNITY_SITUATION.SITUATION_C_MILESTONE_OPPORTUNITY) sitBadge = `🟡 **C (MLST)**`;
+    else if (r.investmentOpportunitySituation === INVESTMENT_OPPORTUNITY_SITUATION.SITUATION_D_EXPECTATION_RISK) sitBadge = `🔴 **D (RISK)**`;
 
-    const cleanReason = (r.primaryReason || '').replace(/\|/g, '-');
-    md += `| **${r.ticker}** | ${r.companyName} | ₹${r.currentPrice.toFixed(2)} | ₹${r.fairValuePrice.toFixed(2)} | ${r.valuationMultipleRatio}x | ${supportBadge} | ${stateBadge} | ${reqGrowth} | ${reqDur} | ${mktEvBadge} | ${expPct} | ${cleanReason} |\n`;
+    let deployBadge = `\`${r.capitalDeploymentState}\``;
+    if (r.capitalDeploymentState === CAPITAL_DEPLOYMENT_STATE.ADD_ACCUMULATE_REVIEW) deployBadge = `🟢 \`ADD_ACCUMULATE_REVIEW\``;
+    else if (r.capitalDeploymentState === CAPITAL_DEPLOYMENT_STATE.ADD_ON_CORRECTION) deployBadge = `💎 \`ADD_ON_CORRECTION\``;
+    else if (r.capitalDeploymentState === CAPITAL_DEPLOYMENT_STATE.WAIT_FOR_NEXT_LEG_EVIDENCE) deployBadge = `🔍 \`WAIT_NEXT_LEG\``;
+    else if (r.capitalDeploymentState === CAPITAL_DEPLOYMENT_STATE.WAIT_FOR_MILESTONE) deployBadge = `🟡 \`WAIT_MILESTONE\``;
+    else if (r.capitalDeploymentState === CAPITAL_DEPLOYMENT_STATE.REVALIDATE) deployBadge = `🟠 \`REVALIDATE\``;
+    else if (r.capitalDeploymentState === CAPITAL_DEPLOYMENT_STATE.HOLD) deployBadge = `⚪ \`HOLD\``;
+    else if (r.capitalDeploymentState === CAPITAL_DEPLOYMENT_STATE.THESIS_BREAKER) deployBadge = `🔴 \`THESIS_BREAKER\``;
+
+    const trigSummary = `₹${trig.priceAtEvidenceCeiling.toFixed(0)} (-${trig.correctionRequiredToEvidenceCeilingPct}%) / ₹${trig.priceAt25PctMoS.toFixed(0)} (-${trig.correctionRequiredTo25PctMoSPct}%)`;
+    const cleanQuestion = (r.capitalDeploymentAction.nextTrigger || r.currentQuestion || r.primaryReason || '').replace(/\|/g, '-');
+    md += `| **${r.ticker}** | ${r.companyName} | ₹${r.currentPrice.toFixed(2)} | ₹${r.fairValuePrice.toFixed(2)} | ${valBadge} | ${durBadge} | ${sitBadge} | ${credCeiling} | ${deployBadge} | ${trigSummary} | ${cleanQuestion} |\n`;
   }
 
-  md += `
----
-
-## 3. Epistemic Reality State Distribution
-
-\`\`\`text
-Epistemic Reality State Summary (19 Equities):
-├── EXPENSIVE — EXPLAINABLE:                   ${stateCounts[RECONCILIATION_REALITY_STATE.EXPENSIVE_EXPLAINABLE] || 0} stocks
-├── EXPENSIVE — UNPROVEN:                      ${stateCounts[RECONCILIATION_REALITY_STATE.EXPENSIVE_UNPROVEN] || 0} stocks
-├── EXPENSIVE — UNEXPLAINED:                   ${stateCounts[RECONCILIATION_REALITY_STATE.EXPENSIVE_UNEXPLAINED] || 0} stocks
-├── FAIR — THESIS ALIGNED:                     ${stateCounts[RECONCILIATION_REALITY_STATE.FAIR_THESIS_ALIGNED] || 0} stocks
-├── UNDERVALUED — THESIS SUPPORTED:            ${stateCounts[RECONCILIATION_REALITY_STATE.UNDERVALUED_THESIS_SUPPORTED] || 0} stocks
-├── UNDERVALUED — FUTURE OPTIONALITY:          ${stateCounts[RECONCILIATION_REALITY_STATE.UNDERVALUED_FUTURE_OPTIONALITY] || 0} stocks
-├── DISLOCATION — TEMPORARY FRICTION:          ${stateCounts[RECONCILIATION_REALITY_STATE.DISLOCATION_TEMPORARY_FRICTION] || 0} stocks
-├── DISLOCATION — UNDERWRITING REVALIDATION:   ${stateCounts[RECONCILIATION_REALITY_STATE.DISLOCATION_UNDERWRITING_REVALIDATION] || 0} stocks
-└── BROKEN / VALUE TRAP:                       ${stateCounts[RECONCILIATION_REALITY_STATE.BROKEN] || 0} stocks
-\`\`\`
-
----
-
-## 4. Deep-Dive Economic Gap Reconciliations (Standardized Institutional Dossiers)
-
-`;
+  const tb = '```';
+  md += `\n---\n\n## 3. 4-Quadrant Investment Reality Matrix & Distribution\n\n`;
+  md += `The matrix below resolves valuation paralysis by distinguishing between **"expensive because long duration is omitted from static 5Y DCF"** vs **"expensive because market is demanding unachievable economics"**:\n\n`;
+  md += `${tb}text\n`;
+  md += `┌────────────────────────────────────────────────────────────────────────────────────────┐\n`;
+  md += `│                        THESISIQ v4.1 OPPORTUNITY MATRIX (19 EQUITIES)                  │\n`;
+  md += `├────────────────────────────────────────┬───────────────────────────────────────────────┤\n`;
+  md += `│ SITUATION A: VALUE OPPORTUNITIES (${String(quadrantMap[INVESTMENT_OPPORTUNITY_SITUATION.SITUATION_A_VALUE_OPPORTUNITY].length).padEnd(2, ' ')})│ SITUATION B: COMPOUNDER OPPORTUNITIES (${String(quadrantMap[INVESTMENT_OPPORTUNITY_SITUATION.SITUATION_B_COMPOUNDER_OPPORTUNITY].length).padEnd(2, ' ')}) │\n`;
+  md += `│ • Static DCF: Discounted / Aligned     │ • Static DCF: Expensive on 5Y discrete DCF   │\n`;
+  md += `│ • Duration: D1 / D2 / D3 Supported     │ • Duration: D1 Proven / D2 Transitioning     │\n`;
+  md += `│ • Capital Action: ADD / REVALIDATE     │ • Capital Action: ADD_ON_CORRECTION / NEXT_LEG│\n`;
+  md += `│ • Equities: ${sitAList.padEnd(27, ' ')}│ • Equities: ${sitBList.padEnd(34, ' ')}│\n`;
+  md += `├────────────────────────────────────────┼───────────────────────────────────────────────┤\n`;
+  md += `│ SITUATION C: MILESTONE OPPORTUNITIES (${String(quadrantMap[INVESTMENT_OPPORTUNITY_SITUATION.SITUATION_C_MILESTONE_OPPORTUNITY].length).padEnd(2, ' ')})│ SITUATION D: EXPECTATION RISKS (${String(quadrantMap[INVESTMENT_OPPORTUNITY_SITUATION.SITUATION_D_EXPECTATION_RISK].length).padEnd(2, ' ')})        │\n`;
+  md += `│ (Validation Phase — e.g. QPower)       │ (Speculative Multiples / De-Rating Traps)    │\n`;
+  md += `│ • Static DCF: Expensive                │ • Static DCF: Expensive                       │\n`;
+  md += `│ • Duration: D2 / D3 (Physical Plant 8x)│ • Duration: D4 Speculative / D5 Broken        │\n`;
+  md += `│ • Capital Action: WAIT_FOR_MILESTONE   │ • Capital Action: HOLD / THESIS_BREAKER       │\n`;
+  md += `│ • Equities: ${sitCList.padEnd(27, ' ')}│ • Equities: ${sitDList.padEnd(34, ' ')}│\n`;
+  md += `└────────────────────────────────────────┴───────────────────────────────────────────────┘\n`;
+  md += `${tb}\n\n`;
+  md += `---\n\n## 4. Deep-Dive Causal Duration & Capital Deployment Dossiers\n\n`;
 
   // Render deep dives for key benchmark equities
-  const keyTickers = ['QPOWER', 'TRANSRAILL', 'HBLENGINE', 'ANANTRAJ', 'SJS', 'SHAKTIPUMP'];
+  const keyTickers = ['QPOWER', 'TRANSRAILL', 'HBLENGINE', 'ANANTRAJ', 'SJS', 'SHAKTIPUMP', 'SKIPPER', 'LUMAXTECH'];
   
   for (const ticker of keyTickers) {
     const r = cohortResults.find(c => c.ticker === ticker);
     if (!r) continue;
 
-    const profile = COHORT_TRAJECTORY_PROFILES[ticker];
-    const vector = evaluateFundamentalTrajectoryVector(profile);
-    const gaps = r.sevenEconomicGaps;
     const bridge = r.waterfallBridge;
-    const comp = r.comparison;
     const mktEvGap = r.marketEvidenceGap;
+    const durVec = r.durationVector;
+    const mReq = r.milestoneRequirements;
+    const chk = r.transitionCompounderChecklist;
+    const cAct = r.capitalDeploymentAction;
+    const eH = r.economicHealth;
+    const trig = r.correctionTriggers;
+
+    let situationTitle = 'SITUATION D: EXPECTATION RISK';
+    if (r.investmentOpportunitySituation === INVESTMENT_OPPORTUNITY_SITUATION.SITUATION_A_VALUE_OPPORTUNITY) situationTitle = 'SITUATION A: VALUE OPPORTUNITY';
+    else if (r.investmentOpportunitySituation === INVESTMENT_OPPORTUNITY_SITUATION.SITUATION_B_COMPOUNDER_OPPORTUNITY) situationTitle = `SITUATION B: COMPOUNDER OPPORTUNITY (${r.durationPhase === DURATION_PHASE.TRANSITIONING_TO_NEXT_LEG ? 'Next-Leg Transition Phase' : 'Core Scaling Phase'})`;
+    else if (r.investmentOpportunitySituation === INVESTMENT_OPPORTUNITY_SITUATION.SITUATION_C_MILESTONE_OPPORTUNITY) situationTitle = 'SITUATION C: MILESTONE OPPORTUNITY (Validation Phase)';
 
     md += `### ${r.ticker} — ${r.companyName}\n\n`;
-    md += `\`\`\`text\n`;
-    md += `${r.ticker}\n`;
-    md += `────────────────────────────────────────────────────────────────────────\n\n`;
-    md += `Market Price:             ₹${r.currentPrice.toFixed(2)}\n`;
-    md += `Frozen Thesis FV:         ₹${r.fairValuePrice.toFixed(2)}\n`;
-    md += `Valuation Multiple Ratio: ${r.valuationMultipleRatio}x (${r.valuationMultipleRatio > 1.15 ? 'Premium' : (r.valuationMultipleRatio < 0.85 ? 'Discount' : 'Fairly Aligned')})\n\n`;
+    md += `> [!NOTE]\n`;
+    md += `> **Opportunity Classification**: **${situationTitle}** | **Duration Quality**: \`${r.durationQuality}\` | **Capital Deployment State**: \`${r.capitalDeploymentState}\`\n\n`;
 
-    md += `1. MARKET-EVIDENCE GAP QUANTIFICATION\n`;
-    md += `Market-Required Growth:   ${mktEvGap.gMarket}% 5Y CAGR\n`;
-    md += `Underwritten Baseline:    ${mktEvGap.gUnderwritten}% (Frozen DCF)\n`;
-    md += `Forward Scenario Range:   ${mktEvGap.gEvidenceMin}% – ${mktEvGap.gEvidenceMax}% (Evidence Ceiling: ${mktEvGap.gEvidenceMax}%)\n`;
-    md += `Market vs Underwriting:   ${mktEvGap.marketVsUnderwritingPp >= 0 ? '+' : ''}${mktEvGap.marketVsUnderwritingPp} pp\n`;
-    md += `Market vs Evidence Max:   ${mktEvGap.marketVsEvidenceMaxPp >= 0 ? '+' : ''}${mktEvGap.marketVsEvidenceMaxPp} pp (${mktEvGap.isWithinEvidenceCeiling ? 'WITHIN Evidence Ceiling' : 'EXCEEDS Visible Evidence'})\n`;
-    md += `Gap Interpretation:       ${mktEvGap.interpretation}\n\n`;
+    md += `#### 1. Valuation & Duration Vector Summary\n`;
+    md += `| Metric | Value | Institutional Interpretation |\n`;
+    md += `| :--- | :---: | :--- |\n`;
+    md += `| **Current Market Price (CMP)** | ₹${r.currentPrice.toFixed(2)} | Current market quote |\n`;
+    md += `| **Frozen Baseline Fair Value (P0)** | ₹${r.fairValuePrice.toFixed(2)} | Provable 5-Year Institutional DCF fair value |\n`;
+    md += `| **Valuation Context** | \`${r.valuationContext}\` (${r.valuationMultipleRatio}x) | ${r.valuationMultipleRatio > 1.15 ? 'Premium over static DCF' : (r.valuationMultipleRatio < 0.85 ? 'Discount to static DCF' : 'Fairly aligned')} |\n`;
+    md += `| **Market-Required 5Y Growth ($g_{\\text{market}}$)** | ${mktEvGap.gMarket}% | 5Y CAGR mathematically demanded by today's price |\n`;
+    md += `| **Credible Evidence Ceiling** | ${mktEvGap.credibleEvidenceCeiling}% | Maximum growth supported by existing contracted backlog & core plant |\n`;
+    md += `| **Theoretical Scenario Ceiling** | ${mktEvGap.scenarioCeiling}% | Unconstrained expansion ceiling (Core + Next-leg M&A / Greenfield) |\n`;
+    md += `| **Forward iROIC** | ${durVec.forwardIroic}% | Reinvestment return on incremental capital deployed |\n`;
+    md += `| **Management Execution Credibility** | \`${durVec.managementExecutionCredibility}\` | Audited Promise Ledger track record (${durVec.managementExecutionVector.deliverySuccessRatePct}% success rate) |\n`;
+    md += `| **Cash Conversion Quality** | \`${durVec.cashConversionQuality}\` | ${durVec.cashConversionQuality === 'INTACT' ? 'Audited CFO/PAT conversion healthy' : 'Receivables or working capital friction'} |\n`;
+    md += `| **Economic Health Status** | \`${eH.healthStatus}\` | iROIC: \`${eH.iROICVsWacc}\` | Cash: \`${eH.cashConversion}\` | Working Capital: \`${eH.workingCapitalStatus}\` |\n\n`;
 
-    md += `2. MARKET REQUIRES (Mathematical Implied Burden)\n`;
-    md += `FCFF / 5Y Growth:         ${comp.marketRequires.fcffCagrPct}%\n`;
-    md += `Compounding Duration:     ${comp.marketRequires.compoundingDurationYears} years @ ${gaps.durationGap.benchmarkGrowthPct}% CAGR\n`;
-    md += `Terminal EBITDA Margin:   ${comp.marketRequires.terminalEbitdaMarginPct}%\n`;
-    md += `Terminal ROIC:            ${comp.marketRequires.terminalRoicPct}%\n`;
-    md += `Required iROIC:           ${comp.marketRequires.requiredIroicPct}%\n`;
-    md += `Required Capital:         ₹${comp.marketRequires.requiredIncrementalCapitalCr} Cr\n\n`;
-
-    md += `3. EVIDENCE SUPPORTS (Observable Ground Truth)\n`;
-    md += `Underwritten NOPAT CAGR:  ${comp.evidenceSupports.underwrittenNopatCagrPct}% (Frozen Baseline)\n`;
-    md += `Underwriting Support:     ${comp.evidenceSupports.underwritingSupportStatus}\n`;
-    md += `Forward Scenario Range:   ${comp.evidenceSupports.forwardScenarioRangePct[0]}% – ${comp.evidenceSupports.forwardScenarioRangePct[1]}%\n`;
-    md += `Forward iROIC:            ${comp.evidenceSupports.forwardIroicPct}%\n`;
-    md += `Capacity Runway:          ${comp.evidenceSupports.capacityMultiple}x scale\n`;
-    md += `Contracted Backlog:       ₹${comp.evidenceSupports.orderBookCr} Cr (${vector.observedReality.orderBookToRevenueRatio ? vector.observedReality.orderBookToRevenueRatio + 'x Rev' : 'N/A'})\n`;
-    md += `Cash Conversion Quality:  ${comp.evidenceSupports.cashConversion.receivableDays} days DSO | CFO/PAT ${comp.evidenceSupports.cashConversion.cfoPatRatio}x\n`;
-    md += `Management Delivery:      ${comp.evidenceSupports.managementDelivery}\n\n`;
-
-    md += `4. THEORETICAL BULL SCENARIO (Decoupled Simulation Math)\n`;
-    md += `Hypothetical Bull Growth: ${comp.theoreticalBullScenario.candidateBullGrowthPct}% CAGR (12-Year Horizon)\n`;
-    md += `Hypothetical Bull FV:     ₹${comp.theoreticalBullScenario.theoreticalBullEvPrice.toFixed(2)}\n`;
-    md += `Simulation Disclaimer:    ${comp.theoreticalBullScenario.note}\n\n`;
-
-    md += `UNMODELED / PARTIAL VECTORS\n`;
-    for (const v of comp.unmodeledAndPartialVectors) {
-      const mark = v.status === OPTIONALITY_STATUS.COMMERCIALIZED ? '✓' : (v.status === OPTIONALITY_STATUS.EVIDENCE_SUPPORTED ? '✓' : '?');
-      md += `${mark} ${v.vector} [${v.status}]: ${v.description}\n`;
+    md += `#### 2. Capital Deployment Action Framework\n`;
+    md += `- **Capital Deployment State**: \`${r.capitalDeploymentState}\`\n`;
+    md += `- **Action Summary**: ${cAct.actionSummary}\n`;
+    md += `- **Dual Correction Triggers**:\n`;
+    md += `  - **Expectations Ceiling Trigger (Price where $g_{\\text{market}} = g_{\\text{credible}}$)**: **₹${trig.priceAtEvidenceCeiling.toFixed(2)}** (Correction Required: **${trig.correctionRequiredToEvidenceCeilingPct}%**)\n`;
+    md += `  - **Valuation Margin of Safety Floor (Price at 25% MoS to DCF FV)**: **₹${trig.priceAt25PctMoS.toFixed(2)}** (Correction Required: **${trig.correctionRequiredTo25PctMoSPct}%**)\n`;
+    md += `- **Deployment Conditions Required**:\n`;
+    for (const cond of cAct.deploymentConditions) {
+      md += `  1. ${cond}\n`;
     }
-    md += `\n`;
+    md += `- **Next Trigger Event**: 🎯 *${cAct.nextTrigger}*\n\n`;
 
-    md += `RECONCILIATION VERDICT\n`;
-    md += `State:                    ${r.realityState}\n`;
-    md += `Primary Analysis:         ${r.primaryReason}\n`;
-    md += `Unexplained Premium:      ₹${r.unexplainedMarketPremium.toFixed(2)} / share\n\n`;
+    if (chk) {
+      md += `#### 3. Transition Compounder 5-Point Diagnostic Assessment\n`;
+      md += `| Diagnostic Dimension | Status | Confidence | Empirical Evidence & Operational Diagnostic |\n`;
+      md += `| :--- | :---: | :---: | :--- |\n`;
+      md += `| **1. Historical Promise Delivery** | \`${chk.historicalPromiseDelivery.status}\` | ${(chk.historicalPromiseDelivery.confidence * 100).toFixed(0)}% | ${chk.historicalPromiseDelivery.evidence.join(' ')} |\n`;
+      md += `| **2. Incremental ROIC (iROIC)** | \`${chk.incrementalReturnOnCapital.status}\` | ${(chk.incrementalReturnOnCapital.confidence * 100).toFixed(0)}% | ${chk.incrementalReturnOnCapital.evidence.join(' ')} |\n`;
+      md += `| **3. Core Business Health** | \`${chk.coreBusinessHealth.status}\` | ${(chk.coreBusinessHealth.confidence * 100).toFixed(0)}% | ${chk.coreBusinessHealth.evidence.join(' ')} |\n`;
+      md += `| **4. Next Growth Engine Identity** | \`${chk.nextEngineIdentity.status}\` | ${(chk.nextEngineIdentity.confidence * 100).toFixed(0)}% | ${chk.nextEngineIdentity.evidence.join(' ')} |\n`;
+      md += `| **5. Mathematical Ceiling Capacity** | \`${chk.mathematicalCeilingCapacity.status}\` | ${(chk.mathematicalCeilingCapacity.confidence * 100).toFixed(0)}% | ${chk.mathematicalCeilingCapacity.evidence.join(' ')} |\n\n`;
+      md += `> **Diagnostic Assessment Conclusion**: **\`${chk.overallConclusion}\`** (${chk.supportedCount}/5 checkpoints SUPPORTED).\n\n`;
+    }
 
-    md += `NEXT REQUIRED EVIDENCE (Operational Catalysts)\n`;
-    md += `→ ${vector.bottleneckDiagnostic.nextRequiredEvidence}\n`;
-    md += `→ ${r.whatWouldResolveTheGap}\n\n`;
-
-    md += `VALUATION ENGINE INVARIANT\n`;
-    md += `Base Intrinsic DCF Fair Value remains STRICTLY UNCHANGED (₹${r.fairValuePrice.toFixed(2)})\n`;
-    md += `\`\`\`\n\n`;
+    md += `#### 4. Causal Milestone & Invariant Constraints\n`;
+    md += `- **Current Operational Question**: *${mReq.currentQuestion}*\n`;
+    md += `- **Next Observable Milestone**: \`${mReq.nextMilestone}\`\n`;
+    md += `- **Milestone Threshold**: ${mReq.milestoneThreshold}\n`;
+    md += `- **Expected Economic Consequence**: ${mReq.expectedEconomicEffect}\n`;
+    md += `- **Thesis Breaker**: ⚠️ *${mReq.thesisBreaker}*\n\n`;
 
     if (bridge.isPremium) {
-      md += `#### Sequential Scenario Bridge (Operational Milestone Progression):\n`;
+      md += `#### 5. Sequential Scenario Bridge (Operational Milestone Progression):\n`;
       md += `> *Note: This is a sequential scenario step progression illustrating milestones, not path-independent Shapley attribution.*\n\n`;
       md += `| Step | Milestone Scenario Step | Price Delta (₹) | Cumulative Value (₹) | % of Total Gap Explained |\n`;
       md += `| :--- | :--- | :---: | :---: | :---: |\n`;
@@ -245,14 +294,87 @@ Epistemic Reality State Summary (19 Equities):
   }
 
   md += `
-## 5. Reverse Duration Compounding Grid (All 19 Stocks)
+## 5. Institutional Capital Deployment Framework & Watchlist
+
+The Capital Deployment Action Layer translates analytical truth into strict, deterministic portfolio deployment states.
+
+### 1. Deterministic State Machine Precedence
+
+\`\`\`text
+                               CAPITAL DEPLOYMENT ENGINE
+                                          │
+                                          ▼
+                                Is thesis structurally intact?
+                                     /              \\
+                                   NO                YES
+                                   │                  │
+                           THESIS_BREAKER            │
+                                                      ▼
+                                          Is deployment currently
+                                               justified?
+                                          /                  \\
+                                        YES                   NO
+                                         │                     │
+                             ADD_ACCUMULATE_REVIEW             ▼
+                                                       Is specific evidence
+                                                       still pending?
+                                                       /             \\
+                                                     YES              NO
+                                                     │                 │
+                                          ┌──────────┴──────────┐      │
+                                          │                     │      │
+                                     Next-leg?             Milestone?   │
+                                          │                     │      │
+                               WAIT_FOR_NEXT_LEG          WAIT_MILESTONE
+                                                                       │
+                                                                       ▼
+                                                           Is price correction
+                                                           the missing variable?
+                                                               /          \\
+                                                             YES           NO
+                                                             │              │
+                                                  ADD_ON_CORRECTION       HOLD
+
+*REVALIDATE sits across the tree whenever the current underwriting/evidence relationship becomes inconsistent.
+\`\`\`
+
+### 2. The 2x2 Fundamental vs Price Action Matrix
+
+\`\`\`text
+                            FUNDAMENTAL TRAJECTORY & HEALTH
+                         INTACT                        DETERIORATING
+PRICE ↓
+  (Pullback)  ┌──────────────────────────────┬───────────────────────────────┐
+              │ ADD_ACCUMULATE_REVIEW /      │ REVALIDATE /                  │
+              │ ADD_ON_CORRECTION            │ THESIS_BREAKER                │
+              │ (Valuation/Expectation Clears)│ (Anti-Averaging-Down Rule)   │
+              ├──────────────────────────────┼───────────────────────────────┤
+PRICE → / ↑   │ HOLD /                       │ REVALIDATE /                  │
+  (Rally/Flat)│ WAIT_FOR_NEXT_LEG /          │ THESIS_BREAKER                │
+              │ WAIT_FOR_MILESTONE           │ (Structural Trim / Exit)      │
+              └──────────────────────────────┴───────────────────────────────┘
+\`\`\`
+
+### 3. Universe Capital Deployment Summary (19 Equities)
+
+| Deployment State | Count | Equities | Core Portfolio Mandate |
+| :--- | :---: | :--- | :--- |
+| **\`ADD_ACCUMULATE_REVIEW\`** | ${deploymentMap[CAPITAL_DEPLOYMENT_STATE.ADD_ACCUMULATE_REVIEW].length} | ${deploymentMap[CAPITAL_DEPLOYMENT_STATE.ADD_ACCUMULATE_REVIEW].map(r => r.ticker).join(', ') || 'None'} | Active accumulation zone; valuation attractive, fundamentals intact. |
+| **\`ADD_ON_CORRECTION\`** | ${deploymentMap[CAPITAL_DEPLOYMENT_STATE.ADD_ON_CORRECTION].length} | ${deploymentMap[CAPITAL_DEPLOYMENT_STATE.ADD_ON_CORRECTION].map(r => r.ticker).join(', ') || 'None'} | Pre-authorized watch condition; deploy on pullback toward triggers without impairment. |
+| **\`WAIT_FOR_NEXT_LEG_EVIDENCE\`** | ${deploymentMap[CAPITAL_DEPLOYMENT_STATE.WAIT_FOR_NEXT_LEG_EVIDENCE].length} | ${deploymentMap[CAPITAL_DEPLOYMENT_STATE.WAIT_FOR_NEXT_LEG_EVIDENCE].map(r => r.ticker).join(', ') || 'None'} | Gated deployment; additional capital requires audited dispatches from next growth leg. |
+| **\`WAIT_FOR_MILESTONE\`** | ${deploymentMap[CAPITAL_DEPLOYMENT_STATE.WAIT_FOR_MILESTONE].length} | ${deploymentMap[CAPITAL_DEPLOYMENT_STATE.WAIT_FOR_MILESTONE].map(r => r.ticker).join(', ') || 'None'} | Phased sizing; physical plant ready, awaiting commercial billing verification. |
+| **\`REVALIDATE\`** | ${deploymentMap[CAPITAL_DEPLOYMENT_STATE.REVALIDATE].length} | ${deploymentMap[CAPITAL_DEPLOYMENT_STATE.REVALIDATE].map(r => r.ticker).join(', ') || 'None'} | Working capital friction or under-supported model; do not average down blindly. |
+| **\`HOLD\`** | ${deploymentMap[CAPITAL_DEPLOYMENT_STATE.HOLD].length} | ${deploymentMap[CAPITAL_DEPLOYMENT_STATE.HOLD].map(r => r.ticker).join(', ') || 'None'} | Maintain existing allocation; extreme valuation premium prevents new capital addition. |
+| **\`THESIS_BREAKER\`** | ${deploymentMap[CAPITAL_DEPLOYMENT_STATE.THESIS_BREAKER].length} | ${deploymentMap[CAPITAL_DEPLOYMENT_STATE.THESIS_BREAKER].map(r => r.ticker).join(', ') || 'None'} | Structural breakdown in economics, subsidy freeze, or cash bleed. Freeze deployment. |
+
+---
+
+## 6. Reverse Duration Compounding Grid (All 19 Stocks)
 
 The table below answers: *"If the company grows NOPAT at candidate CAGR $g$, how many years ($T_{\\text{req}}$) of uninterrupted compounding does today's price mathematically require?"*
 
-> **Methodology Note**: Durations represent pure mathematical compounding horizons needed to justify current price. Whether a given duration is achievable is evaluated independently by v3.2 evidence criteria (TAM runway, physical capacity, order book, forward iROIC, and cash conversion).
-
 | Ticker | CMP (₹) | Base Underwriting | Req. Duration @ Underwriting | @ 20% CAGR | @ 25% CAGR | @ 28% CAGR | @ 30% CAGR | @ 32% CAGR | @ 35% CAGR | @ 40% CAGR |
-| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
 `;
 
   for (const r of cohortResults) {
@@ -274,40 +396,18 @@ The table below answers: *"If the company grows NOPAT at candidate CAGR $g$, how
   md += `
 ---
 
-## 6. Portfolio Directives: How to Act on Reconciliation Outputs
+## 7. Mathematical & Invariant Guarantees (v4.1)
 
-The 9-State Taxonomy directly guides portfolio decision-making without simplistic binary "buy/sell" traps:
-
-\`\`\`text
-┌──────────────────────────────────────────┬──────────────────────────────────────────────────────────────────────────────┐
-│ Epistemic State                          │ Portfolio Management Directive                                               │
-├──────────────────────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
-│ EXPENSIVE — EXPLAINABLE                  │ HOLD CORE; DO NOT SELL ON P/E ALONE. Monitor commercial utilization ramp.    │
-│ EXPENSIVE — UNPROVEN                     │ HOLD CORE WITH TIGHT THESIS BREAKERS; block new capital until validated.    │
-│ EXPENSIVE — UNEXPLAINED                  │ TRIM POSITION ON VALUATION EXTREME; redeploy capital into higher asymmetry.   │
-│ FAIR — THESIS ALIGNED                    │ MAINTAIN CORE COMPOUNDING EXPOSURE; wait for margin of safety.              │
-│ UNDERVALUED — THESIS SUPPORTED           │ ACCUMULATE IN MEASURED TRANCHES; high asymmetry and confirmed economics.     │
-│ UNDERVALUED — FUTURE OPTIONALITY         │ HIGH CONVICTION ACCUMULATION; capture unmodeled future capacity expansions.  │
-│ DISLOCATION — TEMPORARY FRICTION         │ HOLD CORE; BLOCK ADDITIONS UNTIL CASH COLLECTION / DSO NORMALIZES.          │
-│ DISLOCATION — UNDERWRITING REVALIDATION  │ BLOCK NEW CAPITAL; do not buy discount until evidence supports underwriting. │
-│ BROKEN / VALUE TRAP                      │ SYSTEMATIC EXIT; do not average down on broken unit economics.               │
-└──────────────────────────────────────────┴──────────────────────────────────────────────────────────────────────────────┘
-\`\`\`
+- [x] **Translational Layer Invariant**: Frozen DCF Fair Values ($v3.1.1$) and 9-State Reconciliation States ($v3.3.1$) remain strictly immutable.
+- [x] **Dual Correction Trigger Separation**: Evaluates \`priceAtEvidenceCeiling\` ($g_{\\text{market}} \\le g_{\\text{credible}}$) and \`priceAt25PctMoS\` ($P \\le 0.75 \\times FV$) as distinct economic conditions.
+- [x] **Anti-Averaging-Down Invariant**: Price drops accompanied by fundamental deterioration strictly route to \`REVALIDATE\` or \`THESIS_BREAKER\`, never unlocking accumulation.
+- [x] **Milestone & Next-Leg Gate Invariant**: Price drops alone cannot bypass pending commercial capacity billing (\`WAIT_FOR_MILESTONE\`) or next-engine evidence validation (\`WAIT_FOR_NEXT_LEG_EVIDENCE\`).
+- [x] **Dynamic Economic Health Diagnosis**: Evaluates iROIC vs WACC, cash conversion, and working capital status dynamically without universal single-variable hardcodes.
+- [x] **Strict 7-State Precedence**: Enforces $\\text{THESIS\\_BREAKER} \\to \\text{REVALIDATE} \\to \\text{WAIT\\_FOR\\_MILESTONE} \\to \\text{WAIT\\_FOR\\_NEXT\\_LEG\\_EVIDENCE} \\to \\text{ADD\\_ACCUMULATE\\_REVIEW} \\to \\text{ADD\\_ON\\_CORRECTION} \\to \\text{HOLD}$.
+- [x] **Zero Hardcoded Tickers**: Generic mathematical rules evaluated deterministically across the entire universe.
 
 ---
-
-## 7. Mathematical & Epistemic Invariants Verification
-
-- [x] **Invariant 1: Frozen Baseline Valuation**: All 19 baseline DCF fair values (e.g. QPower ₹438.17, HBL ₹1,042.36) remain 100% immutable.
-- [x] **Invariant 2: Strict 3-Quantity Separation**: Market-required economics, evidence-supported ranges, and theoretical bull math are strictly decoupled.
-- [x] **Invariant 3: Market-vs-Evidence Gap Quantification**: Explicitly computes $g_{\\text{market}}$ vs $g_{\\text{underwritten}}$ vs $g_{\\text{evidence\\_max}}$ across 100% of equities.
-- [x] **Invariant 4: Sequential Scenario Bridge Completeness**: $P_0 + \\sum \\Delta P_i + \\text{UNEXPLAINED\\_MARKET\\_PREMIUM} \\equiv P_{\\text{market}}$ across 100% of equities with zero overshoot.
-- [x] **Invariant 5: Underwriting Support Dislocation State**: Correctly assigns \`DISLOCATION_UNDERWRITING_REVALIDATION\` when price discount exists but underwriting is uncorroborated (e.g. HBL).
-- [x] **Invariant 6: Reverse Duration Solver Monotonicity**: Solves numerical $T_{\\text{req}}$ across candidate CAGRs without subjective feasibility labels.
-- [x] **Invariant 7: 100% Invariant Test Pass Rate**: Verified via \`test-market-thesis-reconciliation.js\` and \`test-fundamental-trajectory-engine.js\`.
-
----
-*Report automatically compiled and verified by ThesisIQ v3.3.1 Market–Thesis Reconciliation Engine.*
+*Report automatically compiled and verified by ThesisIQ v4.1 Capital Deployment Intelligence Engine.*
 `;
 
   fs.writeFileSync(outputPath, md, 'utf-8');

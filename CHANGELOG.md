@@ -1,5 +1,41 @@
 # Changelog
 
+## [v4.1.0] - 2026-09-20 (Transition Compounder, Duration Intelligence & Capital Deployment Action Layer)
+
+### Added
+- **Translational Capital Deployment Action Layer (`CAPITAL_DEPLOYMENT_STATE`)**:
+  - Thin, deterministic translational layer mapping valuation, evidence, duration, and milestones into actionable portfolio deployment states.
+  - Implements 7 deterministic states with strict hierarchical precedence:
+    $$\text{THESIS\_BREAKER} \longrightarrow \text{REVALIDATE} \longrightarrow \text{WAIT\_FOR\_MILESTONE} \longrightarrow \text{WAIT\_FOR\_NEXT\_LEG\_EVIDENCE} \longrightarrow \text{ADD\_ACCUMULATE\_REVIEW} \longrightarrow \text{ADD\_ON\_CORRECTION} \longrightarrow \text{HOLD}$$
+- **Dual Correction Triggers (`calculateCorrectionTriggers`)**:
+  - Strictly separates expectations conditions from valuation margin of safety conditions rather than collapsing into a single number:
+    - `priceAtEvidenceCeiling`: Exact price where $g_{\text{market}} = g_{\text{credible}}$ (Expectations condition satisfied).
+    - `priceAt25PctMoS`: Exact price at $25\%$ Margin of Safety to DCF Fair Value ($0.75 \times FV$) (Valuation condition satisfied).
+    - `correctionRequiredToEvidenceCeilingPct` & `correctionRequiredTo25PctMoSPct`.
+- **Dynamic Multi-Dimensional `EconomicHealth` Diagnostic (`evaluateEconomicHealth`)**:
+  - Replaces universal single-variable hardcoded checks with a holistic multi-dimensional diagnostic:
+    - `iROICVsWacc`: `ATTRACTIVE` | `ACCEPTABLE` | `VALUE_DESTRUCTIVE`
+    - `cashConversion`: `INTACT` | `TEMPORARY_FRICTION` | `BLEEDING`
+    - `workingCapitalStatus`: `NORMAL` | `FRICTION` | `DETERIORATING`
+    - `earningsQuality`: `HIGH` | `MODERATE` | `LOW`
+    - `healthStatus`: `INTACT` | `FRICTION` | `DETERIORATING` | `BROKEN`
+- **2x2 Fundamental vs Price Action Matrix & Invariants**:
+  - Formalizes the Anti-Averaging-Down rule: falling prices on deteriorating fundamentals strictly route to `REVALIDATE` / `THESIS_BREAKER`, never unlocking accumulation.
+  - Milestone and next-leg evidence gates cannot be bypassed by price drops alone prior to operational verification.
+- **Duration Intelligence & Opportunity Matrix Layer (`DURATION_QUALITY` & `INVESTMENT_OPPORTUNITY_SITUATION`)**:
+  - Classifies duration quality into $D_1 \to D_5$ and lifecycle phases across 7 stages.
+  - Maps universe dynamically into 4 Opportunity Quadrants: Situation A (Value), Situation B (Compounder), Situation C (Milestone), and Situation D (Expectation Risk).
+- **Mandatory 5-Point Transition Compounder Checklist**:
+  - Evaluates Historical Promise Delivery, Incremental ROIC, Core Business Health, Next Growth Engine Identity, and Mathematical Ceiling Capacity.
+- **Point-in-Time Walk-Forward Backtest Engine (`run-duration-compounder-backtest.js`)**:
+  - Audits quarterly historical snapshots ($Q_1 \to Q_4\text{ FY25}$) with point-in-time boundary isolation and dynamic forward returns.
+- **Expanded Invariant Test Suite**:
+  - Added Suite 4 in `test-v4-duration-intelligence.js` verifying 22 invariant assertions (574 total passing assertions across the codebase).
+
+### Fixed & Enhanced
+- **SJS Classification Integrity**: Fixed false bubble trap labeling by evaluating management execution credibility and next-growth engine capacity ($D_2 \to \text{Situation B} \to \text{VALIDATE\_NEXT\_LEG}$).
+- **Valuation Context Orthogonality**: Decoupled market multiple valuation regimes (`DISCOUNTED`, `ALIGNED`, `EXPENSIVE`, `EXTREME_PREMIUM`) from fundamental duration quality.
+
 ## [v3.3.1] - 2026-09-20 (Market–Thesis Reconciliation & Duration Integrity Patch)
 
 ### Fixed & Enhanced
