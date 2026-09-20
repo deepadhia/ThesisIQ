@@ -191,6 +191,25 @@ const SPECIFIC_THESIS_HURDLES = {
       targetFreezeDriedCapacityUtilPct: 75.0
     },
     description: "Primary: EBITDA margin ≥18.0% | Structural: Freeze-dried coffee utilization ≥75%"
+  },
+  ASTRAMICRO: {
+    primary: {
+      minEbitdaMarginPct: 18.0,
+      minRevenueCr: 200.0
+    },
+    structural: {
+      targetOrderBookCr: 4000.0
+    },
+    description: "Primary: Quarterly revenue ≥₹200 Cr, EBITDA margin ≥18.0% | Structural: Order book ≥₹4,000 Cr (HAL Uttam / AMCA AAAU)"
+  },
+  POLICYBZR: {
+    primary: {
+      minRevenueGrowthPct: 25.0
+    },
+    structural: {
+      targetRenewalSharePct: 40.0
+    },
+    description: "Primary: Revenue growth ≥25.0% YoY | Structural: Renewal premium share ≥40%"
   }
 };
 
@@ -270,10 +289,11 @@ export function evaluateThesisSpecificHurdle(ticker, fin = {}, operational = {})
 
   // 4. Primary Revenue Gate (Fail-Closed on missing KPI)
   if (primary.minRevenueCr !== undefined) {
-    if (fin.revenue === null || fin.revenue === undefined || isNaN(fin.revenue)) {
+    const revVal = (fin.revenue !== null && fin.revenue !== undefined) ? fin.revenue : fin.revenueCr;
+    if (revVal === null || revVal === undefined || isNaN(revVal)) {
       unavailable.push(`Required KPI Total Revenue unavailable in verified data`);
-    } else if (Number(fin.revenue) < primary.minRevenueCr) {
-      failures.push(`Revenue ₹${fin.revenue} Cr < target ₹${primary.minRevenueCr} Cr`);
+    } else if (Number(revVal) < primary.minRevenueCr) {
+      failures.push(`Revenue ₹${revVal} Cr < target ₹${primary.minRevenueCr} Cr`);
     }
   }
 

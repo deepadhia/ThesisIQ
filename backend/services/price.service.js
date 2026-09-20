@@ -105,6 +105,40 @@ async function discoverFromScreener(slugOrTicker) {
   }
 }
 
+/** Fetch current quote directly from Screener.in page. */
+export async function fetchScreenerLiveQuote(slugOrTicker) {
+  try {
+    const slug = encodeURIComponent(slugOrTicker);
+    let response = await fetch(`https://www.screener.in/company/${slug}/consolidated/`, {
+      headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" },
+    });
+    if (!response.ok) {
+      response = await fetch(`https://www.screener.in/company/${slug}/`, {
+        headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" },
+      });
+    }
+    if (!response.ok) return null;
+
+    const html = await response.text();
+    const priceMatch = html.match(/Current Price[\s\S]*?class="number">₹?\s*([0-9,.]+)/i);
+    if (!priceMatch) return null;
+
+    const price = parseFloat(priceMatch[1].replace(/,/g, ''));
+    if (!Number.isFinite(price) || price <= 0) return null;
+
+    return {
+      symbol: slugOrTicker,
+      price,
+      volume: null,
+      change_percent: null,
+      date: new Date().toISOString().slice(0, 10),
+      source: "Screener.in"
+    };
+  } catch {
+    return null;
+  }
+}
+
 /** Build list of Yahoo symbol candidates to try (.NS, .BO, raw). */
 export async function resolveYahooCandidates(normalizedTicker, screenerSlug) {
   const baseSymbols = new Set([normalizedTicker]);
@@ -202,6 +236,14 @@ export async function fetchAndStorePrice({ ticker, backfill = false }) {
   for (const symbol of candidates) {
     result = await fetchYahooQuote(symbol);
     if (result) break;
+  }
+
+  // Fallback to Screener.in live quote if Yahoo fails
+  if (!result) {
+    result = await fetchScreenerLiveQuote(screenerSlug || normalizedTicker);
+    if (!result && screenerSlug && screenerSlug !== normalizedTicker) {
+      result = await fetchScreenerLiveQuote(normalizedTicker);
+    }
   }
 
   if (!result) {

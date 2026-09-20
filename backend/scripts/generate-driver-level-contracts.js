@@ -950,6 +950,60 @@ export async function generateDriverLevelContracts() {
           falsificationTrigger: 'Failure to secure commercial OEM supply contracts for EV motors within 18 months.'
         }
       ]
+    },
+    {
+      rank: 19,
+      ticker: 'ASTRAMICRO',
+      companyName: 'Astra Microwave Products Ltd',
+      frozenScore: 4050,
+      trajectoryBonus: 120,
+      thesisTitle: 'Indigenous Defence Radar System Integration & High-Value AESA Module Compounding',
+      drivers: [
+        {
+          name: 'HAL Uttam AESA Radar & AMCA AAAU System Scaling',
+          category: 'Core Defence Order Execution',
+          mustBeTrue: 'Execution run-rate on the ₹2,205 Cr HAL Uttam radar contract scales on schedule with AMCA AAAU formal contract signing.',
+          currentEvidence: 'Order book at ₹4,300 Cr (~4.5x TTM revenue) with lowest bidder (L1) status in AMCA AAAU program and landmark HAL order active.',
+          sourceAnchor: 'Q1 FY27 Concall Transcript & Investor Presentation, Slide 4',
+          direction: 'IMPROVING',
+          materiality: 'HIGH',
+          confidence: 'HIGH',
+          falsificationTrigger: 'Tejas Mk1A delivery schedule delays exceeding 6 months or cancellation of Uttam radar production tranches.'
+        },
+        {
+          name: 'Domestic Systems Integration & Margin Expansion',
+          category: 'Operating Margins & Mix',
+          mustBeTrue: 'Transition from sub-systems to complete radar system integration expands consolidated EBITDA margins >=18.0%.',
+          currentEvidence: 'Consolidated EBITDA margin achieved 19.5% with expanding domestic defence supply share.',
+          sourceAnchor: 'SEBI LODR Financial Statement Q1 FY27, Note 4',
+          direction: 'IMPROVING',
+          materiality: 'HIGH',
+          confidence: 'HIGH',
+          falsificationTrigger: 'Consolidated EBITDA margin falls below 15.0% for 2 consecutive quarters.'
+        },
+        {
+          name: 'Space Payload & Meteorology (Mission Mausam) Diversification',
+          category: 'Strategic Diversification',
+          mustBeTrue: 'Commercialization of space satellite payloads and Doppler weather radars provides secondary growth engine.',
+          currentEvidence: 'Active participation in IN-SPACe / ISRO programs and Mission Mausam meteorology radar tenders.',
+          sourceAnchor: 'Annual Report & Concall Q1 FY27',
+          direction: 'STABLE',
+          materiality: 'MEDIUM',
+          confidence: 'HIGH',
+          falsificationTrigger: 'Stall in space satellite payload orders or failure to win central meteorology radar tenders.'
+        },
+        {
+          name: 'Working Capital & Defence PSU Cash Flow Normalization',
+          category: 'Cash Flow & Working Capital',
+          mustBeTrue: 'Operating cash flow (CFO) normalizes with debtor days from Defence PSUs maintained below 120 days.',
+          currentEvidence: 'Receivables monitored with milestone billing structures under HAL and DRDO contracts.',
+          sourceAnchor: 'Audited Financial Statements, Balance Sheet Schedule',
+          direction: 'STABLE',
+          materiality: 'HIGH',
+          confidence: 'MODERATE',
+          falsificationTrigger: 'Receivables expand beyond 150 days or CFO remains negative for full fiscal year.'
+        }
+      ]
     }
   ];
 

@@ -1,6 +1,6 @@
 name: 🌙 Nightly Reconciliation (Manual Dispatch)
 
-# Scheduled reconciliation runs 24/7 on Oracle Cloud Server daemon
+# Scheduled reconciliation runs 24/7 exclusively on Oracle Cloud Server daemon
 on:
   workflow_dispatch:
     inputs:

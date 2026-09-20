@@ -17,7 +17,7 @@ import { fetchAndStorePrice } from "../services/price.service.js";
 import { getAllStocks } from "../services/stocks.service.js";
 import { downloadTranscriptsPipeline } from "../services/transcripts.service.js";
 import { scan } from "./scan-announcements.js";
-import { generateCapitalAllocationFramework } from "./generate-capital-allocation-framework.js";
+import { generatePortfolioThesisBoard } from "./generate-portfolio-thesis-board.js";
 import { sendTelegramMessage } from "../services/telegram.service.js";
 import { evaluateAndDispatchDislocationAlerts } from "../services/valuation-dislocation-watchdog.service.js";
 import crypto from "crypto";
@@ -166,14 +166,14 @@ export async function runNightlyReconciliation({ isDryRun = false } = {}) {
   }
 
   // ──────────────────────────────────────────────────────────────────────────
-  // STEP 5: Recompute Rolling 52W Highs & Update Layer 4 Capital Allocation Matrix
+  // STEP 5: Update Portfolio Thesis State Board
   // ──────────────────────────────────────────────────────────────────────────
-  console.log("\n--- 📊 Step 5: Updating Capital Allocation Matrix (Rolling 52W Highs) ---");
+  console.log("\n--- 📊 Step 5: Updating Portfolio Thesis State Board ---");
   try {
-    await generateCapitalAllocationFramework();
-    console.log("✅ Layer 4 Capital Allocation Framework synchronized with latest closing prices.");
+    await generatePortfolioThesisBoard();
+    console.log("✅ Portfolio Thesis State Board synchronized with latest market & operational data.");
   } catch (err) {
-    console.error("[ERROR] Step 5 Capital Allocation Framework update failed:", err.message);
+    console.error("[ERROR] Step 5 Portfolio Thesis State Board update failed:", err.message);
   }
 
   // ──────────────────────────────────────────────────────────────────────────
@@ -257,7 +257,7 @@ export async function runNightlyReconciliation({ isDryRun = false } = {}) {
 }
 
 // Execute directly when run as CLI script
-if (process.argv[1]?.endsWith("run-nightly-reconciliation.js")) {
+if (process.argv[1] && (process.argv[1].replace(/\\/g, "/").endsWith("run-nightly-reconciliation.js") || process.argv[1].includes("run-nightly-reconciliation"))) {
   const isDryRun = process.argv.includes("--dry-run");
   runNightlyReconciliation({ isDryRun })
     .then(() => pool.end())

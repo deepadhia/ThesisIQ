@@ -1,58 +1,58 @@
 # ThesisIQ v4.1-FROZEN: Architecture, Duration Intelligence & Capital Deployment Specification
 
-## 1. Epistemic Mandate & 6-Layer Architecture
+## 1. Epistemic Mandate & 7-Layer Analytical Pipeline
 
 ThesisIQ provides an institutional-grade analytical framework designed to resolve **Valuation Paralysis on High-Quality Multi-Year Compounders** while strictly preventing multiple-bubble justification and value traps.
 
-The system enforces non-contradictory separation across **6 Sequential Analytical Layers**:
+The core philosophy is:
+> **Don't wait for every compounder to become statistically cheap. Don't pay any price for a story either. Participate when duration and economic evidence justify conditional exposure, and increase exposure as uncertainty is removed.**
+
+The system enforces non-contradictory separation across **7 Sequential Analytical Layers**:
 
 ```text
-                               ┌────────────────────────────────┐
-                               │     v3.1.1 DCF Truth (FCFF)    │
-                               │ "What is provable today?"      │
-                               │ (Frozen Intrinsic Fair Value)  │
-                               └───────────────┬────────────────┘
-                                               │
-                               ┌───────────────▼────────────────┐
-                               │     v3.2 Evidence Truth        │
-                               │ "What is actually happening?"  │
-                               │ (Audited Actuals & Backlog)    │
-                               └───────────────┬────────────────┘
-                                               │
-                               ┌───────────────▼────────────────┐
-                               │  v3.3.1 Market Reconciliation  │
-                               │ "What is market demanding?"    │
-                               │ (7 Gaps & Sequential Bridge)   │
-                               └───────────────┬────────────────┘
-                                               │
-                               ┌───────────────▼────────────────┐
-                               │  v4.1 Duration Intelligence    │
-                               │ "What economic mechanism       │
-                               │  sustains market demands?"     │
-                               │  (D1-D5, Phase & 4-Quadrant)   │
-                               └───────────────┬────────────────┘
-                                               │
-                               ┌───────────────▼────────────────┐
-                               │  Causal Milestone Engine       │
-                               │ "What observation resolves the │
-                               │  missing evidence & risk?"     │
-                               └───────────────┬────────────────┘
-                                               │
-                               ┌───────────────▼────────────────┐
-                               │  Capital Deployment Layer      │
-                               │ "What conditions unlock        │
-                               │  incremental portfolio capital?"│
-                               └────────────────────────────────┘
+                 THESISIQ PIPELINE
+                         │
+        ┌────────────────┴────────────────┐
+        │                                 │
+   VALUATION TRUTH                  ECONOMIC TRUTH
+   "What is priced?"                "What is happening?"
+  (Layer 1: DCF / Layer 2: RevDCF)  (Layer 3: Audited Actuals)
+        │                                 │
+        └────────────────┬────────────────┘
+                         │
+                  DURATION TRUTH
+              "How long can it run?"
+             (Layer 4: Duration Quality)
+                         │
+                         ▼
+             RECONCILIATION & MILESTONE
+           "What explains gap & risk?"
+          (Layer 5: Gaps / Layer 6: Milestones)
+                         │
+                         ▼
+                 CAPITAL DEPLOYMENT
+              "How do I participate?"
+            (Layer 7: Translational Gating)
 ```
 
+### The 7 Canonical Layers:
+1. **Layer 1 — DCF Truth**: What does frozen, conservative underwriting say? (Baseline intrinsic fair value).
+2. **Layer 2 — Market Expectations**: What does today's price mathematically require? (Reverse DCF growth $g_{\text{market}}$).
+3. **Layer 3 — Economic Evidence**: What has actually happened? (Audited financials, order books, capacity throughput).
+4. **Layer 4 — Duration Intelligence**: How much credible runway exists? ($D_1 \to D_5$, Lifecycle Phase, Promise Ledger).
+5. **Layer 5 — Market–Thesis Reconciliation**: What exactly explains the gap? (7 Gaps, Sequential Scenario Bridge, Situation A/B/C/D).
+6. **Layer 6 — Milestone Intelligence**: What observable event can validate or falsify the next leg? (Falsifiable gating metrics).
+7. **Layer 7 — Capital Deployment**: Given all six layers: **What conditions make additional capital eligible?** (Translational portfolio actions).
+
 ### The Non-Negotiable Core Invariants
-1. **Valuation Truth Frozen**: Base underwritten DCF fair values ($v3.1.1$) remain strictly immutable. v4.1 never inflates fair values or grants speculative DCF credits.
-2. **Three-Ceiling Epistemic Separation**:
+1. **Valuation Truth Frozen**: Base underwritten DCF fair values ($v3.1.1$) remain strictly immutable. Layer 7 consumes the earlier layers but **never creates an alternate valuation model or lowers valuation hurdles**.
+2. **Translational Capital Deployment**: Capital Deployment must consume the three truths (Valuation, Economic, Duration); it must **never overwrite them**.
+3. **Three-Ceiling Epistemic Separation**:
    - `MARKET_REQUIRED_GROWTH` ($g_{\text{market}}$): What today's stock price mathematically demands over 5 years.
    - `CREDIBLE_EVIDENCE_CEILING` ($g_{\text{credible}}$): Mathematical maximum growth rate supported by currently observable, audited baseline evidence (contracted backlog, active capacity). **Never an active forecast**.
    - `SCENARIO_CEILING` ($g_{\text{scenario}}$): Theoretical operational envelope if secondary expansion engines execute under stated assumptions. **Never an active forecast**.
-3. **Translational Capital Deployment**: The Capital Deployment Layer consumes analytical outputs to determine capital eligibility without altering underlying valuation or evidence truth.
-4. **Zero Hardcoded Tickers**: All duration qualities, opportunity situations, and capital deployment states derive purely dynamically from generic mathematical and evidence rules.
+4. **Research Inputs vs Audited Facts**: Specific capacity expansion figures (e.g. product-line multiples, plant target units) refer to designated facilities/lines and represent hypothesis inputs until verified through audited dispatches.
+5. **Zero Hardcoded Tickers**: All duration qualities, opportunity situations, and capital deployment states derive purely dynamically from generic mathematical and evidence rules.
 
 ---
 
@@ -102,7 +102,7 @@ ThesisIQ resolves this by separating **Valuation Context** ($CMP / FV$), **Durat
 │ • Static DCF: Discounted / Aligned     │ • Static DCF: Expensive on 5Y discrete DCF   │
 │ • Duration: D1 / D2 / D3 Supported     │ • Duration: D1 Proven / D2 Transitioning     │
 │ • Capital Action: ADD / REVALIDATE     │ • Capital Action: ADD_ON_CORRECTION / NEXT_LEG│
-│ • Equities: TRANSRAILL, SKIPPER,       │ • Equities: ANANTRAJ, SJS, HSCL, GRAVITA,    │
+│ • Equities: TRANSRAILL, TIMETECHNO,    │ • Equities: ANANTRAJ, SJS, HSCL, GRAVITA,    │
 │   HBLENGINE, JSLL                      │   PGEL, LUMAXTECH, CCL, SBCL                  │
 ├────────────────────────────────────────┼───────────────────────────────────────────────┤
 │ SITUATION C: MILESTONE OPPORTUNITIES   │ SITUATION D: EXPECTATION RISKS                │
@@ -110,8 +110,8 @@ ThesisIQ resolves this by separating **Valuation Context** ($CMP / FV$), **Durat
 │ • Static DCF: Expensive                │ • Static DCF: Expensive                       │
 │ • Duration: D2 / D3 (Physical Plant 8x)│ • Duration: D4 Speculative / D5 Broken        │
 │ • Capital Action: WAIT_FOR_MILESTONE   │ • Capital Action: HOLD / THESIS_BREAKER       │
-│ • Equities: QPOWER                     │ • Equities: INOXINDIA, POLICYBZR, ELECON,     │
-│                                        │   JYOTICNC, TIMETECHNO, SHAKTIPUMP            │
+│ • Equities: QPOWER, SKIPPER            │ • Equities: INOXINDIA, POLICYBZR, ELECON,     │
+│                                        │   JYOTICNC, SHAKTIPUMP                        │
 └────────────────────────────────────────┴───────────────────────────────────────────────┘
 ```
 
@@ -197,7 +197,81 @@ Evaluates:
 - `workingCapitalStatus`: `NORMAL` ($\text{DSO} \le 90\text{d}$) | `FRICTION` ($90-120\text{d}$) | `DETERIORATING` ($> 120\text{d}$).
 - `healthStatus`: `INTACT` | `FRICTION` | `DETERIORATING` | `BROKEN`.
 
-### 4. The 2x2 Matrix & Anti-Averaging-Down Invariant
+### 4. Conditional Participation Framework (Situations B & C)
+
+To prevent valuation paralysis on high-quality long-duration compounders without resorting to unprincipled multiple-chasing, the system provides a structured **Conditional Participation Capital-Path**:
+
+```text
+                                   VALUATION SPECTRUM
+                                           │
+                    Cheap ◄────────────────┼────────────────► Expensive
+                                           │
+                                  ┌────────┴────────┐
+                                  │                 │
+                            Proven Engine       Next Engine
+                                  │                 │
+                                  ▼                 ▼
+                             Accumulation      Conditional
+                              Authorized      Participation
+                                                    │
+                                                    ▼
+                                             Evidence Arrives
+                                                    │
+                                                    ▼
+                                              Re-Underwrite
+```
+
+#### A. Situation B (Long-Duration Transition Compounder)
+- **Economic State**: Expensive today on 5Y DCF + credible multi-year economic engine ($D_1/D_2$) + identifiable next growth leg + evidence developing.
+- **Participation Mandate**: Current valuation does not justify full unhedged sizing. Participate conditionally (strategic starter sizing) and increase exposure only when predefined next-leg commercial evidence or valuation improvements clear.
+
+#### B. Situation C (Milestone-Dependent Scaler)
+- **Economic State**: Physical capacity / strategic investment real $\to$ economic potential identified $\to$ commercial billing proof pending.
+- **Participation Mandate**: Starter exposure can be established; full core allocation unlocks only upon verified commercial milestone execution (e.g. factory energization, billing certificate, gross margin absorption). Building the facility alone does not make the base DCF obsolete.
+
+### 5. Separation of Price-Based vs Evidence-Based Additions
+
+A price decline by itself tells ThesisIQ almost nothing—it can reflect a harmless macro de-rating or a catastrophic operational collapse. Therefore, incremental capital additions are strictly conditional:
+
+```text
+PRICE CORRECTION
+        +
+THESIS INTACT
+        +
+ECONOMIC HEALTH INTACT (CFO/PAT >= 0.70x, DSO <= 90d)
+        +
+NO THESIS BREAKER
+        +
+VALUATION / EXPECTATIONS IMPROVED
+        ↓
+Eligible for Incremental Capital Deployment
+```
+
+### 6. The Audited Underwriting Review Workflow (No Automatic DCF Inflation)
+
+A quarterly earnings beat does **not** automatically increase long-term Fair Value. Reported NOPAT growth can be volume-led, margin-led, working capital reversal, or one-off accounting items. 
+
+Only durable economic components justify re-underwriting via the canonical governance sequence:
+
+```text
+New Quarterly Result / Filing
+              ↓
+      Observed Reality
+              ↓
+     Trajectory Analysis
+              ↓
+        Evidence Tier
+              ↓
+  Is Acceleration Durable?
+              ↓
+     Underwriting Review
+              ↓
+  Human-Approved DCF Update
+              ↓
+     New Fair Value Truth
+```
+
+### 7. The 2x2 Matrix & Anti-Averaging-Down Invariant
 
 ```text
                             FUNDAMENTAL TRAJECTORY & HEALTH
@@ -221,7 +295,7 @@ PRICE → / ↑   │ HOLD /                       │ REVALIDATE /             
 The walk-forward audit engine validates the system without look-ahead bias:
 - **Point-in-Time Slices**: Evaluates historical quarters ($Q_1, Q_2, Q_3, Q_4\text{ FY25}$) using only the data, backlog, and balance-sheet actuals available at each cutoff date.
 - **Dynamic Forward Returns**: 1Q, 2Q, and 4Q forward returns and NOPAT realization are tracked dynamically from each snapshot's starting price ($P_0$) and baseline NOPAT ($N_0$).
-- **Demonstrated Results**:
+- **Observed Case-Study Walk-Forward Outcomes**:
   - **Situation A (Value)**: +22.8% average 4Q return with low drawdown (<10.5%).
   - **Situation B (Core Compounders)**: +39.0% average 4Q return as data center / capacity milestones delivered.
   - **Situation B (Transition Compounders)**: +13.5% average 4Q return; captured early expansion phase, normalized when next-leg proof paused.

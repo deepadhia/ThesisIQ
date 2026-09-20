@@ -1226,7 +1226,9 @@ export function evaluateTransitionCompounderChecklist(options = {}) {
     status: mathStatus,
     evidence: [
       `Market required growth: ${gMarket}% vs Credible evidence ceiling: ${gCredible}% vs Scenario ceiling: ${gScenario}%.`,
-      `Theoretical expansion capacity mathematically covers required growth (${gScenario}% >= ${gMarket}%).`
+      (gScenario >= gMarket)
+        ? `Theoretical expansion capacity mathematically covers required growth (${gScenario}% >= ${gMarket}%).`
+        : `Theoretical expansion capacity does not currently cover required growth (${gScenario}% < ${gMarket}%).`
     ],
     confidence: mathStatus === 'SUPPORTED' ? 0.85 : 0.55
   };

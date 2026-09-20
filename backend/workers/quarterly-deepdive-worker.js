@@ -189,11 +189,86 @@ async function runNimPrompt(systemPrompt, userPrompt, temperature = 0.05) {
 }
 
 /**
+ * Dynamically resolves accurate stage label for alerts and prompt instructions based on filing characteristics.
+ */
+export function getFilingStageDetails(status, title = "", text = "") {
+  const titleLower = (title || "").toLowerCase();
+
+  if (status === "pending_audio") {
+    return {
+      stageName: "Stage 2: Concall Audio / Recording",
+      promptStage: "Stage 2 (Concall Audio / Recording Re-assessment)"
+    };
+  }
+
+  if (status === "pending_stage2" || titleLower.includes("transcript") || titleLower.includes("concall") || titleLower.includes("earnings call")) {
+    return {
+      stageName: "Stage 2: Concall Transcript",
+      promptStage: "Stage 2 (Concall Transcript Re-assessment)"
+    };
+  }
+
+  // Stage 1 specialized classifications
+  const isAgm = titleLower.includes("agm") || 
+                titleLower.includes("annual general meeting") || 
+                titleLower.includes("annual report") || 
+                titleLower.includes("shareholders meeting") || 
+                titleLower.includes("general meeting");
+
+  const isPpt = titleLower.includes("presentation") || 
+                titleLower.includes("investor presentation") || 
+                titleLower.includes("earnings presentation") || 
+                titleLower.includes("investor deck");
+
+  const isResults = titleLower.includes("financial result") || 
+                    titleLower.includes("financials") || 
+                    titleLower.includes("outcome of board") || 
+                    titleLower.includes("un-audited") || 
+                    titleLower.includes("unaudited") || 
+                    titleLower.includes("audited financial") || 
+                    titleLower.includes("quarterly result");
+
+  if (isAgm && !isResults && !isPpt) {
+    return {
+      stageName: "Stage 1: AGM & Annual Report Notice",
+      promptStage: "Stage 1 (AGM Notice & Annual Report Audit)"
+    };
+  } else if (isPpt && !isResults) {
+    return {
+      stageName: "Stage 1: Investor Presentation (PPT)",
+      promptStage: "Stage 1 (Investor Presentation Deep-Dive)"
+    };
+  } else if (isResults && isPpt) {
+    return {
+      stageName: "Stage 1: Earnings Results & PPT",
+      promptStage: "Stage 1 (Earnings Results + PPT Audit)"
+    };
+  } else if (isResults) {
+    return {
+      stageName: "Stage 1: Financial Results",
+      promptStage: "Stage 1 (Quarterly Financial Results Audit)"
+    };
+  } else if (isAgm) {
+    return {
+      stageName: "Stage 1: AGM & Annual Report",
+      promptStage: "Stage 1 (AGM & Annual Report Audit)"
+    };
+  }
+
+  return {
+    stageName: "Stage 1: Corporate Filing & Updates",
+    promptStage: "Stage 1 (Corporate Filing & Business Updates)"
+  };
+}
+
+/**
  * Formulates Institutional Action Verdict (ADD / HOLD / TRIM + Credibility Tier).
  */
 export async function evaluateInstitutionalVerdict(ticker, thesis, text, stage, title = "") {
   const systemPrompt = `You are a Chief Investment Officer at an institutional long-only fund evaluating Indian growth equities.
 Be extremely decisive, objective, and evidence-driven. Zero fluff allowed.`;
+
+  const stageInfo = getFilingStageDetails(stage, title, text);
 
   let dbPromptDirective = "";
   try {
@@ -227,7 +302,7 @@ Be extremely decisive, objective, and evidence-driven. Zero fluff allowed.`;
     textChunks.map(async (chunkText, idx) => {
       const userPrompt = `
 Ticker: ${ticker}
-Stage: ${stage === 'pending_stage1' ? 'Stage 1 (Earnings Results + PPT)' : 'Stage 2 (Concall Transcript Re-assessment)'}
+Stage: ${stageInfo.promptStage}
 Transcript Part: ${idx + 1} of ${textChunks.length}
 Investment Thesis Context:
 ${thesis || "Growth investing, clean balance sheet, high ROCE."}
@@ -691,7 +766,8 @@ export async function processPendingDeepDives(options = {}) {
               ? "🔴 [REASSESS THESIS]" 
               : "🟡 [HOLD / MONITOR]"));
         
-        const stageName = item.deep_dive_status === "pending_stage1" ? "Stage 1: Earnings & PPT" : "Stage 2: Concall Transcript";
+        const stageInfo = getFilingStageDetails(item.deep_dive_status, item.title, docText);
+        const stageName = stageInfo.stageName;
 
         let finText = "";
         if (verdict.financial_highlights) {
