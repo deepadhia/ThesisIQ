@@ -178,7 +178,29 @@ export function runFundamentalTrajectoryReport() {
   }
 
   md += `\n---\n\n`;
-  md += `## Section 4: The Auditable Management Promise Ledger & Track Record\n\n`;
+  md += `## Section 4: Fundamental Catch-Up vs Price Catch-Up Velocity Board\n\n`;
+  md += `Evaluates whether price appreciation reflects fundamental earnings compounding or valuation/expectation expansion between baseline and current reality.\n\n`;
+  md += `| Ticker | Δ Price (%) | Δ NOPAT (%) | Δ Fair Value (%) | Trajectory Gap (% pts) | Catch-Up Dynamics Regime | Analytical Interpretation |\n`;
+  md += `| :--- | :---: | :---: | :---: | :---: | :---: | :--- |\n`;
+
+  for (const v of cohortVectors) {
+    const d = v.catchUpDynamics;
+    let regimeBadge = `\`${d.catchUpRegime}\``;
+    if (d.catchUpRegime === 'PRICE_AHEAD_OF_FUNDAMENTALS') regimeBadge = `🟡 **\`${d.catchUpRegime}\`**`;
+    else if (d.catchUpRegime === 'FUNDAMENTALS_AHEAD_OF_PRICE') regimeBadge = `🟢 **\`${d.catchUpRegime}\`**`;
+    else if (d.catchUpRegime === 'PRICE_AND_FUNDAMENTALS_ALIGNED') regimeBadge = `🔵 **\`${d.catchUpRegime}\`**`;
+    else if (d.catchUpRegime === 'FUNDAMENTALS_DETERIORATING') regimeBadge = `🔴 **\`${d.catchUpRegime}\`**`;
+
+    const priceSign = d.deltaPricePct > 0 ? `+${d.deltaPricePct}%` : `${d.deltaPricePct}%`;
+    const nopatSign = d.deltaNopatPct > 0 ? `+${d.deltaNopatPct}%` : `${d.deltaNopatPct}%`;
+    const fvSign = d.deltaFairValuePct > 0 ? `+${d.deltaFairValuePct}%` : `${d.deltaFairValuePct}%`;
+    const gapSign = d.trajectoryGapPctPts > 0 ? `+${d.trajectoryGapPctPts}% pts` : `${d.trajectoryGapPctPts}% pts`;
+
+    md += `| **\`${v.ticker}\`** | ${priceSign} | ${nopatSign} | ${fvSign} | ${gapSign} | ${regimeBadge} | ${d.interpretation} |\n`;
+  }
+
+  md += `\n---\n\n`;
+  md += `## Section 5: The Auditable Management Promise Ledger & Track Record\n\n`;
   md += `Tracks historical concall claims, capacity timelines, and margin guidance across quarters to verify whether previous management statements turned into actual financial delivery.\n\n`;
   md += `| Ticker | Quarter | Claim Type | Management Claim | Source & Evidence Tier | Target Deadline | Actual Reported Delivery | Delivery Status | Credibility Impact |\n`;
   md += `| :--- | :---: | :--- | :--- | :--- | :---: | :--- | :---: | :---: |\n`;
@@ -193,7 +215,7 @@ export function runFundamentalTrajectoryReport() {
   const qpower = cohortVectors.find(v => v.ticker === 'QPOWER');
   if (qpower && qpower.forwardScenarioTrajectory.scenarios) {
     md += `\n---\n\n`;
-    md += `## Section 5: Deep-Dive Analysis — QPower (QPOWER)\n\n`;
+    md += `## Section 6: Deep-Dive Analysis — QPower (QPOWER)\n\n`;
     md += `### The Core Investment Dilemma\n`;
     md += `> *"I am sitting on a +70% gain in QPower. The current v3.1.1 DCF indicates a model fair value of ₹438 versus CMP ₹1,426 (−32.5% modeled 3Y IRR). Should I execute an automatic stop-loss exit or wait for operational evidence?"*\n\n`;
     
@@ -239,7 +261,7 @@ export function runFundamentalTrajectoryReport() {
   const hbl = cohortVectors.find(v => v.ticker === 'HBLENGINE');
   if (hbl) {
     md += `\n---\n\n`;
-    md += `## Section 6: Deep-Dive Analysis — HBL Power Systems (HBLENGINE)\n\n`;
+    md += `## Section 7: Deep-Dive Analysis — HBL Power Systems (HBLENGINE)\n\n`;
     md += `### Resolving the Underwriting vs Action Dilemma\n`;
     md += `- **Observed Reality**: TTM Revenue ₹2,150 Cr (+28% YoY), EBITDA margin 22.0%, Order Backlog ₹2,800 Cr, CFO/PAT 0.82x, Forward iROIC 32.0%.\n`;
     md += `- **Forward Scenario (Pure Backlog Burn)**: Conservative 4.5% | Base Case 12.5% | Accelerated 18.9% (without assuming continuous tender renewals).\n`;
@@ -260,7 +282,7 @@ export function runFundamentalTrajectoryReport() {
   const transrail = cohortVectors.find(v => v.ticker === 'TRANSRAILL');
   if (transrail) {
     md += `\n---\n\n`;
-    md += `## Section 7: Deep-Dive Analysis — Transrail Lighting (TRANSRAILL)\n\n`;
+    md += `## Section 8: Deep-Dive Analysis — Transrail Lighting (TRANSRAILL)\n\n`;
     md += `### The Working Capital Conversion Paradox\n`;
     md += `- **Demand & Backlog**: Massive ₹10,500 Cr order book (~2.5× revenue) with +22% YoY revenue growth.\n`;
     md += `- **The Fatal Bottleneck**: **115-day receivables drag** ($CFO/PAT = 0.50\\text{x}$), consuming cash and suppressing free cash flow.\n`;
@@ -279,7 +301,7 @@ export function runFundamentalTrajectoryReport() {
   const shakti = cohortVectors.find(v => v.ticker === 'SHAKTIPUMP');
   if (shakti) {
     md += `\n---\n\n`;
-    md += `## Section 8: Deep-Dive Analysis — Shakti Pumps (SHAKTIPUMP)\n\n`;
+    md += `## Section 9: Deep-Dive Analysis — Shakti Pumps (SHAKTIPUMP)\n\n`;
     md += `### The Broken Thesis / Value Trap Case\n`;
     md += `- **Observed Reality**: 140-day receivables blowout, CFO/PAT 0.15x, severe subsidy dependence.\n`;
     md += `- **Underwriting Status**: \`BROKEN\` | Revision Signal: \`REVISION_SUPPORTED_DECELERATION\`.\n`;

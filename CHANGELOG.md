@@ -1,5 +1,52 @@
 # Changelog
 
+## [v3.3.1] - 2026-09-20 (Market–Thesis Reconciliation & Duration Integrity Patch)
+
+### Fixed & Enhanced
+- **Strict 3-Quantity Epistemic Separation**:
+  - `MARKET_REQUIRED_ECONOMICS`: What current market price mathematically demands ($g_{\text{market}}$, $T_{\text{req}}$, $\text{Margin}_{\text{req}}$, $\text{iROIC}_{\text{req}}$, $\text{Capital}_{\text{req}}$).
+  - `EVIDENCE_SUPPORTED_ECONOMICS`: What audited delivery, physical plant scale, and order book burn actively confirm today ($g_{\text{evidence}}$, $T_{\text{visible}}$, observed iROIC, DSO, CFO/PAT).
+  - `THEORETICAL_BULL_ECONOMICS`: Unconstrained hypothetical bull math; strictly decoupled with `isEvidenceSupported: false` flag so speculative simulations never masquerade as evidence.
+- **Sequential Scenario Bridge (`SEQUENTIAL_SCENARIO_BRIDGE`)**:
+  - Relabeled the waterfall to explicitly denote a sequential milestone progression rather than additive Shapley attribution, preventing false precision from interacting non-linear parameters (growth, duration, terminal ROIC).
+  - Eliminated waterfall overshoot bug (e.g. SJS overshooting CMP to zero out residual); enforces exact identity: $P_0 + \sum \Delta P_i + \text{UNEXPLAINED\_MARKET\_PREMIUM} \equiv P_{\text{market}}$.
+- **Market-vs-Evidence Gap Quantification (`marketEvidenceGap`)**:
+  - Computes explicit spread: $g_{\text{market}}$ vs $g_{\text{underwritten}}$ vs $g_{\text{evidence\_max}}$ (e.g. QPower: $+25.9\text{ pp}$ vs underwriting, $-20.1\text{ pp}$ vs evidence ceiling; SJS: $+13.6\text{ pp}$ over evidence ceiling; HBL: $+9.5\text{ pp}$ over evidence ceiling).
+- **9-State Epistemic Reality Taxonomy (`RECONCILIATION_REALITY_STATE`)**:
+  - Added `DISLOCATION_UNDERWRITING_REVALIDATION` to distinguish valuation discounts caused by uncorroborated / under-supported underwriting (e.g. HBL) from genuine temporary operational friction (`DISLOCATION_TEMPORARY_FRICTION` e.g. Transrail's 115d DSO).
+- **Terminology Refinement**:
+  - Replaced misleading "explained by expansion math" statements with precise framing: `93.2% of the market premium can be reconstructed through explicit future-economic assumptions, but commercial utilization and billing proof remain pending.`
+- **100% Invariant Test Verification**:
+  - `test-market-thesis-reconciliation.js` (210/210 PASS).
+  - `test-fundamental-trajectory-engine.js` (279/279 PASS). Total: 489/489 tests passing (100% success).
+
+### Added
+- **Market–Thesis Reconciliation Layer (`market-thesis-reconciliation.service.js`)**:
+  - Standalone modular analytical layer explaining what economic assumptions the market is implicitly capitalizing when $\text{Market EV} \neq \text{Model Underwritten EV}$.
+  - Operates bilaterally across the universe:
+    - *Market Premium Side*: Investigates "What is the market already pricing?" (Growth, Duration, Operating Leverage, Terminal Transformation, Optionality).
+    - *Market Discount Side*: Investigates "Why is the market discounting it?" (Working capital friction, capex cycles, earnings troughs, or structural impairment).
+- **The 7 Core Economic Gaps (Deconstructed for Every Equity)**:
+  1. *Growth Gap*: $\Delta g = g_{\text{req}} - g_{\text{underwritten}}$ (% pts).
+  2. *Duration Gap*: $\Delta T = T_{\text{req}} - T_{\text{underwritten}}$ (Years of superior compounding required at realistic growth rates).
+  3. *Margin Gap*: $\Delta \text{Margin} = \text{EBITDA Margin}_{\text{req}} - \text{EBITDA Margin}_{\text{underwritten}}$ (bps / % pts).
+  4. *iROIC Gap*: $\Delta \text{iROIC} = \text{iROIC}_{\text{req}} - \text{iROIC}_{\text{forward}}$ (% pts).
+  5. *Reinvestment Gap*: $\Delta \text{Capital} = \text{NOA}_{\text{req}} - \text{NOA}_{\text{capacity}}$ (₹ Cr & capital absorption feasibility).
+  6. *Optionality Gap*: Unmodeled economic value from new product lines (HVDC/FACTS), megaproject tenders, and M&A vectors (Sukrut, Exxpand).
+  7. *Terminal Economics Gap*: $\Delta \text{Terminal ROIC} = \text{Terminal ROIC}_{\text{req}} - \text{Terminal ROIC}_{\text{base}}$ (% pts) & Terminal Margin shift.
+- **8-State Epistemic Reality Taxonomy (`RECONCILIATION_REALITY_STATE`)**:
+  - `UNDERVALUED_THESIS_SUPPORTED`, `UNDERVALUED_FUTURE_OPTIONALITY`, `FAIR_THESIS_ALIGNED`, `EXPENSIVE_EXPLAINABLE`, `EXPENSIVE_UNPROVEN`, `EXPENSIVE_UNEXPLAINED`, `DISLOCATION_TEMPORARY_FRICTION`, `BROKEN`.
+- **Multi-Horizon DCF Engine (`calculateMultiHorizonFcffDcf`)**:
+  - Parameterized compounding duration ($T \in [3, 20]$ years), non-linear operating leverage margin ramp, dynamic incremental ROIC, and terminal ROIC transformation.
+- **Reverse Duration Solver (`solveRequiredCompoundingDuration`)**:
+  - Numerically solves for the required compounding duration $T_{\text{req}}$ at candidate growth rates (20%, 25%, 28%, 30%, 32%, 35%, 40%) and builds the sensitivity grid.
+- **Valuation Gap Waterfall Bridge (`buildValuationGapWaterfallBridge`)**:
+  - Bridges Base Fair Value to Market Price: $P_0 + \Delta\text{Growth} + \Delta\text{OpLev} + \Delta\text{Duration} + \Delta\text{Terminal} + \Delta\text{Optionality} + \text{Speculative} \equiv P_{\text{market}}$.
+  - Deep-dive for QPower proves **93.2% of the ₹987.83 price gap is explained by tangible evidence** (Sangli 8x capacity, 10Y duration, 33.9% iROIC, and HVDC mix), deriving `EXPENSIVE_EXPLAINABLE`.
+- **New Invariant Test Suite & Dossier**:
+  - `backend/scripts/test-market-thesis-reconciliation.js` (**107 / 107 invariant tests passed**).
+  - `backend/scripts/run-market-thesis-reconciliation.js` generating `reports/thesis_board/MARKET_THESIS_RECONCILIATION_DOSSIER_V3_3.md`.
+
 ## [v3.2.0] - 2026-09-20 (Fundamental Trajectory & Management Evidence Engine)
 
 ### Added
@@ -25,14 +72,18 @@
   - Permanent underlying data structure tracking historical concall/SEBI claims across `Company`, `Quarter`, `Management Claim`, `Claim Type`, `Source`, `Date`, `Evidence Tier`, `Target Metric`, `Deadline`, `Actual Reported Delivery`, `Variance`, `Delivery Status`, and `Credibility Impact`.
   - Dynamic reconciliation engine `evaluateManagementPromiseLedger` answering: *"What did management say 4 quarters ago, and how much of it actually happened?"*
   - Objective credibility derivation (`AHEAD`, `ON_TRACK`, `MIXED`, `BEHIND`, `BROKEN`) replacing subjective management-quality scores with an auditable evidence trail.
+- **Fundamental Catch-Up vs Price Catch-Up Dynamics (`CATCH_UP_DYNAMICS_REGIME`)**:
+  - Longitudinal trajectory velocity tracking: $\Delta\text{Price (\% Move)}$, $\Delta\text{NOPAT Trajectory (\% Move)}$, $\Delta\text{Fair Value (\% Move)}$, and $\text{Trajectory Gap (\% pts)}$.
+  - Deterministic 4-regime taxonomy: `FUNDAMENTALS_AHEAD_OF_PRICE`, `PRICE_AND_FUNDAMENTALS_ALIGNED`, `PRICE_AHEAD_OF_FUNDAMENTALS`, and `FUNDAMENTALS_DETERIORATING`.
+  - Disentangles genuine economic catch-up from pure multiple/expectation expansion.
 - **5-Dimension Fundamental Reality Architecture**: First-class tracking of (1) Management Credibility, (2) Guidance Status, (3) Growth Trajectory, (4) Economic Quality, and (5) Thesis Status across 19 cohort stocks.
 - **5-Stage Fundamental Decomposition Engine**: `GROWTH_ENGINE` $\to$ `REVENUE_ENGINE` $\to$ `MARGIN_ENGINE` $\to$ `CAPITAL_ENGINE` $\to$ `CASH_CONVERSION_ENGINE`.
 - **Stage-by-Stage Bottleneck Diagnostics**: Explicit operational state checks across Demand, Capacity, Utilization, Margins, Working Capital, and ROIC (✅ / ❓ / ❌).
 - **New Service & Invariant Test Suite**:
   - `backend/services/fundamental-trajectory-engine.service.js`
   - `backend/scripts/run-fundamental-trajectory-engine.js`
-  - `backend/scripts/test-fundamental-trajectory-engine.js` (**270 / 270 invariant tests passed**).
-- **Comprehensive Dossier**: Generated `reports/thesis_board/FUNDAMENTAL_TRAJECTORY_DOSSIER_V3_2.md` with Section 4 dedicated to the auditable Management Promise Ledger.
+  - `backend/scripts/test-fundamental-trajectory-engine.js` (**279 / 279 invariant tests passed**).
+- **Comprehensive Dossier**: Generated `reports/thesis_board/FUNDAMENTAL_TRAJECTORY_DOSSIER_V3_2.md` with Section 4 dedicated to the Fundamental Catch-Up vs Price Catch-Up Velocity Board.
 
 ## [v3.1.1] - 2026-09-20 (FCFF Metric-Integrity & 4-Tier Conversion Patch)
 

@@ -20,6 +20,33 @@
  */
 
 import { calculateInstitutionalFcffDcf } from './asymmetric-mispricing-ranking.service.js';
+import {
+  RECONCILIATION_REALITY_STATE,
+  GAP_DIRECTION,
+  calculateMultiHorizonFcffDcf,
+  solveRequiredCompoundingDuration,
+  solveRequiredNopatGrowthAtHorizon,
+  calculateReverseDurationSensitivityMatrix,
+  deconstructSevenEconomicGaps,
+  buildValuationGapWaterfallBridge,
+  classifyReconciliationRealityState,
+  reconcileMarketVsThesis,
+  reconcileCohortMarketVsThesis
+} from './market-thesis-reconciliation.service.js';
+
+export {
+  RECONCILIATION_REALITY_STATE,
+  GAP_DIRECTION,
+  calculateMultiHorizonFcffDcf,
+  solveRequiredCompoundingDuration,
+  solveRequiredNopatGrowthAtHorizon,
+  calculateReverseDurationSensitivityMatrix,
+  deconstructSevenEconomicGaps,
+  buildValuationGapWaterfallBridge,
+  classifyReconciliationRealityState,
+  reconcileMarketVsThesis,
+  reconcileCohortMarketVsThesis
+};
 
 export const GROWTH_ENGINE_TYPE = Object.freeze({
   CAPACITY_UTILIZATION: 'CAPACITY_UTILIZATION',       // Greenfield/Brownfield unit ramp (QPower, CCL, HSCL, Gravita, Time Techno)
@@ -202,6 +229,17 @@ export const ACTION_CONTEXT = Object.freeze({
   SYSTEMATIC_EXIT: 'SYSTEMATIC_EXIT'
 });
 
+// -----------------------------------------------------------------------------
+// Fundamental Catch-Up vs Price Catch-Up Taxonomy (Trajectory Velocity)
+// -----------------------------------------------------------------------------
+
+export const CATCH_UP_DYNAMICS_REGIME = Object.freeze({
+  FUNDAMENTALS_AHEAD_OF_PRICE: 'FUNDAMENTALS_AHEAD_OF_PRICE',     // Economic engine improving faster than price appreciation
+  PRICE_AND_FUNDAMENTALS_ALIGNED: 'PRICE_AND_FUNDAMENTALS_ALIGNED', // Earnings delivery and market valuation moving in tandem
+  PRICE_AHEAD_OF_FUNDAMENTALS: 'PRICE_AHEAD_OF_FUNDAMENTALS',       // Multiple & expectation expansion outrunning earnings delivery
+  FUNDAMENTALS_DETERIORATING: 'FUNDAMENTALS_DETERIORATING'          // Structural unit economics contraction or broken thesis
+});
+
 const STATUTORY_TAX_RATE = 0.2517; // 25.17% standard corporate tax rate
 
 /**
@@ -228,6 +266,56 @@ export function calculateValuationHurdlePrice(fairValue, requiredMarginOfSafetyP
 export function calculateMarginOfSafety(fairValue, price) {
   if (!fairValue || fairValue <= 0) return 0.0;
   return parseFloat((((fairValue - price) / fairValue) * 100.0).toFixed(2));
+}
+
+/**
+ * Helper: Computes Quarter-over-Quarter / Baseline-to-Current Trajectory Velocity
+ * Answers: "Has the economic engine caught up with valuation, or has valuation expanded faster than fundamentals?"
+ */
+export function calculateFundamentalCatchUpDynamics(profile) {
+  const currentPrice = profile.currentPrice || 1000.0;
+  const currentNopat = profile.baselineNopatCr || 100.0;
+  const currentFairValue = profile.fairValuePrice || (currentPrice * 0.75);
+
+  const price1YDelta = profile.observedPrice1YChangePct !== undefined ? profile.observedPrice1YChangePct : (profile.valuationStatus === VALUATION_STATUS.EXTREME ? 65.0 : (profile.observedYoYGrowthPct || 22.0));
+  const nopat1YDelta = profile.observedYoYGrowthPct !== undefined ? profile.observedYoYGrowthPct : 22.0;
+
+  const priorPrice = profile.priorQuarterPrice || profile.entryPrice || (currentPrice / (1 + (price1YDelta / 100.0)));
+  const priorNopat = profile.priorQuarterNopatCr || (currentNopat / (1 + (nopat1YDelta / 100.0)));
+  const priorFairValue = profile.priorFairValuePrice || (currentFairValue / (1 + ((profile.underwrittenNopatCagrPct || 20.0) / 100.0)));
+
+  const deltaPricePct = parseFloat((((currentPrice - priorPrice) / priorPrice) * 100.0).toFixed(1));
+  const deltaNopatPct = parseFloat((((currentNopat - priorNopat) / priorNopat) * 100.0).toFixed(1));
+  const deltaFairValuePct = parseFloat((((currentFairValue - priorFairValue) / priorFairValue) * 100.0).toFixed(1));
+  const trajectoryGapPctPts = parseFloat((deltaPricePct - deltaNopatPct).toFixed(1));
+
+  let catchUpRegime = CATCH_UP_DYNAMICS_REGIME.PRICE_AND_FUNDAMENTALS_ALIGNED;
+
+  if (profile.hasAuditedDeterioration || profile.thesisOperationalStatus === THESIS_OPERATIONAL_STATUS.BROKEN || deltaNopatPct < -5.0) {
+    catchUpRegime = CATCH_UP_DYNAMICS_REGIME.FUNDAMENTALS_DETERIORATING;
+  } else if (deltaPricePct > deltaNopatPct + 15.0) {
+    catchUpRegime = CATCH_UP_DYNAMICS_REGIME.PRICE_AHEAD_OF_FUNDAMENTALS;
+  } else if (deltaNopatPct > deltaPricePct + 10.0 || deltaFairValuePct > deltaPricePct + 10.0) {
+    catchUpRegime = CATCH_UP_DYNAMICS_REGIME.FUNDAMENTALS_AHEAD_OF_PRICE;
+  } else {
+    catchUpRegime = CATCH_UP_DYNAMICS_REGIME.PRICE_AND_FUNDAMENTALS_ALIGNED;
+  }
+
+  return {
+    deltaPricePct,
+    deltaNopatPct,
+    deltaFairValuePct,
+    trajectoryGapPctPts,
+    catchUpRegime,
+    isExpectationExpansion: deltaPricePct > deltaNopatPct,
+    interpretation: catchUpRegime === CATCH_UP_DYNAMICS_REGIME.PRICE_AHEAD_OF_FUNDAMENTALS
+      ? `Price (+${deltaPricePct}%) ran ahead of fundamental NOPAT expansion (+${deltaNopatPct}%); multiple expansion dominant.`
+      : (catchUpRegime === CATCH_UP_DYNAMICS_REGIME.FUNDAMENTALS_AHEAD_OF_PRICE
+        ? `Fundamentals (+${deltaNopatPct}%) grew faster than price (+${deltaPricePct}%); economic engine catching up.`
+        : (catchUpRegime === CATCH_UP_DYNAMICS_REGIME.FUNDAMENTALS_DETERIORATING
+          ? `Operating earnings or cash conversion deteriorating; thesis under impairment.`
+          : `Price and fundamentals compounding in tandem.`))
+  };
 }
 
 // -----------------------------------------------------------------------------
@@ -1085,6 +1173,7 @@ export function evaluateFundamentalTrajectoryVector(profile) {
     trajectoryConfidence,
     thesisRevisionSignal,
     bottleneckDiagnostic,
+    catchUpDynamics: calculateFundamentalCatchUpDynamics(profile),
 
     // Valuation & Directives
     currentPrice,
@@ -1103,7 +1192,10 @@ export function evaluateFundamentalTrajectoryVector(profile) {
     
     // Multi-Underwriting DCF Matrix
     conditionalDcfMatrix,
-    valuationEngineInvariantProtected: true
+    valuationEngineInvariantProtected: true,
+
+    // ThesisIQ v3.3: Market-Thesis Reconciliation Layer
+    marketThesisReconciliation: reconcileMarketVsThesis(profile)
   };
 }
 

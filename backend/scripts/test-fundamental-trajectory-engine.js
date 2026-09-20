@@ -31,6 +31,7 @@ import {
   EXISTING_POSITION_STATUS,
   NEW_CAPITAL_STATUS,
   ACTION_CONTEXT,
+  CATCH_UP_DYNAMICS_REGIME,
   COHORT_TRAJECTORY_PROFILES,
   calculateCapacityUtilizationTrajectory,
   calculateOrderBookExecutionTrajectory,
@@ -38,6 +39,7 @@ import {
   calculateCustomerProgramTrajectory,
   calculateValuationHurdlePrice,
   calculateMarginOfSafety,
+  calculateFundamentalCatchUpDynamics,
   diagnoseBottlenecks,
   evaluateManagementPromiseLedger,
   loadPromiseLedgerFromDatabase,
@@ -330,6 +332,65 @@ assert(hydratedLedger[1].claimType === 'REVENUE_GUIDANCE', 'DB adapter accuratel
 const asyncVector = await evaluateFundamentalTrajectoryVectorAsync(COHORT_TRAJECTORY_PROFILES.QPOWER, mockDbPool);
 assert(asyncVector.promiseLedger.totalPromisesTracked === 2, 'evaluateFundamentalTrajectoryVectorAsync seamlessly integrates dynamic database ledger');
 assert(asyncVector.promiseLedger.deliveredCount === 1, 'evaluateFundamentalTrajectoryVectorAsync accurately resolves delivered count from DB');
+
+// -------------------------------------------------------------------------
+// 12. Testing Fundamental Catch-Up vs Price Catch-Up Dynamics
+// -------------------------------------------------------------------------
+console.log('\n--- 12. Testing Fundamental Catch-Up vs Price Catch-Up Dynamics ---');
+
+// Case 1: Price running ahead of fundamentals (QPower: +70% price vs +32% NOPAT -> PRICE_AHEAD_OF_FUNDAMENTALS)
+const qpowerDynamics = calculateFundamentalCatchUpDynamics({
+  currentPrice: 1426.0,
+  priorQuarterPrice: 838.0, // +70.2% price move
+  baselineNopatCr: 145.0,
+  priorQuarterNopatCr: 110.0, // +31.8% NOPAT move
+  fairValuePrice: 438.17,
+  priorFairValuePrice: 400.0
+});
+assert(qpowerDynamics.catchUpRegime === CATCH_UP_DYNAMICS_REGIME.PRICE_AHEAD_OF_FUNDAMENTALS, 'QPower (+70% price vs +32% NOPAT) correctly classified as PRICE_AHEAD_OF_FUNDAMENTALS');
+assert(qpowerDynamics.isExpectationExpansion === true, 'QPower flags expectation/multiple expansion dominant');
+assert(qpowerDynamics.trajectoryGapPctPts > 30.0, `QPower trajectory gap (${qpowerDynamics.trajectoryGapPctPts}% pts) reflects substantial price run-ahead`);
+
+// Case 2: Fundamentals catching up faster than price (+40% NOPAT vs +15% price -> FUNDAMENTALS_AHEAD_OF_PRICE)
+const catchUpProfile = {
+  currentPrice: 1150.0,
+  priorQuarterPrice: 1000.0, // +15% price move
+  baselineNopatCr: 140.0,
+  priorQuarterNopatCr: 100.0, // +40% NOPAT move
+  fairValuePrice: 1500.0,
+  priorFairValuePrice: 1100.0 // +36% FV move
+};
+const catchUpDynamics = calculateFundamentalCatchUpDynamics(catchUpProfile);
+assert(catchUpDynamics.catchUpRegime === CATCH_UP_DYNAMICS_REGIME.FUNDAMENTALS_AHEAD_OF_PRICE, 'Company (+40% NOPAT vs +15% price) correctly classified as FUNDAMENTALS_AHEAD_OF_PRICE');
+assert(catchUpDynamics.isExpectationExpansion === false, 'Fundamental catch-up does NOT flag expectation expansion');
+
+// Case 3: Price and Fundamentals compounding in equilibrium (+20% price vs +22% NOPAT -> PRICE_AND_FUNDAMENTALS_ALIGNED)
+const alignedProfile = {
+  currentPrice: 1200.0,
+  priorQuarterPrice: 1000.0, // +20% price move
+  baselineNopatCr: 122.0,
+  priorQuarterNopatCr: 100.0, // +22% NOPAT move
+  fairValuePrice: 1200.0,
+  priorFairValuePrice: 1000.0
+};
+const alignedDynamics = calculateFundamentalCatchUpDynamics(alignedProfile);
+assert(alignedDynamics.catchUpRegime === CATCH_UP_DYNAMICS_REGIME.PRICE_AND_FUNDAMENTALS_ALIGNED, 'Balanced compounder (+20% price vs +22% NOPAT) classified as PRICE_AND_FUNDAMENTALS_ALIGNED');
+
+// Case 4: Fundamentals deteriorating (Shakti: Negative operating cash / deterioration -> FUNDAMENTALS_DETERIORATING)
+const deterioratingProfile = {
+  currentPrice: 494.0,
+  priorQuarterPrice: 500.0,
+  baselineNopatCr: 150.0,
+  priorQuarterNopatCr: 200.0, // -25% NOPAT drop
+  hasAuditedDeterioration: true,
+  thesisOperationalStatus: THESIS_OPERATIONAL_STATUS.BROKEN
+};
+const deterioratingDynamics = calculateFundamentalCatchUpDynamics(deterioratingProfile);
+assert(deterioratingDynamics.catchUpRegime === CATCH_UP_DYNAMICS_REGIME.FUNDAMENTALS_DETERIORATING, 'Broken/deteriorating thesis classified as FUNDAMENTALS_DETERIORATING');
+
+// Vector Output Verification
+assert(qpowerVector.catchUpDynamics !== undefined, 'evaluateFundamentalTrajectoryVector attaches catchUpDynamics object');
+assert(qpowerVector.catchUpDynamics.catchUpRegime !== undefined, 'Vector output contains valid catchUpRegime');
 
 console.log('\n================================================================================================');
 console.log(`📊 INVARIANT TEST SUMMARY: ${passedTests} / ${totalTests} TESTS PASSED (100% SUCCESS)`);

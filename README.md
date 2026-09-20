@@ -1,10 +1,10 @@
-# 🧠 ThesisIQ v3.2 — Fundamental Trajectory & Institutional Compounding Platform
+# 🧠 ThesisIQ v3.3.1 — Market–Thesis Valuation Reconciliation & Fundamental Platform
 
-A production-grade fundamental research and decision platform for institutional equity compounding analysis.
+A production-grade fundamental research, trajectory modeling, and market reconciliation platform for institutional equity compounding analysis.
 
-ThesisIQ combines **8-Layer Reality Compounding Architecture**, **Fundamental Trajectory & Management Evidence Engine (v3.2)**, **Forensic FCFF Reinvestment Modeling**, **Reverse-DCF Market Expectations Gap Analysis**, **7-Year 5× Economic Pathway Feasibility**, and a **Zero-Contradiction Deterministic Decision State Machine** to identify genuine multibaggers, evaluate asymmetric risk-reward, and provide actionable context for existing position holders.
+ThesisIQ combines **8-Layer Reality Compounding Architecture (v3.1)**, **Fundamental Trajectory & Management Evidence Engine (v3.2)**, **Market–Thesis Valuation Reconciliation & Duration Engine (v3.3)**, **Forensic FCFF Reinvestment Modeling**, **Reverse Duration Solvers**, and a **Zero-Contradiction Deterministic Decision State Machine** to explain why market prices differ from modeled fair values, identify genuine multibaggers, and provide actionable context for portfolio managers.
 
-> **Core Operating Mandate:** Separate *Forensic Accounting Truth*, *Forward Incremental Capital Economics (iROIC)*, *Underwritten Earnings Power*, *Market Expectations Gaps*, *Management Credibility*, and *Capital Allocation Decisions* rather than collapsing them into an oversimplified score.
+> **Core Operating Mandate:** Disentangle *Forensic Accounting Truth*, *Forward Incremental Capital Economics (iROIC)*, *Underwritten Earnings Power*, *Management Promise Delivery*, *Market Implied Duration & Expectations*, and *Capital Allocation Directives* rather than collapsing them into an oversimplified score.
 
 ---
 
@@ -132,13 +132,13 @@ ThesisIQ enforces strict mathematical invariant test suites with **100% pass rat
 ================================================================================================
 🧪 THESISIQ INVARIANT TEST SUITES
 ================================================================================================
-1. test-fundamental-trajectory-engine.js      270/270 PASS  (Three Truths, Signals, Directives, Promise Ledger, DB Bridge, Hurdle)
+1. test-fundamental-trajectory-engine.js      279/279 PASS  (Three Truths, Signals, Directives, Promise Ledger, DB Bridge, Catch-Up Dynamics, Hurdle)
 2. test-reverse-dcf-v3-integrity.js            63/63 PASS  (FCFF Identity, 4-Tier Status, Regimes)
 3. test-asymmetric-mispricing-ranking.js        22/22 PASS  (Reverse-DCF Sensitivity, Multiples)
 4. test-market-valuation-integrity.js          33/33 PASS  (Parser Math, Trailing PE, Database Loading)
 5. test-valuation-dislocation-watchdog.js      24/24 PASS  (Anti-Spam Cooldown, Gating Invariants)
 ------------------------------------------------------------------------------------------------
-TOTAL TEST COVERAGE: 412/412 PASSING (100% INVARIANT SAFETY)
+TOTAL TEST COVERAGE: 421/421 PASSING (100% INVARIANT SAFETY)
 ================================================================================================
 ```
 
@@ -146,20 +146,27 @@ TOTAL TEST COVERAGE: 412/412 PASSING (100% INVARIANT SAFETY)
 
 ## ⚙️ Running the System
 
-### 1. Run v3.2 Fundamental Trajectory & Action Context Engine
+### 1. Run v3.3 Market–Thesis Reconciliation Engine
+```bash
+node --env-file=.env.local backend/scripts/run-market-thesis-reconciliation.js
+```
+Generates complete Markdown dossier at `reports/thesis_board/MARKET_THESIS_RECONCILIATION_DOSSIER_V3_3.md`.
+
+### 2. Run v3.2 Fundamental Trajectory & Evidence Engine
 ```bash
 node --env-file=.env.local backend/scripts/run-fundamental-trajectory-engine.js
 ```
 Generates complete Markdown dossier at `reports/thesis_board/FUNDAMENTAL_TRAJECTORY_DOSSIER_V3_2.md`.
 
-### 2. Run v3.1.1 Institutional Valuation & Asymmetry Ranking
+### 3. Run v3.1.1 Institutional Valuation & Asymmetry Ranking
 ```bash
 node --env-file=.env.local backend/scripts/run-asymmetric-mispricing-ranking.js
 ```
 Generates complete Markdown dossier at `reports/thesis_board/ASYMMETRIC_MISPRICING_RANKING_18_STOCKS.md`.
 
-### 3. Run Invariant Test Suites
+### 4. Run Invariant Test Suites
 ```bash
+node --env-file=.env.local backend/scripts/test-market-thesis-reconciliation.js
 node --env-file=.env.local backend/scripts/test-fundamental-trajectory-engine.js
 node --env-file=.env.local backend/scripts/test-reverse-dcf-v3-integrity.js
 node --env-file=.env.local backend/scripts/test-asymmetric-mispricing-ranking.js
@@ -167,7 +174,7 @@ node --env-file=.env.local backend/scripts/test-market-valuation-integrity.js
 node --env-file=.env.local backend/scripts/test-valuation-dislocation-watchdog.js
 ```
 
-### 4. Start Background Server
+### 5. Start Background Server
 ```bash
 npm run dev
 ```
