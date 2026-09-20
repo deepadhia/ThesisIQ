@@ -233,6 +233,9 @@ export async function sendRunSummary({
   bseErrors = 0, nseErrors = 0, durationMs = 0,
   runUrl, isDryRun = false
 }) {
+  const durationSec = (durationMs / 1000).toFixed(1);
+  const timestamp = new Date().toLocaleString("en-IN", { timeZone: "Asia/Kolkata" });
+
   // In 24/7 daemon mode, NEVER send summary if 0 alerts were sent (prevents 5-minute spam)
   if (alertsSent === 0 && !isDryRun) {
     console.log(`[SUMMARY] 0 alerts sent. Quiet daemon run — skipping Telegram summary.`);
