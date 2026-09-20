@@ -1,10 +1,10 @@
-# 🧠 ThesisIQ v3.1 — Institutional Asymmetric Compounding & Decision Intelligence Platform
+# 🧠 ThesisIQ v3.2 — Fundamental Trajectory & Institutional Compounding Platform
 
 A production-grade fundamental research and decision platform for institutional equity compounding analysis.
 
-ThesisIQ combines **8-Layer Reality Compounding Architecture**, **Forensic FCFF Reinvestment Modeling**, **Reverse-DCF Market Expectations Gap Analysis**, **7-Year 5× Economic Pathway Feasibility**, and a **Zero-Contradiction Deterministic Decision State Machine** to identify genuine multibaggers and evaluate whether current market valuations offer strict asymmetric risk-reward (>3:1).
+ThesisIQ combines **8-Layer Reality Compounding Architecture**, **Fundamental Trajectory & Management Evidence Engine (v3.2)**, **Forensic FCFF Reinvestment Modeling**, **Reverse-DCF Market Expectations Gap Analysis**, **7-Year 5× Economic Pathway Feasibility**, and a **Zero-Contradiction Deterministic Decision State Machine** to identify genuine multibaggers, evaluate asymmetric risk-reward, and provide actionable context for existing position holders.
 
-> **Core Operating Mandate:** Separate *Forensic Accounting Truth*, *Forward Incremental Capital Economics (iROIC)*, *Underwritten Earnings Power*, *Market Expectations Gaps*, and *Capital Allocation Decisions* rather than collapsing them into an oversimplified score.
+> **Core Operating Mandate:** Separate *Forensic Accounting Truth*, *Forward Incremental Capital Economics (iROIC)*, *Underwritten Earnings Power*, *Market Expectations Gaps*, *Management Credibility*, and *Capital Allocation Decisions* rather than collapsing them into an oversimplified score.
 
 ---
 
@@ -130,14 +130,15 @@ ThesisIQ enforces strict mathematical invariant test suites with **100% pass rat
 
 ```text
 ================================================================================================
-🧪 THESISIQ v3.1 INVARIANT TEST SUITES
+🧪 THESISIQ INVARIANT TEST SUITES
 ================================================================================================
-1. test-reverse-dcf-v3-integrity.js            63/63 PASS  (FCFF Identity, 4-Tier Status, Regimes)
-2. test-asymmetric-mispricing-ranking.js        22/22 PASS  (Reverse-DCF Sensitivity, Multiples)
-3. test-market-valuation-integrity.js          33/33 PASS  (Parser Math, Trailing PE, Database Loading)
-4. test-valuation-dislocation-watchdog.js      24/24 PASS  (Anti-Spam Cooldown, Gating Invariants)
+1. test-fundamental-trajectory-engine.js      270/270 PASS  (Three Truths, Signals, Directives, Promise Ledger, DB Bridge, Hurdle)
+2. test-reverse-dcf-v3-integrity.js            63/63 PASS  (FCFF Identity, 4-Tier Status, Regimes)
+3. test-asymmetric-mispricing-ranking.js        22/22 PASS  (Reverse-DCF Sensitivity, Multiples)
+4. test-market-valuation-integrity.js          33/33 PASS  (Parser Math, Trailing PE, Database Loading)
+5. test-valuation-dislocation-watchdog.js      24/24 PASS  (Anti-Spam Cooldown, Gating Invariants)
 ------------------------------------------------------------------------------------------------
-TOTAL TEST COVERAGE: 142/142 PASSING (100% INVARIANT SAFETY)
+TOTAL TEST COVERAGE: 412/412 PASSING (100% INVARIANT SAFETY)
 ================================================================================================
 ```
 
@@ -145,21 +146,28 @@ TOTAL TEST COVERAGE: 142/142 PASSING (100% INVARIANT SAFETY)
 
 ## ⚙️ Running the System
 
-### 1. Execute Unified Portfolio Compounding Decision Board
+### 1. Run v3.2 Fundamental Trajectory & Action Context Engine
+```bash
+node --env-file=.env.local backend/scripts/run-fundamental-trajectory-engine.js
+```
+Generates complete Markdown dossier at `reports/thesis_board/FUNDAMENTAL_TRAJECTORY_DOSSIER_V3_2.md`.
+
+### 2. Run v3.1.1 Institutional Valuation & Asymmetry Ranking
 ```bash
 node --env-file=.env.local backend/scripts/run-asymmetric-mispricing-ranking.js
 ```
 Generates complete Markdown dossier at `reports/thesis_board/ASYMMETRIC_MISPRICING_RANKING_18_STOCKS.md`.
 
-### 2. Run Comprehensive Invariant Test Suite
+### 3. Run Invariant Test Suites
 ```bash
+node --env-file=.env.local backend/scripts/test-fundamental-trajectory-engine.js
 node --env-file=.env.local backend/scripts/test-reverse-dcf-v3-integrity.js
 node --env-file=.env.local backend/scripts/test-asymmetric-mispricing-ranking.js
 node --env-file=.env.local backend/scripts/test-market-valuation-integrity.js
 node --env-file=.env.local backend/scripts/test-valuation-dislocation-watchdog.js
 ```
 
-### 3. Start Background Server
+### 4. Start Background Server
 ```bash
 npm run dev
 ```
@@ -169,18 +177,21 @@ npm run dev
 ## 🏛️ Engineering Design Principles
 
 1. **Forensic Accounting Truth Before Valuation Models**
-2. **Zero Manual Database Overrides**
-3. **No Static Ticker Branches or Hardcoded Figures**
-4. **Point-in-Time Integrity Without Future Leaks**
-5. **Modeled Reinvestment Derived Directly from Forward iROIC**
-6. **No Undefined Negative CAGRs (Clamped to Null/NA)**
-7. **Strict Separation of Cash Economics from Decision States**
-8. **Dual-Methodology Downside Anchors**
-9. **Idempotent 7-Day Anti-Spam Notification Watchdog**
-10. **Deterministic Zero-Contradiction Decision Engine**
+2. **5-Dimension Fundamental Reality Architecture (Credibility, Guidance, Growth, Economic Quality, Thesis Status)**
+3. **Multidimensional Action Context for Existing Position Holders**
+4. **Conditional Multi-Underwriting DCF Price Matrices**
+5. **Zero Manual Database Overrides**
+6. **No Static Ticker Branches or Hardcoded Figures**
+7. **Point-in-Time Integrity Without Future Leaks**
+8. **Modeled Reinvestment Derived Directly from Forward iROIC**
+9. **No Undefined Negative CAGRs (Clamped to Null/NA)**
+10. **Strict Separation of Cash Economics from Decision States**
+11. **Dual-Methodology Downside Anchors**
+12. **Idempotent 7-Day Anti-Spam Notification Watchdog**
+13. **Deterministic Zero-Contradiction Decision Engine**
 
 ---
 
-**Status:** Production (v3.1.1 Audit Patch Frozen)  
+**Status:** Production (v3.2.0 Fundamental Trajectory & Management Evidence Engine)  
 **Coverage Universe:** 18 High-Conviction Holdings  
 **License:** Private / Proprietary Research Engine

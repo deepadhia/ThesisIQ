@@ -1,5 +1,39 @@
 # Changelog
 
+## [v3.2.0] - 2026-09-20 (Fundamental Trajectory & Management Evidence Engine)
+
+### Added
+- **The Three Truths Architecture**:
+  - *Observed Reality*: Audited historical & TTM performance (YoY growth, EBITDA margin, verified order backlog, CFO/PAT, DSO, iROIC). Strictly cannot alter DCF.
+  - *Forward Scenario*: Theoretical operational capacity potential across specialized sub-engines (`modeledNopatCagr`).
+  - *Evidence Confidence & Evidence-Adjusted Potential*: Explicit discount factor $\alpha \in [0.50, 1.00]$ computing `evidenceAdjustedPotentialCagr` ($= \text{modeledNopatCagr} \times \alpha$). Represents evidence-backed operational potential, NOT an economic forecast.
+  - *Underwriting*: Immutable v3.1.1 baseline assumptions. Can ONLY be modified via explicit human analyst approval.
+- **Underwriting Status Taxonomy (`UNDERWRITING_STATUS`)**:
+  - First-class states: `VALID`, `SUPPORTED_BY_EVIDENCE`, `UNDER_REVIEW`, `STALE`, `TOO_AGGRESSIVE`, `TOO_CONSERVATIVE`, `BROKEN`.
+  - Disentangles business quality from underwriting validity (e.g. HBL's business is strengthening, while its 28% underwritten CAGR is `TOO_AGGRESSIVE` relative to pure backlog execution pacing).
+- **Structured Position & Capital Directives (Non-Prescriptive)**:
+  - `existingPositionStatus`: `HOLD_CORE_AND_MONITOR`, `HOLD_CORE_AWAITING_CASH_CONVERSION`, `HOLD_CORE_COMPOUNDING`, `TRIM_VALUATION_EXTREME`, `REDUCE_ON_DETERIORATION`, `EXIT_THESIS_BROKEN`.
+  - `newCapitalStatus`: `WAIT_FOR_VALUATION_HURDLE`, `WAIT_FOR_CASH_CONVERSION`, `REVIEW_UNDERWRITING_BEFORE_ADDING`, `SELECTIVE_TRANCHE_DEPLOYMENT`, `DEPLOYMENT_SUPPORTED_BY_VALUATION`, `BLOCKED_EXTREME_VALUATION`, `BLOCKED_THESIS_BROKEN`.
+  - Replaces prescriptive portfolio weight commands with decoupled institutional directives.
+- **Invariant 6 - No Scenario-to-Action Leakage**:
+  - Enforces that theoretical forward model scenarios alone NEVER produce `REVISION_SUPPORTED_ACCELERATION`, `REVISION_SUPPORTED_DECELERATION`, or capital deployments.
+  - Revision signals strictly require multi-period audited evidence ($\ge 2$ quarters) and economic confirmation.
+- **Independent Valuation Hurdle Price Math**:
+  - Renamed from pullback target to `VALUATION_HURDLE_PRICE` / `MODEL_ACCUMULATION_THRESHOLD`.
+  - Formula: $P_{\text{hurdle}} = FV \times (1 - \text{MoS}_{\text{required}})$; mathematically verified in both directions.
+- **Management Promise Ledger & Dynamic Credibility Reconciliation**:
+  - Permanent underlying data structure tracking historical concall/SEBI claims across `Company`, `Quarter`, `Management Claim`, `Claim Type`, `Source`, `Date`, `Evidence Tier`, `Target Metric`, `Deadline`, `Actual Reported Delivery`, `Variance`, `Delivery Status`, and `Credibility Impact`.
+  - Dynamic reconciliation engine `evaluateManagementPromiseLedger` answering: *"What did management say 4 quarters ago, and how much of it actually happened?"*
+  - Objective credibility derivation (`AHEAD`, `ON_TRACK`, `MIXED`, `BEHIND`, `BROKEN`) replacing subjective management-quality scores with an auditable evidence trail.
+- **5-Dimension Fundamental Reality Architecture**: First-class tracking of (1) Management Credibility, (2) Guidance Status, (3) Growth Trajectory, (4) Economic Quality, and (5) Thesis Status across 19 cohort stocks.
+- **5-Stage Fundamental Decomposition Engine**: `GROWTH_ENGINE` $\to$ `REVENUE_ENGINE` $\to$ `MARGIN_ENGINE` $\to$ `CAPITAL_ENGINE` $\to$ `CASH_CONVERSION_ENGINE`.
+- **Stage-by-Stage Bottleneck Diagnostics**: Explicit operational state checks across Demand, Capacity, Utilization, Margins, Working Capital, and ROIC (✅ / ❓ / ❌).
+- **New Service & Invariant Test Suite**:
+  - `backend/services/fundamental-trajectory-engine.service.js`
+  - `backend/scripts/run-fundamental-trajectory-engine.js`
+  - `backend/scripts/test-fundamental-trajectory-engine.js` (**270 / 270 invariant tests passed**).
+- **Comprehensive Dossier**: Generated `reports/thesis_board/FUNDAMENTAL_TRAJECTORY_DOSSIER_V3_2.md` with Section 4 dedicated to the auditable Management Promise Ledger.
+
 ## [v3.1.1] - 2026-09-20 (FCFF Metric-Integrity & 4-Tier Conversion Patch)
 
 ### Added
