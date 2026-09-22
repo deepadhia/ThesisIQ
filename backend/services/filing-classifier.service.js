@@ -21,12 +21,13 @@ export function classifyFilingCategory(title = "", text = "") {
     combined.includes("amalgamation") ||
     combined.includes("spin-off") ||
     combined.includes("spinoff") ||
-    combined.includes("slump sale")
+    combined.includes("slump sale") ||
+    combined.includes("merger")
   ) {
     return "RESTRUCTURING";
   }
 
-  // 2. CAPITAL_RAISE (QIP, Preferential Issue, Rights Issue, Warrants)
+  // 2. CAPITAL_RAISE (QIP, Preferential Issue, Rights Issue, Warrants, FPO)
   if (
     combined.includes("qip") ||
     combined.includes("qualified institutions placement") ||
@@ -34,7 +35,9 @@ export function classifyFilingCategory(title = "", text = "") {
     combined.includes("preferential issue") ||
     combined.includes("rights issue") ||
     combined.includes("issuance of warrants") ||
-    combined.includes("warrant allotment")
+    combined.includes("warrant allotment") ||
+    combined.includes("fund raising") ||
+    combined.includes("raising of funds")
   ) {
     return "CAPITAL_RAISE";
   }
@@ -43,6 +46,7 @@ export function classifyFilingCategory(title = "", text = "") {
   if (
     combined.includes("bonus issue") ||
     combined.includes("issue of bonus") ||
+    combined.includes("bonus shares") ||
     combined.includes("stock split") ||
     combined.includes("sub-division") ||
     combined.includes("buyback") ||
@@ -52,16 +56,44 @@ export function classifyFilingCategory(title = "", text = "") {
     return "CAPITAL_RETURN";
   }
 
-  // 4. ORDER_WIN (Bagging of orders, LOA, Capacity Addition, Contract Win)
+  // 4. CAPEX_COMMISSIONING (Plant commissioning, Capacity Expansion, Brownfield/Greenfield additions)
+  if (
+    combined.includes("brownfield") ||
+    combined.includes("greenfield") ||
+    combined.includes("capacity expansion") ||
+    combined.includes("expansion of capacity") ||
+    combined.includes("capacity addition") ||
+    combined.includes("commercial production") ||
+    combined.includes("commissioning of plant") ||
+    combined.includes("commissioning of") ||
+    combined.includes("commissioned") ||
+    combined.includes("manufacturing facility") ||
+    combined.includes("commercial operation") ||
+    combined.includes("plant expansion") ||
+    combined.includes("commencement of") ||
+    combined.includes("production facility")
+  ) {
+    return "CAPEX_COMMISSIONING";
+  }
+
+  // 4b. ORDER_WIN (Bagging of orders, LOA, Contract Win, Tender award)
   if (
     combined.includes("bagging of order") ||
     combined.includes("order win") ||
     combined.includes("letter of award") ||
     combined.includes("loa received") ||
     combined.includes("contract win") ||
-    combined.includes("capacity addition") ||
-    combined.includes("commercial production") ||
-    combined.includes("commissioning of plant")
+    combined.includes("secures order") ||
+    combined.includes("secured order") ||
+    combined.includes("award of contract") ||
+    combined.includes("awarded contract") ||
+    combined.includes("receipt of order") ||
+    combined.includes("received order") ||
+    combined.includes("work order") ||
+    combined.includes("purchase order") ||
+    combined.includes("new order") ||
+    combined.includes("lowest bidder") ||
+    combined.includes("l1 bidder")
   ) {
     return "ORDER_WIN";
   }
@@ -75,7 +107,7 @@ export function classifyFilingCategory(title = "", text = "") {
     return "CREDIT_EVENT";
   }
 
-  // 6. REGULATORY_ACTION (Penalties, Litigation, SEBI/MCA orders)
+  // 6. REGULATORY_ACTION (Penalties, Litigation, SEBI/MCA orders, Approvals, PESO, FDA)
   if (
     combined.includes("penalty") ||
     combined.includes("fine imposed") ||
@@ -84,30 +116,70 @@ export function classifyFilingCategory(title = "", text = "") {
     combined.includes("enforcement directorate") ||
     combined.includes("search and seizure") ||
     combined.includes("income tax raid") ||
-    combined.includes("litigation update")
+    combined.includes("litigation update") ||
+    combined.includes("show cause notice") ||
+    combined.includes("adjudication order") ||
+    combined.includes("restraint order") ||
+    combined.includes("debarred") ||
+    combined.includes("peso approval") ||
+    combined.includes("regulatory approval") ||
+    combined.includes("environmental clearance") ||
+    combined.includes("patent granted")
   ) {
     return "REGULATORY_ACTION";
   }
 
-  // 7. ACQUISITION (Acquisition, Investment in Subsidiary, Stake Purchase)
+  // 7. GOVERNANCE_RISK (Auditor/CXO resignation, Default, NCLT/IBC, Forensic Audit, Raids, Factory Closures, Rumor Clarifications)
+  if (
+    combined.includes("resignation of statutory auditor") ||
+    combined.includes("resignation of auditor") ||
+    combined.includes("auditor resignation") ||
+    combined.includes("resignation of chief financial officer") ||
+    combined.includes("resignation of cfo") ||
+    combined.includes("resignation of managing director") ||
+    combined.includes("resignation of director") ||
+    combined.includes("cessation of") ||
+    combined.includes("default in payment") ||
+    combined.includes("default on payment") ||
+    combined.includes("insolvency") ||
+    combined.includes("nclt") ||
+    combined.includes("cirp") ||
+    combined.includes("corporate insolvency") ||
+    combined.includes("forensic audit") ||
+    combined.includes("fraud") ||
+    combined.includes("plant closure") ||
+    combined.includes("factory closure") ||
+    combined.includes("strike") ||
+    combined.includes("lockout") ||
+    combined.includes("clarification on news") ||
+    combined.includes("clarification regarding news") ||
+    combined.includes("response to news") ||
+    combined.includes("news verification")
+  ) {
+    return "GOVERNANCE_RISK";
+  }
+
+  // 8. ACQUISITION (Acquisition, Investment in Subsidiary, Stake Purchase, JV)
   if (
     combined.includes("acquisition of") ||
     combined.includes("investment in subsidiary") ||
     combined.includes("stake acquisition") ||
     combined.includes("joint venture agreement") ||
-    combined.includes("incorporation of subsidiary")
+    combined.includes("incorporation of subsidiary") ||
+    combined.includes("strategic partnership") ||
+    combined.includes("mou signed")
   ) {
     return "ACQUISITION";
   }
 
-  // 8. QUARTERLY_EARNINGS (Financial results, investor presentation)
+  // 9. QUARTERLY_EARNINGS (Financial results, investor presentation)
   if (
     combined.includes("financial results") ||
     combined.includes("un-audited financial results") ||
     combined.includes("audited financial results") ||
     combined.includes("investor presentation") ||
     combined.includes("earnings presentation") ||
-    combined.includes("outcome of board meeting") && (combined.includes("results") || combined.includes("quarter"))
+    (combined.includes("outcome of board meeting") && (combined.includes("results") || combined.includes("quarter")))
   ) {
     return "QUARTERLY_EARNINGS";
   }
@@ -131,6 +203,14 @@ Extract restructurings details (Demergers, Mergers, Spin-Offs):
 - listing_timeline: Expected listing date/quarter for demerged entity
 - thesis_impact: Qualitative impact on thesis (unlocking value, removing conglomerate discount)
 `,
+    CAPEX_COMMISSIONING: `
+Extract Plant Commissioning & Capacity Expansion details:
+- capacity_added_or_expanded: Added/expanded capacity metrics (e.g., +70%, 40,800 km/yr, MTPA, MW, Units)
+- facility_location: Facility or manufacturing plant location (e.g. Silvassa)
+- phase_details: Phase number and future phase targets (e.g. Phase 1 commissioned; Phase 2 in progress to double capacity)
+- backward_integration_impact: How in-house production impacts gross margins, supply chain, and raw material dependence
+- revenue_and_order_visibility: How expansion supports execution of current order backlog
+`,
     CAPITAL_RAISE: `
 Extract Capital Raise details (QIP, Preferential Issue, Rights Issue):
 - issue_price: Issue price per share in ₹
@@ -141,11 +221,10 @@ Extract Capital Raise details (QIP, Preferential Issue, Rights Issue):
 - price_anchor_assessment: Short-term price impact vs long-term thesis impact
 `,
     ORDER_WIN: `
-Extract Order Bagging & Capacity Addition details:
+Extract Order Bagging & Contract Win details:
 - order_value_cr: Order value in ₹ Crores
 - client_name: Client or counterparty name
 - execution_period_months: Execution timeframe in months
-- capacity_added: Added capacity metrics (e.g., MTPA, MW, Units)
 - revenue_visibility_impact: Impact on annual revenue %
 `,
     CAPITAL_RETURN: `
@@ -164,11 +243,19 @@ Extract Credit Rating changes:
 - borrowing_cost_impact: Impact on interest cost and balance sheet strength
 `,
     REGULATORY_ACTION: `
-Extract Regulatory Actions & Penalties:
-- regulatory_body: e.g., SEBI, Income Tax, GST Department, NCLT
-- fine_amount_cr: Fine/penalty amount in ₹ Cr or ₹ Lakhs
-- nature_of_violation: Core reason for action
-- material_risk: Material impact on operations/thesis
+Extract Regulatory Actions, Clearances & Penalties:
+- regulatory_body: e.g., SEBI, Income Tax, GST Department, NCLT, PESO, USFDA, RDSO
+- approval_or_action: Nature of clearance, certification, penalty, or restriction
+- fine_amount_cr: Fine/penalty amount in ₹ Cr or ₹ Lakhs (if applicable)
+- material_risk_or_catalyst: Impact on operational execution and market access
+`,
+    GOVERNANCE_RISK: `
+Extract Governance, Auditor, Executive, Default & Legal Risk details:
+- event_type: Auditor Resignation, CXO/KMP Resignation, Loan Default, Insolvency/NCLT, Search/Seizure/Raid, Forensic Audit, Plant Closure, Rumor Clarification
+- key_parties_involved: Names of resigning auditor/executives/lenders/authorities
+- stated_reasons: Exact explanation given in the filing
+- financial_exposure_cr: Default amount, claim amount, or financial loss in ₹ Cr
+- governance_risk_verdict: High Risk Red Flag vs Transitory Administrative Event
 `,
     ACQUISITION: `
 Extract Acquisition & Investment details:
@@ -226,10 +313,10 @@ export async function extractCorporateActionDetails(category, ticker, announceme
     return null;
   }
 
-  // Cap text to 8,000 chars (head + tail) for NIM API timeout safety (3-5s response)
+  // Cap text to 32,000 chars for comprehensive full-document NIM processing
   let cappedText = announcementText || "";
-  if (cappedText.length > 8000) {
-    const half = 4000;
+  if (cappedText.length > 32000) {
+    const half = 15000;
     cappedText = `${cappedText.substring(0, half)}\n\n[... TRUNCATED MIDDLE CONTENT FOR FAST NIM LATENCY ...]\n\n${cappedText.substring(cappedText.length - half)}`;
   }
 

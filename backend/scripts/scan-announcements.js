@@ -71,7 +71,7 @@ export async function scan({ isDryRun = false, runUrl = null, targetTicker = nul
   }
 
   // 1. Get portfolio & watchlist stocks dynamically from DB
-  let query = "SELECT id, ticker, COALESCE(nse_symbol, ticker) AS nse_symbol, bse_scrip_code, investment_thesis, category FROM stocks WHERE (category IN ('Core', 'Watchlist') OR category IS NULL)";
+  let query = "SELECT id, ticker, company_name, COALESCE(nse_symbol, ticker) AS nse_symbol, bse_scrip_code, investment_thesis, category FROM stocks WHERE (category IN ('Core', 'Watchlist') OR category IS NULL)";
   const params = [];
   if (targetTicker) {
     query += " AND UPPER(TRIM(ticker)) = $1";
@@ -311,9 +311,21 @@ export async function scan({ isDryRun = false, runUrl = null, targetTicker = nul
           (aiResult?.key_data && aiResult.key_data !== "No specific figures disclosed." && aiResult.key_data.length > 10)
         );
 
-        // Alert only on genuine business/thesis catalysts (Strict zero-spam gate)
+        // Alert only on genuine business/thesis catalysts & material risks (Strict zero-suppression gate for all price-sensitive events)
+        const isMajorCorporateAction = [
+          "CAPEX_COMMISSIONING",
+          "ORDER_WIN",
+          "CAPITAL_RAISE",
+          "CAPITAL_RETURN",
+          "RESTRUCTURING",
+          "REGULATORY_ACTION",
+          "GOVERNANCE_RISK",
+          "CREDIT_EVENT",
+          "ACQUISITION"
+        ].includes(filingCategory);
         const shouldHaveAlerted = !isQueuedForDeepDive && (
           aiResult.priority === "HIGH" ||
+          isMajorCorporateAction ||
           (isAgmCompleted && hasMaterialAgmHighlights) ||
           (aiResult.priority === "MEDIUM" && (aiResult.has_substantive_business_insights || hasMaterialAgmHighlights))
         );
@@ -344,10 +356,14 @@ export async function scan({ isDryRun = false, runUrl = null, targetTicker = nul
             try {
               await withRetry(() => sendAnnouncementAlert({
                 ticker,
+                companyName: stock.company_name,
                 title,
                 priority: aiResult.priority,
                 impact: aiResult.impact,
                 summary: aiResult.summary,
+                forward_catalysts: aiResult.forward_catalysts,
+                financial_metrics: aiResult.financial_metrics,
+                corporate_actions: aiResult.corporate_actions,
                 confidence: aiResult.confidence,
                 key_data: aiResult.key_data,
                 deep_dive_indicator: aiResult.deep_dive_indicator,
@@ -360,6 +376,7 @@ export async function scan({ isDryRun = false, runUrl = null, targetTicker = nul
                 concall_time: aiResult.concall_time,
                 is_rescheduled: aiResult.is_rescheduled,
                 category: stock.category,
+                filing_category: filingCategory,
                 exchangeTimestamp: timestamp,
                 docUrl,
                 source: annSource,

@@ -130,81 +130,107 @@ function formatToBullets(text) {
  */
 export async function sendAnnouncementAlert(params) {
   const {
-    ticker, title, priority, impact, summary, confidence,
+    ticker, title, priority = "MEDIUM", impact = "NEUTRAL", summary, confidence,
+    forward_catalysts, financial_metrics, corporate_actions,
     key_data, deep_dive_indicator, promises_reconciliation, thesis_strengthened, result_date,
-    is_earnings_release, concall_type, concall_date, concall_time, is_rescheduled, category, exchangeTimestamp, docUrl, source = "NSE",
-    is_agm, agm_status, agm_highlights, thesis_drift_state, root_cause, recovery_state, final_action, action_signal_authorized = false
+    is_earnings_release, concall_type, concall_date, concall_time, is_rescheduled, category, filing_category, exchangeTimestamp, docUrl, source = "NSE",
+    is_agm, agm_status, agm_highlights, companyName, thesis_drift_state, root_cause, recovery_state, final_action, action_signal_authorized = false
   } = params || {};
 
-  const impactEmoji = impact === "POSITIVE" ? "📈" : impact === "NEGATIVE" ? "📉" : "⚖️";
+  const priorityEmoji = priority === "HIGH" ? "🔴 HIGH" : priority === "MEDIUM" ? "🟡 MEDIUM" : "⚪ LOW";
   
   // Format the exchange timestamp to IST
   const timestamp = exchangeTimestamp 
     ? new Date(exchangeTimestamp).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit', hour12: true })
     : getIstTimestamp();
 
-  // ── 1. Clean Compact Header ────────────────────────────────────────────────
-  let message = `${impactEmoji} *${ticker.toUpperCase()}* | *${priority.toUpperCase()} PRIORITY*\n`;
-  message    += `_${category ? category : "Corporate Announcement"}_ • 🏛️ ${source}\n`;
-  message    += `─────────────────────────\n`;
+  // Determine Event Label
+  let eventTypeLabel = "Corporate Filing";
+  if (is_earnings_release) eventTypeLabel = "Financial Results & Performance";
+  else if (is_agm && agm_status === "completed") eventTypeLabel = "AGM Proceedings & Strategic Address";
+  else if (is_agm) eventTypeLabel = "Annual General Meeting Notice";
+  else if (filing_category === "CAPEX_COMMISSIONING") eventTypeLabel = "Capacity Expansion & Plant Commissioning";
+  else if (filing_category === "ORDER_WIN") eventTypeLabel = "Order Win & Contract Award";
+  else if (filing_category === "CAPITAL_RAISE") eventTypeLabel = "Capital Raise (QIP / Preferential Issue)";
+  else if (filing_category === "CAPITAL_RETURN") eventTypeLabel = "Capital Action (Bonus / Split / Dividend)";
+  else if (filing_category === "RESTRUCTURING") eventTypeLabel = "Corporate Restructuring & Scheme of Arrangement";
+  else if (filing_category === "REGULATORY_ACTION") eventTypeLabel = "⚖️ Regulatory Action / Clearance / Order";
+  else if (filing_category === "GOVERNANCE_RISK") eventTypeLabel = "⚠️ Governance / Auditor / Legal Risk Alert";
+  else if (filing_category === "CREDIT_EVENT") eventTypeLabel = "💳 Credit Rating Action";
+  else if (filing_category === "ACQUISITION") eventTypeLabel = "🤝 M&A / Strategic Investment / Joint Venture";
+  else if (concall_type === "transcript") eventTypeLabel = "Concall Transcript Audit";
+  else if (concall_type === "audio") eventTypeLabel = "Concall Audio Recording";
 
-  // ── 2. Event Banner ────────────────────────────────────────────────────────
-  if (is_earnings_release) {
-    message += `💰 *FINANCIAL RESULTS DECLARED*\n─────────────────────────\n`;
-  } else if (is_agm && agm_status === "completed") {
-    message += `🏛️ *AGM PROCEEDINGS COMPLETED*\n─────────────────────────\n`;
-  } else if (concall_type === "transcript") {
-    message += `📄 *CONCALL TRANSCRIPT AUDITED*\n─────────────────────────\n`;
-  } else if (concall_type === "audio") {
-    message += `🎧 *CONCALL AUDIO RECORDING*\n─────────────────────────\n`;
-  }
+  const companyHeader = companyName ? `${ticker.toUpperCase()} (${companyName})` : ticker.toUpperCase();
+  const categoryHeader = category ? category : "Watchlist";
 
-  // ── 3. Executive Summary (Crisp Bullet Points) ────────────────────────────
+  let message = `🏢 *${companyHeader}*\n`;
+  message    += `*Event:* ${eventTypeLabel} | *Priority:* ${priorityEmoji}\n`;
+  message    += `*Exchange:* ${source} • *Category:* ${categoryHeader}\n`;
+  message    += `────────────────────────────────────────────\n`;
+
+  // 1. Bottom-Line Up Front (Key Takeaway)
   if (summary) {
-    message += `📋 *EXECUTIVE SUMMARY*\n${formatToBullets(summary)}\n\n`;
+    message += `💡 *KEY TAKEAWAY*\n${formatToBullets(summary)}\n\n`;
   }
 
-  // ── 3b. AGM Highlights & Speech Takeaways ──────────────────────────────────
-  if (is_agm && agm_status === "completed" && agm_highlights) {
-    const highlightsText = Array.isArray(agm_highlights) 
-      ? agm_highlights.map(h => `• ${h}`).join("\n") 
-      : formatToBullets(agm_highlights);
-    if (highlightsText && !highlightsText.toLowerCase().includes("null")) {
-      message += `🏛️ *AGM HIGHLIGHTS & MANAGEMENT SPEECH*\n${highlightsText}\n\n`;
+  // 2. Forward Catalysts & Regulatory Moats
+  const catalysts = Array.isArray(forward_catalysts) && forward_catalysts.length > 0 
+    ? forward_catalysts 
+    : (is_agm && agm_highlights ? (Array.isArray(agm_highlights) ? agm_highlights : [agm_highlights]) : null);
+
+  if (catalysts && catalysts.length > 0) {
+    const cleanCatalysts = catalysts
+      .filter(c => c && !String(c).toLowerCase().includes("null") && String(c).trim().length > 5)
+      .map(c => c.startsWith("•") ? c : `• ${c}`)
+      .join("\n");
+    if (cleanCatalysts) {
+      message += `🚀 *FORWARD CATALYSTS & REGULATORY MOATS*\n${cleanCatalysts}\n\n`;
     }
   }
 
-  // ── 4. Key Financial & Operational Data ──────────────────────────────────
-  if (key_data && key_data !== "No specific figures disclosed." && key_data !== "No specific figures extracted.") {
-    message += `📊 *KEY METRICS & MECHANICS*\n${formatToBullets(key_data)}\n\n`;
+  // 3. Financial & Operating Highlights
+  if (Array.isArray(financial_metrics) && financial_metrics.length > 0) {
+    const cleanMetrics = financial_metrics
+      .filter(m => m && String(m).trim().length > 3)
+      .map(m => m.startsWith("•") ? m : `• ${m}`)
+      .join("\n");
+    if (cleanMetrics) {
+      message += `📊 *FINANCIAL & OPERATING HIGHLIGHTS*\n${cleanMetrics}\n\n`;
+    }
+  } else if (key_data && key_data !== "No specific figures disclosed." && key_data !== "No specific figures extracted." && !catalysts) {
+    const splitMetrics = key_data.split(";").map(s => s.trim()).filter(Boolean);
+    const formattedData = splitMetrics.map(s => `• ${s.replace(/^•\s*/, "")}`).join("\n");
+    message += `📊 *KEY METRICS & MECHANICS*\n${formattedData}\n\n`;
   }
 
-  // ── 5. Primary Thesis Impact ──────────────────────────────────────────────
+  // 4. Capital Allocation & Corporate Actions
+  if (Array.isArray(corporate_actions) && corporate_actions.length > 0) {
+    const cleanActions = corporate_actions
+      .filter(a => a && String(a).trim().length > 3)
+      .map(a => a.startsWith("•") ? a : `• ${a}`)
+      .join("\n");
+    if (cleanActions) {
+      message += `🏛️ *CAPITAL ALLOCATION & BALANCE SHEET*\n${cleanActions}\n\n`;
+    }
+  }
+
+  // 5. Primary Thesis Impact & Gate Verdict
   const thesisContent = thesis_strengthened || deep_dive_indicator;
-  if (thesisContent) {
+  if (thesisContent && !thesisContent.toLowerCase().includes("no specific")) {
     message += `🛡️ *THESIS IMPLICATION*\n${formatToBullets(thesisContent)}\n\n`;
   }
 
-  // ── 6. Event Impact & Action Signal (Institutional Gatekeeping) ─────────────
-  // IMPORTANT:
-  // Event impact and investment action are separate concepts.
-  // POSITIVE / NEGATIVE describes how the event affects the thesis.
-  // BUY / ACCUMULATE requires explicit authorization from audited
-  // earnings/concall analysis passing the applicable quantitative gates.
-  // Strategic catalysts must NEVER independently authorize capital allocation.
-
+  // 6. Action Signal / Thesis Impact
   const isAuditedAction = Boolean(action_signal_authorized) && (Boolean(is_earnings_release) || Boolean(concall_type));
 
   if (is_earnings_release && !concall_type && !isAuditedAction) {
-    // Raw financial table ingested prior to full concall / quantitative gate audit
-    message += `🎯 *EARNINGS AUDIT:* ⏳ *AWAITING CONCALL TRANSCRIPT (Raw Financials Ingested — Pending Gate Audit)*\n`;
+    message += `🎯 *EARNINGS GATE:* ⏳ *AWAITING CONCALL TRANSCRIPT (Raw Financials Ingested)*\n`;
   } else if (isAuditedAction && final_action) {
-    // Authorized action from completed quarterly deep-dive worker passing quantitative gates
     const actionUpper = final_action.toUpperCase();
     const actionEmoji = actionUpper.includes('BUY') || actionUpper.includes('ACCUMULATE') ? '🟢' : actionUpper.includes('HOLD') ? '🟡' : '🔴';
     message += `🎯 *ACTION SIGNAL:* ${actionEmoji} *${actionUpper}*\n`;
   } else if (impact === 'POSITIVE') {
-    // Strategic corporate actions (M&A, restructuring, order wins)
     message += `🎯 *THESIS IMPACT:* 🟢 *POSITIVE* — Strategic Catalyst; Await Earnings Evidence\n`;
   } else if (impact === 'NEGATIVE') {
     message += `🎯 *THESIS IMPACT:* 🔴 *NEGATIVE* — Potential Thesis Deviation; Assess Earnings Impact\n`;
@@ -212,11 +238,11 @@ export async function sendAnnouncementAlert(params) {
     message += `🎯 *THESIS IMPACT:* ⚪ *NEUTRAL* — No Material Thesis Change\n`;
   }
 
-  // ── 7. Document Link & Timestamp Footer ───────────────────────────────────
+  // 7. Footer
   if (docUrl) {
     message += `\n📄 [View Official Filing →](${docUrl})\n`;
   }
-  message += `─────────────────────────\n`;
+  message += `────────────────────────────────────────────\n`;
   message += `_Filing: "${title}" • 🕐 ${timestamp}_`;
 
   return sendTelegramMessage(message);
@@ -287,15 +313,16 @@ export async function sendRunSummary({
   else if (newAnnouncements > 0) status = "🟡 New filings found (below threshold)";
   else                           status = "🔵 Clean run — no new announcements";
 
-  let message = `📊 *Daily Processor Scan Summary* ${isDryRun ? "_(DRY RUN)_" : ""}\n`;
-  message    += `─────────────────────────\n`;
-  message    += `🏢 *Stocks scanned:* ${stocksScanned}\n`;
-  message    += `📋 *New filings found:* ${newAnnouncements}\n`;
-  message    += `📣 *Alerts sent:* ${alertsSent}\n`;
+  let message = `📊 *DAILY PROCESSOR SCAN SUMMARY* ${isDryRun ? "_(DRY RUN)_" : ""}\n`;
+  message    += `────────────────────────────────────────────\n`;
+  message    += `🏢 *Stocks Scanned:* ${stocksScanned}\n`;
+  message    += `📋 *New Filings Found:* ${newAnnouncements}\n`;
+  message    += `📣 *Alerts Dispatched:* ${alertsSent}\n`;
+  message    += `⏱️ *Duration:* ${durationSec}s | *Status:* ${status}\n`;
 
   // ── Stock-Wise Promises & Guidance Audit Section ──────────────────────────
   if (Object.keys(stockMap).length > 0) {
-    message += `\n📌 *STOCK-WISE GUIDANCE & PROMISE AUDIT*\n`;
+    message += `\n📌 *GUIDANCE & PROMISE RECONCILIATIONS*\n`;
     for (const [ticker, data] of Object.entries(stockMap)) {
       message += `\n🏢 *${ticker}*\n`;
       for (const f of data.fulfilled) {
@@ -307,18 +334,15 @@ export async function sendRunSummary({
     }
   }
 
-  message += `\n─────────────────────────\n`;
   if (bseErrors > 0 || nseErrors > 0) {
-    message += `⚠️ *Fetch errors:* BSE ${bseErrors} | NSE ${nseErrors}\n`;
+    message += `\n⚠️ *Fetch Errors:* BSE ${bseErrors} | NSE ${nseErrors}\n`;
   }
-
-  message += `⏱️ *Duration:* ${durationSec}s\n`;
-  message += `${status}\n`;
 
   if (runUrl) {
-    message += `\n[View Workflow Run →](${runUrl})\n`;
+    message += `\n📄 [View Workflow Run →](${runUrl})\n`;
   }
 
+  message += `────────────────────────────────────────────\n`;
   message += `_🕐 ${timestamp}_`;
 
   return sendTelegramMessage(message);
@@ -337,14 +361,14 @@ export async function sendConcallDiscrepancyAlert({
   docUrl
 }) {
   const timestamp = getIstTimestamp();
-  let message = `⚠️ *CONCALL AUDIT: DISCREPANCY DETECTED*\n`;
-  message += `🏢 *${(companyName || ticker).toUpperCase()}* (${ticker.toUpperCase()})\n`;
-  message += `⚖️ *Forensic Audit Severity:* ${discrepancyScore}/10\n`;
-  message += `─────────────────────────\n`;
-  message += `🔍 *Audit Summary:*\n${summaryVerdict}\n\n`;
+  const companyHeader = companyName ? `${ticker.toUpperCase()} (${companyName})` : ticker.toUpperCase();
+  let message = `⚠️ *${companyHeader}*\n`;
+  message += `*Event:* Forensic Concall Audit | *Severity:* ${discrepancyScore}/10 🚨\n`;
+  message += `────────────────────────────────────────────\n`;
+  message += `🔍 *AUDIT SUMMARY*\n${formatToBullets(summaryVerdict)}\n\n`;
 
   if (discrepancies && discrepancies.length > 0) {
-    message += `📋 *Identified Variances:*\n`;
+    message += `📋 *IDENTIFIED VARIANCES*\n`;
     for (const d of discrepancies.slice(0, 4)) {
       message += `• *${d.category || "VARIANCE"}:*\n`;
       if (d.audio_claim) message += `  🎙️ _Live Audio:_ "${d.audio_claim.slice(0, 140)}"\n`;
@@ -354,11 +378,11 @@ export async function sendConcallDiscrepancyAlert({
     }
   }
 
-  message += `─────────────────────────\n`;
   if (docUrl) {
-    message += `📄 [View Official Transcript Filing](${docUrl})\n`;
+    message += `📄 [View Official Transcript Filing →](${docUrl})\n`;
   }
-  message += `_🕐 ${timestamp}_`;
+  message += `────────────────────────────────────────────\n`;
+  message += `_Institutional Forensic Concall Audit • 🕐 ${timestamp}_`;
 
   return sendTelegramMessage(message);
 }
