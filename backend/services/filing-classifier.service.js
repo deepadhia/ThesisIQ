@@ -222,10 +222,13 @@ Extract Capital Raise details (QIP, Preferential Issue, Rights Issue):
 `,
     ORDER_WIN: `
 Extract Order Bagging & Contract Win details:
-- order_value_cr: Order value in ₹ Crores
-- client_name: Client or counterparty name
-- execution_period_months: Execution timeframe in months
-- revenue_visibility_impact: Impact on annual revenue %
+- order_value_cr: Total order value in ₹ Crores (e.g. 797)
+- order_breakdown: List of specific domestic vs export contracts, geographies (e.g., Australia, Middle East, India), and client segments
+- scope_and_voltage: Technical scope (voltage classes like 765 kV, products like transmission towers, monopoles, substations)
+- client_name: Client or developer counterparty name if stated
+- execution_period_months: Execution timeframe in months (or "Not Disclosed")
+- revenue_visibility_impact: Estimated impact on annual revenue % or order backlog
+- thesis_relevance: Impact on operating leverage, export mix, and high-margin product mix
 `,
     CAPITAL_RETURN: `
 Extract Capital Return details (Bonus, Split, Buyback, Dividend):

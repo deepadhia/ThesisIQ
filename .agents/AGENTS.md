@@ -26,3 +26,9 @@
   - File deletions or destructive migrations
   - Git commits and pushes
 
+## 6. Zero Prompt Template Leakage & Strict Document Grounding Rule
+- **NEVER** include concrete company names (e.g. `TPL Plastech`), specific synthetic numbers (e.g. `₹800 Cr`, `201.12/sh`, `6,114 Cr`, `+70% 40,800 km/yr`), or literal filler text inside LLM JSON schema templates or system prompts.
+- All LLM prompt schemas **MUST** use abstract type descriptors (e.g., `"Metric Name: Explicit figure with unit and YoY/QoQ comparison from this document..."`).
+- System prompts **MUST** explicitly enforce that if an event type (e.g., QIP, M&A, Financial Results) is absent from the filing, the LLM must return empty arrays `[]` or `null`.
+- All LLM extractions (financial metrics, corporate actions, catalysts) **MUST** be deterministically verified by a post-processing grounding guard (`sanitizeLlmOutput` in `institutional-guard.service.js`) against the raw filing text. Any number or claim ungrounded in the source document **MUST** be dropped before alerting or saving.
+

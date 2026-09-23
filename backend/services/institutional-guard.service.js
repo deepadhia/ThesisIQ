@@ -304,5 +304,73 @@ export function applyInstitutionalGuard(llmOutput = {}, financialData = null, ti
     }
   }
 
+  // 3. Strict Zero-Hallucination & Document Grounding Sanitizer
+  return sanitizeLlmOutput(guarded, title, ticker);
+}
+
+/**
+ * Strips prompt-leak artifacts, ungrounded numbers, and duplicate entries.
+ */
+function sanitizeLlmOutput(guarded, title = "", ticker = "") {
+  if (!guarded || typeof guarded !== "object") return guarded;
+
+  const rawDocText = (guarded._raw_text || guarded.announcement_text || "").toLowerCase();
+  const PROMPT_LEAK_PHRASES = [
+    "tpl plastech", "silvassa", "201.12", "6,114", "6114", "40,800", "40800",
+    "raised ₹800 cr", "won trial order for", "expanded capacity by +70%",
+    "peso clearance: specific", "metric name:", "action type:", "category or milestone:"
+  ];
+
+  const sanitizeArray = (arr, isFinancial = false) => {
+    if (!Array.isArray(arr)) return [];
+    return arr.filter(item => {
+      if (!item || typeof item !== "string") return false;
+      const itemLower = item.toLowerCase().trim();
+      if (itemLower.length < 5) return false;
+      if (itemLower.includes("null") || itemLower.includes("undefined")) return false;
+
+      // Filter out prompt template leak phrases
+      if (PROMPT_LEAK_PHRASES.some(phrase => itemLower.includes(phrase))) {
+        return false;
+      }
+
+      // If document text is available for grounding check
+      if (rawDocText && rawDocText.length > 50) {
+        // Check for specific large numbers or currency figures in the item
+        const numbers = item.match(/\b\d{2,}(?:[.,]\d+)?\b/g) || [];
+        for (const num of numbers) {
+          const cleanNum = num.replace(/,/g, "");
+          // Allow common years like 2024, 2025, 2026, 2027
+          if (["2024", "2025", "2026", "2027", "2028"].includes(cleanNum)) continue;
+          if (!rawDocText.includes(cleanNum) && !rawDocText.includes(num)) {
+            // Number does not exist in the source document -> hallucination leak
+            return false;
+          }
+        }
+      }
+      return true;
+    });
+  };
+
+  if (guarded.forward_catalysts) {
+    guarded.forward_catalysts = sanitizeArray(guarded.forward_catalysts);
+  }
+  if (guarded.financial_metrics) {
+    guarded.financial_metrics = sanitizeArray(guarded.financial_metrics, true);
+  }
+  if (guarded.corporate_actions) {
+    guarded.corporate_actions = sanitizeArray(guarded.corporate_actions);
+  }
+
+  // Cross-section deduplication (e.g. don't repeat dividend in both key_data and corporate_actions)
+  if (guarded.key_data && guarded.corporate_actions && guarded.corporate_actions.length > 0) {
+    const keyDataLower = String(guarded.key_data).toLowerCase();
+    guarded.corporate_actions = guarded.corporate_actions.filter(ca => {
+      const caLower = String(ca).toLowerCase();
+      // If key_data already contains the exact dividend or metric, keep corporate_actions clean
+      return !keyDataLower.includes(caLower) && !caLower.includes(keyDataLower);
+    });
+  }
+
   return guarded;
 }

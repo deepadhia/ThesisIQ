@@ -382,7 +382,8 @@ export async function scan({ isDryRun = false, runUrl = null, targetTicker = nul
                 source: annSource,
                 is_agm: isAgm,
                 agm_status: isAgmCompleted ? "completed" : (aiResult.agm_status || "scheduled"),
-                agm_highlights: aiResult.agm_highlights
+                agm_highlights: aiResult.agm_highlights,
+                eventAnalysis
               }), "Telegram Alert");
               sentToTelegram = true;
               alertsSent++;

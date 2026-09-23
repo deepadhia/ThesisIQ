@@ -59,12 +59,12 @@ export async function classifyAnnouncementWithNim(ticker, announcementText, titl
 
     ── Priority Standards ──
     HIGH:
-      • Manufacturing Plant Commissionings, Capacity Expansions, and Commercial Production Milestones (e.g. Silvassa conductor +70% expansion, new plant commissioning).
+      • Manufacturing Plant Commissionings, Capacity Expansions, and Commercial Production Milestones.
       • Large Order Wins (>10% annual revenue), Major Tenders, Contract Awards.
       • Regulatory Approvals, Patents, Licenses, PESO/FDA Clearances, Strategic Moats, Defence Trial Orders.
       • Quarterly / Annual Financial Results and Earnings Releases.
-      • M&A, Restructuring, Demergers, Spin-offs, Mergers (e.g. TPL Plastech merger).
-      • Completed AGMs / Annual Reports with substantive Chairman/MD addresses, multi-year forward guidance, or special resolutions (QIP > ₹100 Cr, Preferential Issues).
+      • M&A, Restructuring, Demergers, Spin-offs, Mergers.
+      • Completed AGMs / Annual Reports with substantive Chairman/MD addresses, multi-year forward guidance, or special resolutions (QIP, Preferential Issues).
       • Material CXO/Auditor exits, Credit Rating Downgrades, Regulatory/IT/ED Actions.
     MEDIUM:
       • Moderate order wins, Dividends, Credit Rating Upgrades/Affirmations on debt, standard capacity maintenance, Scheduled concalls.
@@ -73,10 +73,10 @@ export async function classifyAnnouncementWithNim(ticker, announcementText, titl
 
     ── Structured Extraction & Formatting Rules ──
     1. EXECUTIVE TAKEAWAY (1-2 sentences): Explain the core event, headline numbers (₹Cr, %, MW, km/yr), and its immediate strategic significance.
-    2. FORWARD CATALYSTS & STRATEGIC MOATS: List specific forward-looking operational drivers (regulatory approvals, PESO/FDA clearances, defence trials, commercial off-take agreements, capacity commissioning dates, guidance targets).
-    3. FINANCIAL & OPERATING HIGHLIGHTS: List individual metric strings (e.g. ["Revenue: ₹6,114 Cr (+12.0% YoY)", "EBITDA: ₹901 Cr (14.7% margin, +14.0% YoY)", "PAT: ₹469 Cr (+21.0% YoY)", "Volume Growth: +13.5% YoY"]). If filing is non-financial, return an empty array [].
-    4. CAPITAL ALLOCATION & BALANCE SHEET: List specific actions (QIP amount & issue price, Debt reduction, Merger terms, Capex outlay, Bonus/Split ratio, Dividend per share). If none, return an empty array [].
-    5. STRICT ANTI-DUPLICATION RULE: Each section must contain UNIQUE, non-overlapping information. NEVER repeat the executive summary in forward catalysts or financial metrics.
+    2. FORWARD CATALYSTS & STRATEGIC MOATS: List specific forward-looking operational drivers (regulatory approvals, defence trials, commercial off-take agreements, capacity commissioning dates, guidance targets) ONLY if explicitly disclosed in this text. If none, return [].
+    3. FINANCIAL & OPERATING HIGHLIGHTS: List individual metric strings (e.g. Order value, Revenue, EBITDA margin, PAT) ONLY if explicitly disclosed in this text. If filing is non-financial, return an empty array [].
+    4. CAPITAL ALLOCATION & BALANCE SHEET: List specific actions (QIP details, Debt reduction, Merger terms, Capex outlay, Bonus/Split ratio, Dividend per share) ONLY if explicitly stated in this text. If none, return an empty array [].
+    5. STRICT ZERO-HALLUCINATION & ANTI-DUPLICATION RULE: Extract ONLY facts present in this document. NEVER invent figures, company names, or copy example templates. If an event type is not present, return an empty array [].
     6. DYNAMIC UNIT NORMALIZATION: Convert all Lakhs / Millions into standardized INR CRORES (₹ Cr) with explicit labels.
 
     Return ONLY a valid JSON object matching this schema:
@@ -86,21 +86,15 @@ export async function classifyAnnouncementWithNim(ticker, announcementText, titl
       "confidence": "HIGH" | "LOW",
       "summary": "1-2 sentence high-impact executive takeaway answering 'What happened and why does it matter?'.",
       "forward_catalysts": [
-        "PESO Clearance: Specific regulatory milestone...",
-        "Defence Trial: Won trial order for...",
-        "Capacity Expansion: Expanded capacity by +70% from 24,000 to 40,800 km/yr..."
+        "Category or Milestone: Specific verified operational driver from this document..."
       ],
       "financial_metrics": [
-        "Revenue: ₹6,114 Cr (+12.0% YoY)",
-        "EBITDA: ₹901 Cr (14.7% Margin, +14.0% YoY)",
-        "PAT: ₹469 Cr (+21.0% YoY)"
+        "Metric Name: Explicit figure with unit and YoY/QoQ comparison from this document..."
       ],
       "corporate_actions": [
-        "QIP: Raised ₹800 Cr at ₹201.12/sh for debt reduction & capex",
-        "Merger: In-principle approval to merge TPL Plastech",
-        "Shareholder Return: 1:1 Bonus Issue & ₹1.50/sh Dividend"
+        "Action Type: Explicit transaction size and terms from this document..."
       ],
-      "key_data": "Formatted single summary line of key figures if applicable.",
+      "key_data": "Formatted single summary line of key figures if applicable, else null.",
       "deep_dive_indicator": "1 sharp line detailing the exact thesis risk or catalyst.",
       "thesis_strengthened": "1 sharp line on how this event impacts the core investment thesis.",
       "is_earnings_release": true | false,
@@ -185,6 +179,7 @@ export async function classifyAnnouncementWithNim(ticker, announcementText, titl
 
         // Apply Deterministic Financial Extractor & Post-Processing Guard Layer
         const finData = extractDeterministicFinancials(announcementText);
+        parsed._raw_text = announcementText;
         return applyInstitutionalGuard(parsed, finData, title, ticker);
       } catch (err) {
         console.error(`Failed to parse NIM response as JSON (attempt ${attempt}/${MAX_RETRIES}):`, content);

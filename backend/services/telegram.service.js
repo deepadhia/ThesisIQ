@@ -125,6 +125,14 @@ function formatToBullets(text) {
   return `• ${cleaned}`;
 }
 
+function cleanCompanyName(name) {
+  if (!name) return "";
+  return name
+    .replace(/\s+share\s+price\s*$/i, "")
+    .replace(/\s+ltd\b\.?/i, " Ltd")
+    .trim();
+}
+
 /**
  * Sends a high-impact, institutional-grade announcement alert to Telegram.
  */
@@ -134,9 +142,11 @@ export async function sendAnnouncementAlert(params) {
     forward_catalysts, financial_metrics, corporate_actions,
     key_data, deep_dive_indicator, promises_reconciliation, thesis_strengthened, result_date,
     is_earnings_release, concall_type, concall_date, concall_time, is_rescheduled, category, filing_category, exchangeTimestamp, docUrl, source = "NSE",
-    is_agm, agm_status, agm_highlights, companyName, thesis_drift_state, root_cause, recovery_state, final_action, action_signal_authorized = false
+    is_agm, agm_status, agm_highlights, companyName, thesis_drift_state, root_cause, recovery_state, final_action, action_signal_authorized = false,
+    eventAnalysis = null, event_analysis = null
   } = params || {};
 
+  const analysis = eventAnalysis || event_analysis;
   const priorityEmoji = priority === "HIGH" ? "🔴 HIGH" : priority === "MEDIUM" ? "🟡 MEDIUM" : "⚪ LOW";
   
   // Format the exchange timestamp to IST
@@ -161,7 +171,8 @@ export async function sendAnnouncementAlert(params) {
   else if (concall_type === "transcript") eventTypeLabel = "Concall Transcript Audit";
   else if (concall_type === "audio") eventTypeLabel = "Concall Audio Recording";
 
-  const companyHeader = companyName ? `${ticker.toUpperCase()} (${companyName})` : ticker.toUpperCase();
+  const cleanedCompany = cleanCompanyName(companyName);
+  const companyHeader = cleanedCompany ? `${ticker.toUpperCase()} (${cleanedCompany})` : ticker.toUpperCase();
   const categoryHeader = category ? category : "Watchlist";
 
   let message = `🏢 *${companyHeader}*\n`;
@@ -174,7 +185,32 @@ export async function sendAnnouncementAlert(params) {
     message += `💡 *KEY TAKEAWAY*\n${formatToBullets(summary)}\n\n`;
   }
 
-  // 2. Forward Catalysts & Regulatory Moats
+  // 2. Specialized Order Win Breakdown (if filing is an order win)
+  if (filing_category === "ORDER_WIN" && analysis?.extracted_data) {
+    const ext = analysis.extracted_data;
+    const orderDetails = [];
+    if (ext.order_value_cr && ext.order_value_cr !== "Not Disclosed") {
+      orderDetails.push(`• *Total Order Value:* ₹${ext.order_value_cr} Cr`);
+    }
+    if (Array.isArray(ext.order_breakdown) && ext.order_breakdown.length > 0) {
+      ext.order_breakdown.forEach(b => orderDetails.push(`• ${b.replace(/^•\s*/, "")}`));
+    }
+    if (ext.scope_and_voltage && ext.scope_and_voltage !== "Not Disclosed") {
+      orderDetails.push(`• *Technical Scope:* ${ext.scope_and_voltage}`);
+    }
+    if (ext.client_name && ext.client_name !== "Not Disclosed") {
+      orderDetails.push(`• *Client / Counterparty:* ${ext.client_name}`);
+    }
+    if (ext.execution_period_months && ext.execution_period_months !== "Not Disclosed") {
+      orderDetails.push(`• *Execution Timeline:* ${ext.execution_period_months} months`);
+    }
+
+    if (orderDetails.length > 0) {
+      message += `📊 *ORDER WIN DETAILS & BREAKDOWN*\n${orderDetails.join("\n")}\n\n`;
+    }
+  }
+
+  // 3. Forward Catalysts & Regulatory Moats
   const catalysts = Array.isArray(forward_catalysts) && forward_catalysts.length > 0 
     ? forward_catalysts 
     : (is_agm && agm_highlights ? (Array.isArray(agm_highlights) ? agm_highlights : [agm_highlights]) : null);
@@ -189,8 +225,9 @@ export async function sendAnnouncementAlert(params) {
     }
   }
 
-  // 3. Financial & Operating Highlights
-  if (Array.isArray(financial_metrics) && financial_metrics.length > 0) {
+  // 4. Financial & Operating Highlights (Only if not already presented under Order Win breakdown)
+  const hasOrderWinSection = filing_category === "ORDER_WIN" && analysis?.extracted_data?.order_value_cr;
+  if (!hasOrderWinSection && Array.isArray(financial_metrics) && financial_metrics.length > 0) {
     const cleanMetrics = financial_metrics
       .filter(m => m && String(m).trim().length > 3)
       .map(m => m.startsWith("•") ? m : `• ${m}`)
@@ -198,13 +235,13 @@ export async function sendAnnouncementAlert(params) {
     if (cleanMetrics) {
       message += `📊 *FINANCIAL & OPERATING HIGHLIGHTS*\n${cleanMetrics}\n\n`;
     }
-  } else if (key_data && key_data !== "No specific figures disclosed." && key_data !== "No specific figures extracted." && !catalysts) {
+  } else if (!hasOrderWinSection && key_data && key_data !== "No specific figures disclosed." && key_data !== "No specific figures extracted." && !catalysts) {
     const splitMetrics = key_data.split(";").map(s => s.trim()).filter(Boolean);
     const formattedData = splitMetrics.map(s => `• ${s.replace(/^•\s*/, "")}`).join("\n");
     message += `📊 *KEY METRICS & MECHANICS*\n${formattedData}\n\n`;
   }
 
-  // 4. Capital Allocation & Corporate Actions
+  // 5. Capital Allocation & Corporate Actions
   if (Array.isArray(corporate_actions) && corporate_actions.length > 0) {
     const cleanActions = corporate_actions
       .filter(a => a && String(a).trim().length > 3)
