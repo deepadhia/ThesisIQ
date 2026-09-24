@@ -12,7 +12,34 @@ const NIM_BASE_URL = "https://integrate.api.nvidia.com/v1/chat/completions";
  * Deterministic keyword classification into one of 8 filing categories.
  */
 export function classifyFilingCategory(title = "", text = "") {
+  const titleLower = (title || "").toLowerCase();
   const combined = `${title} ${text}`.toLowerCase();
+
+  // 0. PROCEDURAL_ROUTINE_COMPLIANCE (Trading Window, Loss of Share, Board Meeting Notices, Investor Meet Intimations)
+  const PROCEDURAL_ROUTINE_TITLES = [
+    "trading window",
+    "closure of trading window",
+    "closure of trading",
+    "trading window closure",
+    "loss of share certificate",
+    "duplicate share certificate",
+    "compliance certificate",
+    "certificate under reg",
+    "certificate under regulation",
+    "board meeting intimation",
+    "prior intimation of board meeting",
+    "notice of board meeting",
+    "schedule of analyst",
+    "schedule of institutional",
+    "newspaper publication",
+    "newspaper advertisement",
+    "voting results",
+    "scrutinizer report",
+    "general update"
+  ];
+  if (PROCEDURAL_ROUTINE_TITLES.some(p => titleLower.includes(p))) {
+    return "ROUTINE_COMPLIANCE";
+  }
 
   // 1. RESTRUCTURING (Demerger, Merger, Spin-off, Slump sale)
   if (

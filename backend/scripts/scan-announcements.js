@@ -251,7 +251,11 @@ export async function scan({ isDryRun = false, runUrl = null, targetTicker = nul
           "newspaper publication", "newspaper advertisement",
           "voting results", "scrutinizer report",
           "compliance certificate", "loss of share certificate",
-          "board meeting notice", "closure of trading window",
+          "duplicate share certificate",
+          "board meeting notice", "board meeting intimation",
+          "prior intimation", "closure of trading window",
+          "trading window", "trading window closure",
+          "schedule of analyst", "schedule of institutional",
           "xbrl"
         ];
         const titleLower = title.toLowerCase();
@@ -263,18 +267,19 @@ export async function scan({ isDryRun = false, runUrl = null, targetTicker = nul
         // 6e. Specialized Filing Category Classification & Detail Extraction
         const filingCategory = classifyFilingCategory(title, announcementText);
         let eventAnalysis = null;
-        if (filingCategory !== "GENERAL") {
+        if (filingCategory !== "GENERAL" && filingCategory !== "ROUTINE_COMPLIANCE") {
           eventAnalysis = await extractCorporateActionDetails(filingCategory, ticker, announcementText, stock.investment_thesis);
         }
 
         // Determine deep_dive_status queue state for Quarterly Engine
         let deepDiveStatus = "not_required";
         const concallType = getConcallType(title, announcementText);
-        if (aiResult.is_earnings_release || filingCategory === "QUARTERLY_EARNINGS") {
+        const isExcludedFromEarnings = NEVER_EARNINGS_TITLES.some(p => titleLower.includes(p)) || filingCategory === "ROUTINE_COMPLIANCE";
+        if ((aiResult.is_earnings_release || filingCategory === "QUARTERLY_EARNINGS") && !isExcludedFromEarnings) {
           deepDiveStatus = "pending_stage1";
-        } else if (concallType === "audio") {
+        } else if (concallType === "audio" && !isExcludedFromEarnings) {
           deepDiveStatus = "pending_audio";
-        } else if (concallType === "transcript") {
+        } else if (concallType === "transcript" && !isExcludedFromEarnings) {
           // If transcript arrives, check if Stage 1 already ran for this stock
           const prevCompleted = await pool.query(
             "SELECT id FROM corporate_announcements WHERE ticker = $1 AND deep_dive_status = 'completed' LIMIT 1",

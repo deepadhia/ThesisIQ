@@ -573,7 +573,31 @@ export async function processPendingDeepDives(options = {}) {
       }
 
       // ── FAST CONTENT PRE-FILTER: Instant 1ms skip for routine cover letters ──
+      const titleLower = (item.title || "").toLowerCase();
       const textLower = (docText + " " + item.title).toLowerCase();
+
+      const isStrictProceduralTitle =
+        titleLower.includes("trading window") ||
+        titleLower.includes("closure of trading") ||
+        titleLower.includes("trading window closure") ||
+        titleLower.includes("loss of share") ||
+        titleLower.includes("duplicate share") ||
+        titleLower.includes("compliance certificate") ||
+        titleLower.includes("certificate under reg") ||
+        titleLower.includes("prior intimation") ||
+        titleLower.includes("board meeting intimation") ||
+        titleLower.includes("notice of board meeting") ||
+        titleLower.includes("schedule of analyst") ||
+        titleLower.includes("schedule of institutional") ||
+        titleLower.includes("newspaper publication") ||
+        titleLower.includes("newspaper advertisement");
+
+      if (isStrictProceduralTitle) {
+        console.log(`[WORKER FAST-SKIP] Procedural compliance notice skipped: ${item.ticker} - ${item.title}`);
+        await pool.query("UPDATE corporate_announcements SET deep_dive_status = 'not_required' WHERE id = $1", [item.id]);
+        return { success: true, skipped: true };
+      }
+
       const isRoutineNotice =
         docText.length < 450 ||
         textLower.includes("trading window") ||
