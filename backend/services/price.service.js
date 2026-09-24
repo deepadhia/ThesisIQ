@@ -19,28 +19,45 @@ export async function fetchYahooQuote(symbol) {
     const price = Number(meta?.regularMarketPrice);
     if (!Number.isFinite(price) || price <= 0) return null;
 
-    let changePercent = null;
-    const closes = result?.indicators?.quote?.[0]?.close;
-    const timestamps = result?.timestamp;
-    if (closes && timestamps && closes.length >= 2) {
-      const validCloses = [];
-      for (let i = closes.length - 1; i >= 0 && validCloses.length < 2; i--) {
-        const c = Number(closes[i]);
-        if (Number.isFinite(c) && c > 0) validCloses.push(c);
-      }
-      if (validCloses.length === 2) {
-        changePercent = ((price - validCloses[1]) / validCloses[1]) * 100;
-      }
-    }
-    if (changePercent === null) {
-      const prev = Number(meta?.previousClose ?? meta?.chartPreviousClose);
-      if (Number.isFinite(prev) && prev > 0) changePercent = ((price - prev) / prev) * 100;
-    }
-
     const formatDate = (epochSeconds) => {
       if (!epochSeconds) return new Date().toISOString().slice(0, 10);
       return new Date(epochSeconds * 1000).toISOString().slice(0, 10);
     };
+
+    const marketDateStr = formatDate(Number(meta?.regularMarketTime));
+
+    let changePercent = null;
+    const closes = result?.indicators?.quote?.[0]?.close;
+    const timestamps = result?.timestamp;
+    if (closes && timestamps && closes.length >= 1) {
+      const validBars = [];
+      for (let i = 0; i < timestamps.length; i++) {
+        const c = Number(closes[i]);
+        if (Number.isFinite(c) && c > 0) {
+          validBars.push({
+            date: formatDate(Number(timestamps[i])),
+            close: c
+          });
+        }
+      }
+      
+      let prevClose = null;
+      if (validBars.length > 0) {
+        const lastBar = validBars[validBars.length - 1];
+        if (lastBar.date < marketDateStr) {
+          prevClose = lastBar.close;
+        } else if (validBars.length >= 2) {
+          prevClose = validBars[validBars.length - 2].close;
+        }
+      }
+
+      if (prevClose === null && meta?.previousClose) prevClose = Number(meta.previousClose);
+      if (prevClose === null && meta?.chartPreviousClose) prevClose = Number(meta.chartPreviousClose);
+
+      if (prevClose && prevClose > 0) {
+        changePercent = ((price - prevClose) / prevClose) * 100;
+      }
+    }
 
     return {
       symbol,
