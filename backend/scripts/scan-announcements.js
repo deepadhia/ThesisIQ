@@ -328,7 +328,17 @@ export async function scan({ isDryRun = false, runUrl = null, targetTicker = nul
           "CREDIT_EVENT",
           "ACQUISITION"
         ].includes(filingCategory);
-        const shouldHaveAlerted = !isQueuedForDeepDive && (
+
+        const isUnparsedZipFallback = (
+          (docUrl && docUrl.endsWith(".zip")) || 
+          announcementText.includes("[NO TEXT EXTRACTED") || 
+          announcementText.includes("[NO FILING TEXT AVAILABLE")
+        ) && (
+          aiResult.summary?.toLowerCase().includes("no further details") || 
+          aiResult.confidence === "LOW"
+        );
+
+        const shouldHaveAlerted = !isQueuedForDeepDive && !isUnparsedZipFallback && (
           aiResult.priority === "HIGH" ||
           isMajorCorporateAction ||
           (isAgmCompleted && hasMaterialAgmHighlights) ||

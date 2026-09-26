@@ -117,8 +117,20 @@ function formatToBullets(text) {
   if (cleaned.startsWith("•") || cleaned.startsWith("-") || cleaned.startsWith("*")) {
     return cleaned;
   }
-  // Convert multi-sentence paragraphs into crisp bullet points
-  const sentences = cleaned.split(/(?<=[.!?])\s+(?=[A-Z0-9])/).map(s => s.trim()).filter(Boolean);
+  // Protect abbreviations, titles, and decimal numbers before splitting
+  const protectedText = cleaned
+    .replace(/\b(Sr|Jr|Mr|Mrs|Ms|Dr|Prof|Ltd|Inc|Corp|Co|Pvt|Rs|vs|approx|viz|No|Dept|EVP|SVP|VP|CTO|CFO|CEO|MD|AGM|EGM)\./gi, "$1__DOT__")
+    .replace(/(\d+)\.(\d+)/g, "$1__DECIMAL__$2");
+
+  const sentences = protectedText
+    .split(/(?<=[.!?])\s+(?=[A-Z0-9])/)
+    .map(s => s
+      .replace(/__DOT__/g, ".")
+      .replace(/__DECIMAL__/g, ".")
+      .trim()
+    )
+    .filter(Boolean);
+
   if (sentences.length > 1) {
     return sentences.map(s => `• ${s}`).join("\n");
   }
@@ -134,7 +146,7 @@ function cleanCompanyName(name) {
 }
 
 /**
- * Sends a high-impact, institutional-grade announcement alert to Telegram.
+ * Sends a high-impact, professional institutional flash note alert to Telegram.
  */
 export async function sendAnnouncementAlert(params) {
   const {
@@ -147,7 +159,7 @@ export async function sendAnnouncementAlert(params) {
   } = params || {};
 
   const analysis = eventAnalysis || event_analysis;
-  const priorityEmoji = priority === "HIGH" ? "🔴 HIGH" : priority === "MEDIUM" ? "🟡 MEDIUM" : "⚪ LOW";
+  const priorityBadge = priority === "HIGH" ? "🔴 High Priority" : priority === "MEDIUM" ? "🟡 Medium Priority" : "⚪ Low Priority";
   
   // Format the exchange timestamp to IST
   const timestamp = exchangeTimestamp 
@@ -156,131 +168,128 @@ export async function sendAnnouncementAlert(params) {
 
   // Determine Event Label
   let eventTypeLabel = "Corporate Filing";
-  if (is_earnings_release) eventTypeLabel = "Financial Results & Performance";
+  if (is_earnings_release) eventTypeLabel = "Financial Results";
   else if (is_agm && agm_status === "completed") eventTypeLabel = "AGM Proceedings & Strategic Address";
   else if (is_agm) eventTypeLabel = "Annual General Meeting Notice";
-  else if (filing_category === "CAPEX_COMMISSIONING") eventTypeLabel = "Capacity Expansion & Plant Commissioning";
+  else if (filing_category === "CAPEX_COMMISSIONING") eventTypeLabel = "Capacity Expansion & Commissioning";
   else if (filing_category === "ORDER_WIN") eventTypeLabel = "Order Win & Contract Award";
-  else if (filing_category === "CAPITAL_RAISE") eventTypeLabel = "Capital Raise (QIP / Preferential Issue)";
+  else if (filing_category === "CAPITAL_RAISE") eventTypeLabel = "Capital Raise (QIP / Preferential)";
   else if (filing_category === "CAPITAL_RETURN") eventTypeLabel = "Capital Action (Bonus / Split / Dividend)";
-  else if (filing_category === "RESTRUCTURING") eventTypeLabel = "Corporate Restructuring & Scheme of Arrangement";
-  else if (filing_category === "REGULATORY_ACTION") eventTypeLabel = "⚖️ Regulatory Action / Clearance / Order";
-  else if (filing_category === "GOVERNANCE_RISK") eventTypeLabel = "⚠️ Governance / Auditor / Legal Risk Alert";
-  else if (filing_category === "CREDIT_EVENT") eventTypeLabel = "💳 Credit Rating Action";
-  else if (filing_category === "ACQUISITION") eventTypeLabel = "🤝 M&A / Strategic Investment / Joint Venture";
+  else if (filing_category === "RESTRUCTURING") eventTypeLabel = "Corporate Restructuring / Demerger";
+  else if (filing_category === "REGULATORY_ACTION") eventTypeLabel = "Regulatory Action / Clearance";
+  else if (filing_category === "GOVERNANCE_RISK") eventTypeLabel = "Management / KMP Change";
+  else if (filing_category === "CREDIT_EVENT") eventTypeLabel = "Credit Rating Action";
+  else if (filing_category === "ACQUISITION") eventTypeLabel = "M&A / Strategic Investment";
   else if (concall_type === "transcript") eventTypeLabel = "Concall Transcript Audit";
   else if (concall_type === "audio") eventTypeLabel = "Concall Audio Recording";
 
   const cleanedCompany = cleanCompanyName(companyName);
-  const companyHeader = cleanedCompany ? `${ticker.toUpperCase()} (${cleanedCompany})` : ticker.toUpperCase();
-  const categoryHeader = category ? category : "Watchlist";
+  const companyHeader = cleanedCompany ? `*${ticker.toUpperCase()}* | ${cleanedCompany}` : `*${ticker.toUpperCase()}*`;
 
-  let message = `🏢 *${companyHeader}*\n`;
-  message    += `*Event:* ${eventTypeLabel} | *Priority:* ${priorityEmoji}\n`;
-  message    += `*Exchange:* ${source} • *Category:* ${categoryHeader}\n`;
-  message    += `────────────────────────────────────────────\n`;
+  let message = `📌 ${companyHeader}\n`;
+  message    += `*Event:* ${eventTypeLabel} • ${priorityBadge}\n`;
+  message    += `────────────────────────────────────────\n\n`;
 
-  // 1. Bottom-Line Up Front (Key Takeaway)
+  // 1. Executive Summary
   if (summary) {
-    message += `💡 *KEY TAKEAWAY*\n${formatToBullets(summary)}\n\n`;
+    message += `*Executive Summary:*\n${formatToBullets(summary)}\n\n`;
   }
 
-  // 2. Specialized Order Win Breakdown (if filing is an order win)
+  // 2. Specialized Key Details / Metrics (strictly deduplicated against summary)
+  const summaryLower = (summary || "").toLowerCase();
+  
   if (filing_category === "ORDER_WIN" && analysis?.extracted_data) {
     const ext = analysis.extracted_data;
     const orderDetails = [];
     if (ext.order_value_cr && ext.order_value_cr !== "Not Disclosed") {
-      orderDetails.push(`• *Total Order Value:* ₹${ext.order_value_cr} Cr`);
+      orderDetails.push(`• Total Order Value: ₹${ext.order_value_cr} Cr`);
     }
     if (Array.isArray(ext.order_breakdown) && ext.order_breakdown.length > 0) {
       ext.order_breakdown.forEach(b => orderDetails.push(`• ${b.replace(/^•\s*/, "")}`));
     }
     if (ext.scope_and_voltage && ext.scope_and_voltage !== "Not Disclosed") {
-      orderDetails.push(`• *Technical Scope:* ${ext.scope_and_voltage}`);
+      orderDetails.push(`• Technical Scope: ${ext.scope_and_voltage}`);
     }
     if (ext.client_name && ext.client_name !== "Not Disclosed") {
-      orderDetails.push(`• *Client / Counterparty:* ${ext.client_name}`);
+      orderDetails.push(`• Client / Counterparty: ${ext.client_name}`);
     }
     if (ext.execution_period_months && ext.execution_period_months !== "Not Disclosed") {
-      orderDetails.push(`• *Execution Timeline:* ${ext.execution_period_months} months`);
+      orderDetails.push(`• Execution Timeline: ${ext.execution_period_months} months`);
     }
-
     if (orderDetails.length > 0) {
-      message += `📊 *ORDER WIN DETAILS & BREAKDOWN*\n${orderDetails.join("\n")}\n\n`;
+      message += `*Order Breakdown & Scope:*\n${orderDetails.join("\n")}\n\n`;
+    }
+  } else {
+    // Collect distinct metrics/catalysts without duplication
+    const collectedItems = new Set();
+    const detailBullets = [];
+
+    const addUniqueBullet = (item) => {
+      if (!item) return;
+      const clean = String(item).replace(/^•\s*/, "").trim();
+      if (clean.length < 5 || clean.toLowerCase().includes("null") || clean.toLowerCase().includes("no specific")) return;
+      
+      const cleanLower = clean.toLowerCase();
+      // Extract numeric & key token fingerprint (e.g. "dividend_0.20", "slump_sale")
+      const keyTokens = cleanLower.match(/[a-z]{4,}|\d+(?:\.\d+)?/g) || [];
+      const fingerprint = keyTokens.slice(0, 3).join("_");
+
+      if (collectedItems.has(cleanLower) || (fingerprint && collectedItems.has(fingerprint))) return;
+
+      // Filter if summary already covers both the topic and figures
+      if (summaryLower.includes(cleanLower.slice(0, 25))) return;
+
+      collectedItems.add(cleanLower);
+      if (fingerprint) collectedItems.add(fingerprint);
+      detailBullets.push(`• ${clean}`);
+    };
+
+    // Forward catalysts / AGM highlights
+    const catalysts = Array.isArray(forward_catalysts) && forward_catalysts.length > 0 
+      ? forward_catalysts 
+      : (is_agm && agm_highlights ? (Array.isArray(agm_highlights) ? agm_highlights : [agm_highlights]) : []);
+    catalysts.forEach(addUniqueBullet);
+
+    // Financial metrics & Corporate actions
+    if (Array.isArray(financial_metrics)) financial_metrics.forEach(addUniqueBullet);
+    if (Array.isArray(corporate_actions)) corporate_actions.forEach(addUniqueBullet);
+
+    if (detailBullets.length > 0) {
+      message += `*Key Details & Catalysts:*\n${detailBullets.slice(0, 4).join("\n")}\n\n`;
     }
   }
 
-  // 3. Forward Catalysts & Regulatory Moats
-  const catalysts = Array.isArray(forward_catalysts) && forward_catalysts.length > 0 
-    ? forward_catalysts 
-    : (is_agm && agm_highlights ? (Array.isArray(agm_highlights) ? agm_highlights : [agm_highlights]) : null);
-
-  if (catalysts && catalysts.length > 0) {
-    const cleanCatalysts = catalysts
-      .filter(c => c && !String(c).toLowerCase().includes("null") && String(c).trim().length > 5)
-      .map(c => c.startsWith("•") ? c : `• ${c}`)
-      .join("\n");
-    if (cleanCatalysts) {
-      message += `🚀 *FORWARD CATALYSTS & REGULATORY MOATS*\n${cleanCatalysts}\n\n`;
-    }
-  }
-
-  // 4. Financial & Operating Highlights (Only if not already presented under Order Win breakdown)
-  const hasOrderWinSection = filing_category === "ORDER_WIN" && analysis?.extracted_data?.order_value_cr;
-  if (!hasOrderWinSection && Array.isArray(financial_metrics) && financial_metrics.length > 0) {
-    const cleanMetrics = financial_metrics
-      .filter(m => m && String(m).trim().length > 3)
-      .map(m => m.startsWith("•") ? m : `• ${m}`)
-      .join("\n");
-    if (cleanMetrics) {
-      message += `📊 *FINANCIAL & OPERATING HIGHLIGHTS*\n${cleanMetrics}\n\n`;
-    }
-  } else if (!hasOrderWinSection && key_data && key_data !== "No specific figures disclosed." && key_data !== "No specific figures extracted." && !catalysts) {
-    const splitMetrics = key_data.split(";").map(s => s.trim()).filter(Boolean);
-    const formattedData = splitMetrics.map(s => `• ${s.replace(/^•\s*/, "")}`).join("\n");
-    message += `📊 *KEY METRICS & MECHANICS*\n${formattedData}\n\n`;
-  }
-
-  // 5. Capital Allocation & Corporate Actions
-  if (Array.isArray(corporate_actions) && corporate_actions.length > 0) {
-    const cleanActions = corporate_actions
-      .filter(a => a && String(a).trim().length > 3)
-      .map(a => a.startsWith("•") ? a : `• ${a}`)
-      .join("\n");
-    if (cleanActions) {
-      message += `🏛️ *CAPITAL ALLOCATION & BALANCE SHEET*\n${cleanActions}\n\n`;
-    }
-  }
-
-  // 5. Primary Thesis Impact & Gate Verdict
+  // 3. Strategic & Thesis Impact
   const thesisContent = thesis_strengthened || deep_dive_indicator;
-  if (thesisContent && !thesisContent.toLowerCase().includes("no specific")) {
-    message += `🛡️ *THESIS IMPLICATION*\n${formatToBullets(thesisContent)}\n\n`;
-  }
-
-  // 6. Action Signal / Thesis Impact
   const isAuditedAction = Boolean(action_signal_authorized) && (Boolean(is_earnings_release) || Boolean(concall_type));
 
-  if (is_earnings_release && !concall_type && !isAuditedAction) {
-    message += `🎯 *EARNINGS GATE:* ⏳ *AWAITING CONCALL TRANSCRIPT (Raw Financials Ingested)*\n`;
-  } else if (isAuditedAction && final_action) {
-    const actionUpper = final_action.toUpperCase();
-    const actionEmoji = actionUpper.includes('BUY') || actionUpper.includes('ACCUMULATE') ? '🟢' : actionUpper.includes('HOLD') ? '🟡' : '🔴';
-    message += `🎯 *ACTION SIGNAL:* ${actionEmoji} *${actionUpper}*\n`;
-  } else if (impact === 'POSITIVE') {
-    message += `🎯 *THESIS IMPACT:* 🟢 *POSITIVE* — Strategic Catalyst; Await Earnings Evidence\n`;
+  let impactBadge = `⚪ *NEUTRAL:* No Material Thesis Change`;
+  if (impact === 'POSITIVE') {
+    impactBadge = `🟢 *POSITIVE:* Strategic Catalyst / Value Accretive`;
   } else if (impact === 'NEGATIVE') {
-    message += `🎯 *THESIS IMPACT:* 🔴 *NEGATIVE* — Potential Thesis Deviation; Assess Earnings Impact\n`;
-  } else {
-    message += `🎯 *THESIS IMPACT:* ⚪ *NEUTRAL* — No Material Thesis Change\n`;
+    impactBadge = `🔴 *NEGATIVE:* Potential Thesis Deviation / Headwind`;
   }
 
-  // 7. Footer
-  if (docUrl) {
-    message += `\n📄 [View Official Filing →](${docUrl})\n`;
+  if (isAuditedAction && final_action) {
+    const actionUpper = final_action.toUpperCase();
+    const actionEmoji = actionUpper.includes('BUY') || actionUpper.includes('ACCUMULATE') ? '🟢' : actionUpper.includes('HOLD') ? '🟡' : '🔴';
+    message += `*Action Verdict:* ${actionEmoji} *${actionUpper}*\n\n`;
+  } else {
+    message += `*Strategic & Thesis Impact:*\n• ${impactBadge}\n`;
+    if (thesisContent && !thesisContent.toLowerCase().includes("no specific") && !thesisContent.toLowerCase().includes("does not reinforce")) {
+      const cleanThesis = thesisContent.replace(/^•\s*/, "").trim();
+      message += `• _Context:_ ${cleanThesis}\n`;
+    }
+    message += `\n`;
   }
-  message += `────────────────────────────────────────────\n`;
-  message += `_Filing: "${title}" • 🕐 ${timestamp}_`;
+
+  // 4. Footer
+  message += `────────────────────────────────────────\n`;
+  if (docUrl) {
+    message += `📎 [View Official Filing](${docUrl}) • 🕐 ${timestamp} (${source})`;
+  } else {
+    message += `🕐 ${timestamp} (${source})`;
+  }
 
   return sendTelegramMessage(message);
 }

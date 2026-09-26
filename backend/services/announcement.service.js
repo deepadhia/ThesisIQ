@@ -577,27 +577,28 @@ export async function isEventAlertRecentlySent({ ticker, title, concall_type, is
     if (res.rows.length > 0) return true;
   }
 
-  // 4. Same-Day Event Identity Deduplication (Same ticker + same category + matching subject tokens within 6 hours)
-  if (filing_category && filing_category !== "GENERAL" && title) {
+  // 4. Same-Day Event Identity Deduplication (Same ticker + matching subject tokens within 12 hours)
+  if (title) {
     // Extract key identifying words (ignore generic stock/corporate stop words)
-    const stopWords = new Set(["outcome", "board", "meeting", "intimation", "disclosure", "update", "updates", "general", "under", "regulation", "sebi", "lodr", "ltd", "limited", "the", "and", "for", "with"]);
+    const stopWords = new Set(["outcome", "board", "meeting", "intimation", "disclosure", "update", "updates", "general", "under", "regulation", "sebi", "lodr", "ltd", "limited", "the", "and", "for", "with", "share", "shares", "company", "announcement"]);
     const tokens = title.toLowerCase().replace(/[^a-z0-9\s]/g, " ").split(/\s+/).filter(w => w.length > 3 && !stopWords.has(w));
     
     if (tokens.length > 0) {
       const { rows } = await pool.query(
-        `SELECT id, title, raw_text FROM corporate_announcements 
+        `SELECT id, title, raw_text, filing_category FROM corporate_announcements 
          WHERE ticker = $1 
            AND sent_to_telegram = true 
-           AND filing_category = $2 
-           AND processed_at > NOW() - interval '6 hours'`,
-        [ticker, filing_category]
+           AND processed_at > NOW() - interval '12 hours'`,
+        [ticker]
       );
       
       for (const prev of rows) {
         const prevText = `${prev.title || ""} ${prev.raw_text || ""}`.toLowerCase();
-        // If at least one specific identifying token (e.g. target company name, "merger", "resignation") matches
-        const hasTokenOverlap = tokens.some(t => prevText.includes(t));
-        if (hasTokenOverlap) return true;
+        // If at least 2 distinct tokens match, or 1 token matches when only 1 specific token exists
+        const matchingTokens = tokens.filter(t => prevText.includes(t));
+        if (matchingTokens.length >= 2 || (matchingTokens.length === 1 && tokens.length === 1)) {
+          return true;
+        }
       }
     }
   }
