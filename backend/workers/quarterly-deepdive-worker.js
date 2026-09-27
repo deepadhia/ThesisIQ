@@ -127,9 +127,10 @@ async function runNimPrompt(systemPrompt, userPrompt, temperature = 0.05) {
   const MAX_RETRIES = 5;
   const BASE_DELAY_MS = 3000;
   const MODELS = [
-    "nvidia/nemotron-3-super-120b-a12b",
+    "nvidia/nemotron-3-ultra-550b-a55b",
     "meta/llama-3.2-11b-vision-instruct",
-    "openai/gpt-oss-20b"
+    "openai/gpt-oss-20b",
+    "nvidia/nemotron-3-super-120b-a12b"
   ];
   let lastErr;
 

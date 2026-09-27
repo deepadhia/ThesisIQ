@@ -113,6 +113,7 @@ export async function classifyAnnouncementWithNim(ticker, announcementText, titl
 
   const ACTIVE_MODELS = [
     "meta/llama-3.2-11b-vision-instruct",
+    "nvidia/nemotron-3-ultra-550b-a55b",
     "openai/gpt-oss-20b",
     "nvidia/nemotron-3-super-120b-a12b"
   ];

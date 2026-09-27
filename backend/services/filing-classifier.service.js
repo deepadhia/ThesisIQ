@@ -454,10 +454,10 @@ export async function extractCorporateActionDetails(category, ticker, announceme
 
   const prompt = getCategoryPrompt(category, ticker, cappedText, investmentThesis);
   const ACTIVE_MODELS = [
-    "openai/gpt-oss-120b",
-    "nvidia/nemotron-3-super-120b-a12b",
+    "nvidia/nemotron-3-ultra-550b-a55b",
     "meta/llama-3.2-11b-vision-instruct",
-    "openai/gpt-oss-20b"
+    "openai/gpt-oss-20b",
+    "nvidia/nemotron-3-super-120b-a12b"
   ];
   const MAX_RETRIES = 4;
   const BASE_DELAY_MS = 2000;
