@@ -1037,6 +1037,12 @@ export async function processPendingDeepDives(options = {}) {
           const bizSec = (ch.business_performance || ch.segment_highlights || []).length > 0
             ? `\n📦 *BUSINESS EXECUTION & CONTRACT WINS:*\n${(ch.business_performance || ch.segment_highlights).map(b => `• ${b}`).join('\n')}\n`
             : "";
+          const opsSec = (ch.operational_highlights || []).length > 0
+            ? `\n🏭 *CAPEX & CAPACITY EXPANSION:*\n${ch.operational_highlights.map(o => `• ${o}`).join('\n')}\n`
+            : "";
+          const growthSec = (ch.growth_initiatives || []).length > 0
+            ? `\n🚀 *GROWTH INITIATIVES & PARTNERSHIPS:*\n${ch.growth_initiatives.map(g => `• ${g}`).join('\n')}\n`
+            : "";
           const qGuidSec = (ch.quarterly_guidance || []).length > 0
             ? `\n⏱️ *QUARTERLY GUIDANCE (NEXT QUARTER):*\n${ch.quarterly_guidance.map(g => `• ${g}`).join('\n')}\n`
             : "";
@@ -1068,7 +1074,7 @@ export async function processPendingDeepDives(options = {}) {
 ──────────────────────────────────────────
 🎯 *ACTION SIGNAL:* ${signalEmoji} (Conviction: ${verdict.conviction_score}/10 | Credibility: ${verdict.credibility_tier})
 ──────────────────────────────────────────
-${gateAuditSec}${finSec}${guidanceReconciliationSec}${bizSec}${opsSec}${guidSec}${commText}${posSec}${chalSec}${toneSec}${takeawaySec}
+${gateAuditSec}${finSec}${guidanceReconciliationSec}${bizSec}${opsSec}${growthSec}${guidSec}${commText}${posSec}${chalSec}${toneSec}${takeawaySec}
 ──────────────────────────────────────────
 _Institutional Quarterly Concall Deep-Dive_
 `.trim();
