@@ -81,13 +81,16 @@ export async function reconcileInterQuarterEvents(ticker, dryRun = true) {
 
         // Update DB in LIVE mode
         if (!dryRun) {
+          const isFulfillmentEvent = (ev.event_type === 'ORDER_WIN' || ev.event_type === 'JV_AGREEMENT');
+          const statusToSet = isFulfillmentEvent ? 'Achieved' : c.status;
           await pool.query(
             `UPDATE management_commitments 
-             SET status = 'Achieved', 
-                 evidence_summary = $1, 
-                 guidance_source_ref = $2 
-             WHERE id = $3`,
+             SET status = $1, 
+                 evidence_summary = $2, 
+                 guidance_source_ref = $3 
+             WHERE id = $4`,
             [
+              statusToSet,
               `SEBI Reg 30 Verified: ${matchReason}`,
               ev.bse_filing_url || `[SEBI_REG30:${ev.event_type}_${ev.event_date}]`,
               c.id

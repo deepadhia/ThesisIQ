@@ -2,6 +2,7 @@ import dotenv from 'dotenv';
 dotenv.config({ path: './.env.local' });
 import { pool } from '../db/pool.js';
 import { compareFiscalQuartersDesc } from '../utils/fiscal-quarter.js';
+import { classifyGuidanceScope } from '../utils/guidance-scope.js';
 
 /**
  * Parses numeric value from strings like "25%", "₹1,248 Cr", "308,000 MTPA", "15-20%".
@@ -62,9 +63,10 @@ export async function reconcileCommitments(ticker, dryRun = true) {
     const statementLower = (c.statement || '').toLowerCase();
     const titleLower = (c.commitment_title || '').toLowerCase();
     const combinedText = `${metricLower} ${statementLower} ${titleLower}`;
+    const scopeInfo = classifyGuidanceScope(c);
 
-    // 1. EBITDA CAGR / Revenue CAGR Reconciler
-    if (combinedText.includes('cagr') || combinedText.includes('growth')) {
+    // 1. EBITDA CAGR / Multi-Year Growth Reconciler (Strictly multi-year, NEVER single quarter YoY)
+    if ((scopeInfo.scope === 'MULTI_YEAR' || combinedText.includes('cagr')) && combinedText.includes('cagr')) {
       const targetNum = parseNumeric(c.target_value);
       if (combinedText.includes('ebitda') && targetNum !== null) {
         // Search snapshots for verified multi-year CAGR metrics
@@ -85,12 +87,7 @@ export async function reconcileCommitments(ticker, dryRun = true) {
           }
         }
         if (!foundBeat && targetNum > 0) {
-          // Check if latest snapshot metrics contain OPM or revenue CAGR >= targetNum
-          const opmVal = snapshots[0]?.metrics?.opm ? parseNumeric(snapshots[0].metrics.opm.value) : null;
-          if (opmVal && opmVal >= targetNum) {
-            calculatedStatus = 'Achieved';
-            confidenceReason = `Reported OPM (${opmVal}%) >= Target (${targetNum}%)`;
-          }
+          confidenceReason = `Multi-Year Target (${targetNum}% CAGR) - In-progress across multi-year trajectory`;
         }
       }
     }
@@ -167,15 +164,22 @@ export async function reconcileCommitments(ticker, dryRun = true) {
       }
     }
 
-    // 5. Numeric Revenue Target Dominance (e.g. Anant Raj DC Revenue ₹176.49 Cr >= ₹176 Cr -> Achieved)
+    // 5. Numeric Revenue Target Reconciler (Strictly Quarterly vs Annual Isolation)
     if (combinedText.includes('revenue') || combinedText.includes('run-rate')) {
       const targetNum = parseNumeric(c.target_value);
       const latestMetrics = snapshots[0]?.metrics || {};
       const actualRev = latestMetrics.revenue ? parseNumeric(latestMetrics.revenue.value) : null;
       
-      if (actualRev !== null && targetNum !== null && actualRev >= targetNum) {
-        calculatedStatus = 'Achieved';
-        confidenceReason = `Reported Revenue (${actualRev} Cr) >= Guided Target (${targetNum} Cr) [Math Dominance Match]`;
+      if (scopeInfo.scope === 'QUARTERLY') {
+        if (actualRev !== null && targetNum !== null && actualRev >= targetNum) {
+          calculatedStatus = 'Achieved';
+          confidenceReason = `Reported Quarterly Revenue (${actualRev} Cr) >= Guided Target (${targetNum} Cr) [Quarterly Beat]`;
+        }
+      } else if (scopeInfo.scope === 'ANNUAL') {
+        // Annual target must NOT be evaluated against a single quarter!
+        if (targetNum !== null && actualRev !== null) {
+          confidenceReason = `Annual Target (₹${targetNum} Cr) - Quarterly Pacing: ₹${actualRev} Cr in ${snapshots[0]?.quarter || 'Latest'}`;
+        }
       }
     }
 

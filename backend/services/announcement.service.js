@@ -508,12 +508,13 @@ export function generateAnnouncementHash(ticker, title, timestamp) {
  * Checks if an announcement has already been processed or ingested in the DB.
  */
 export async function isAnnouncementProcessed(ticker, sourceId, titleHash) {
+  const cleanSourceId = sourceId && String(sourceId).trim().length > 0 ? String(sourceId).trim() : null;
   const result = await pool.query(
     `SELECT id FROM corporate_announcements 
      WHERE ticker = $1 
-     AND (source_id = $2 OR title_hash = $3)
+     AND (($2::text IS NOT NULL AND source_id = $2) OR title_hash = $3)
      AND status != 'failed'`,
-    [ticker, sourceId, titleHash]
+    [ticker, cleanSourceId, titleHash]
   );
   return result.rows.length > 0;
 }

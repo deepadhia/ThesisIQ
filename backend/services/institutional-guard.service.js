@@ -361,6 +361,9 @@ function sanitizeLlmOutput(guarded, title = "", ticker = "") {
   if (guarded.corporate_actions) {
     guarded.corporate_actions = sanitizeArray(guarded.corporate_actions);
   }
+  if (guarded.thesis_operational_kpis) {
+    guarded.thesis_operational_kpis = sanitizeArray(guarded.thesis_operational_kpis, true);
+  }
 
   // Cross-section deduplication (e.g. don't repeat dividend in both key_data and corporate_actions)
   if (guarded.key_data && guarded.corporate_actions && guarded.corporate_actions.length > 0) {

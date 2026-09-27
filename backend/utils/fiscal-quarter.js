@@ -167,3 +167,19 @@ export function getQuarterOffset(quarterStr, offset = 0) {
 
   return `Q${targetQ}_FY${targetFy.toString().padStart(2, '0')}`;
 }
+
+/**
+ * Calculates absolute linear quarter distance: (a - b) in quarters.
+ * Positive if a is after b, negative if a is before b, 0 if same quarter.
+ * Example: getQuarterDistance('Q1_FY27', 'Q4_FY26') -> 1
+ * Example: getQuarterDistance('Q1_FY27', 'Q1_FY26') -> 4
+ */
+export function getQuarterDistance(a, b) {
+  const pa = parseFiscalQuarter(a);
+  const pb = parseFiscalQuarter(b);
+  if (!pa.fiscalYear || !pa.quarter || !pb.fiscalYear || !pb.quarter) return null;
+  const totalQa = pa.fiscalYear * 4 + (pa.quarter - 1);
+  const totalQb = pb.fiscalYear * 4 + (pb.quarter - 1);
+  return totalQa - totalQb;
+}
+

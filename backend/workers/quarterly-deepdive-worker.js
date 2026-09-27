@@ -9,6 +9,7 @@ import fs from "fs";
 import path from "path";
 import { pool } from "../db/pool.js";
 import { compareFiscalQuartersDesc } from "../utils/fiscal-quarter.js";
+import { reconcileGuidanceVsActual, classifyGuidanceScope } from "../utils/guidance-scope.js";
 import { extractTextFromPdfUrl } from "../services/announcement.service.js";
 import { sendTelegramMessage, sendAnnouncementAlert, sendConcallDiscrepancyAlert } from "../services/telegram.service.js";
 import { NVIDIA_API_KEY } from "../config/env.js";
@@ -327,6 +328,11 @@ ${chunkText}
 7. ACTION SIGNAL RECALIBRATION:
    - If PAT contracts > 15% YoY or EBITDA Margin contracts > 300 bps YoY, Action Signal MUST NOT be BUY/ADD. Evaluate as HOLD (Conviction 5/10) or TRIM (Conviction 4/10).
    - If Revenue, EBITDA (+20%+ YoY, 29% margin), and PAT (+18%+ YoY) show a clean beat alongside live structural catalysts (demerger/capex), evaluate Action Signal as ADD (Conviction 8-9/10).
+8. STRICT GUIDANCE DISAMBIGUATION: NEVER mix quarterly guidance with full-year annual guidance or multi-year visions.
+   - Set guidance_scope = "QUARTERLY" if the target applies strictly to a single upcoming quarter (e.g. "Q2 revenue ~₹500 Cr", "next quarter EBITDA margin 18%").
+   - Set guidance_scope = "ANNUAL" if the target is for the full fiscal year (e.g. "FY27 revenue ₹2,500 Cr", "full year growth 25-30%").
+   - Set guidance_scope = "MULTI_YEAR" if the target spans 3-5 years (e.g. "Vision 2030 ₹10,000 Cr", "5-year 25% CAGR").
+   - Set guidance_scope = "CAPEX_MILESTONE" for physical plant commissioning, demergers, and capacity expansions.
 ${dbPromptDirective}
 
 Return ONLY a valid JSON object:
@@ -336,12 +342,17 @@ Return ONLY a valid JSON object:
   "conviction_score": 1 to 10,
   "verdict_summary": "2-3 sentence executive summary explaining the ADD/HOLD/TRIM rating.",
   "key_drivers": ["Driver 1", "Driver 2", "Driver 3"],
+  "key_positives": ["Good thing 1: Specific growth beat or high-margin expansion in this filing", "Good thing 2: Operating leverage or contract win"],
+  "key_concerns_and_drags": ["Bad thing / drag 1: Margin compression or cost spike in this filing", "Bad thing / drag 2: Segment decline or working capital stretch"],
+  "thesis_operational_kpis": ["Specific operational metric from presentation/deck/results: e.g. Order Backlog ₹X Cr (+Y% YoY), Capacity Utilization Z%, Value-Added Mix W%, Volume MT", "Another concrete KPI from this filing"],
+  "concall_verification_points": ["Specific open question to verify in upcoming management Q&A call"],
   "commitments": [
     {
       "statement": "Commitment text",
-      "metric": "Metric name (e.g. EBITDA Margin, Plant Commissioning, Receivables Days)",
-      "target_value": "Target figure",
-      "timeline": "Target quarter/year (e.g. Q3 FY26)",
+      "metric": "Metric name (e.g. Revenue, EBITDA Margin, Plant Commissioning, Receivables Days)",
+      "target_value": "Target figure with unit",
+      "guidance_scope": "QUARTERLY" | "ANNUAL" | "MULTI_YEAR" | "CAPEX_MILESTONE",
+      "timeline": "Target quarter or year (e.g. 'Q2 FY27' for quarterly, 'FY27' for annual, 'FY28-FY30' for multi-year)",
       "status": "Pending" | "Achieved" | "Partially Achieved" | "Missed",
       "status_rule": "CRITICAL: For multi-stage regulatory processes (e.g. Demergers, NCLT approvals, QIP allotments, Plant Commissioning), initial Board approval MUST be marked status 'Pending' (In Progress). Mark 'Achieved' ONLY when final operational completion or regulatory clearance is explicitly documented in the evidence.",
       "blockers_and_risks": "If Delayed or Missed, specify the exact reason given by management in concall (e.g. 'Equipment lead time & customs clearance delay by 2 quarters')",
@@ -420,11 +431,19 @@ Return ONLY a valid JSON object:
     conviction_score: validResults[0].conviction_score || 5,
     verdict_summary: validResults[0].verdict_summary || "",
     key_drivers: [],
+    key_positives: [],
+    key_concerns_and_drags: [],
+    thesis_operational_kpis: [],
+    concall_verification_points: [],
     commitments: []
   };
 
   const seenStatements = new Set();
   const seenDrivers = new Set();
+  const seenPositives = new Set();
+  const seenDrags = new Set();
+  const seenKpis = new Set();
+  const seenPoints = new Set();
 
   for (const res of validResults) {
     if (res.key_drivers) {
@@ -432,6 +451,38 @@ Return ONLY a valid JSON object:
         if (d && !seenDrivers.has(d.toLowerCase())) {
           seenDrivers.add(d.toLowerCase());
           mergedVerdict.key_drivers.push(d);
+        }
+      }
+    }
+    if (res.key_positives) {
+      for (const p of res.key_positives) {
+        if (p && !seenPositives.has(p.toLowerCase())) {
+          seenPositives.add(p.toLowerCase());
+          mergedVerdict.key_positives.push(p);
+        }
+      }
+    }
+    if (res.key_concerns_and_drags) {
+      for (const d of res.key_concerns_and_drags) {
+        if (d && !seenDrags.has(d.toLowerCase())) {
+          seenDrags.add(d.toLowerCase());
+          mergedVerdict.key_concerns_and_drags.push(d);
+        }
+      }
+    }
+    if (res.thesis_operational_kpis) {
+      for (const k of res.thesis_operational_kpis) {
+        if (k && !seenKpis.has(k.toLowerCase())) {
+          seenKpis.add(k.toLowerCase());
+          mergedVerdict.thesis_operational_kpis.push(k);
+        }
+      }
+    }
+    if (res.concall_verification_points) {
+      for (const pt of res.concall_verification_points) {
+        if (pt && !seenPoints.has(pt.toLowerCase())) {
+          seenPoints.add(pt.toLowerCase());
+          mergedVerdict.concall_verification_points.push(pt);
         }
       }
     }
@@ -448,6 +499,43 @@ Return ONLY a valid JSON object:
 
   const finData = extractDeterministicFinancials(text);
   return applyInstitutionalGuard(mergedVerdict, finData, title, ticker);
+}
+
+/**
+ * Reconciles previous quarter guidance against currently reported revenue & growth.
+ * Uses strict horizon classification to prevent mixing quarterly guidance with annual guidance.
+ */
+export async function reconcilePriorGuidanceVsActual(ticker, currentQuarter, currentFinancials = {}) {
+  if (!ticker) return null;
+  try {
+    const { rows } = await pool.query(
+      `SELECT statement, metric, target_value, timeline, quarter 
+       FROM management_commitments 
+       WHERE ticker = $1 
+         AND (
+           LOWER(metric) LIKE '%revenue%' OR 
+           LOWER(metric) LIKE '%topline%' OR
+           LOWER(metric) LIKE '%growth%' OR 
+           LOWER(metric) LIKE '%guidance%' OR
+           LOWER(statement) LIKE '%revenue%' OR
+           LOWER(statement) LIKE '%growth%' OR
+           LOWER(statement) LIKE '%guidance%'
+         )
+       ORDER BY created_at DESC LIMIT 15`,
+      [ticker]
+    );
+
+    if (rows.length === 0) return null;
+
+    return reconcileGuidanceVsActual({
+      commitments: rows,
+      currentQuarter,
+      currentFinancials
+    });
+  } catch (err) {
+    console.warn(`[GUIDANCE RECONCILE WARN] ${ticker}:`, err.message);
+    return null;
+  }
 }
 
 /**
@@ -655,25 +743,32 @@ export async function processPendingDeepDives(options = {}) {
         item.title
       );
 
-      // 1. Retrieve Verified Ground Truth Financials for Ticker
+      // 1. Retrieve Verified Deterministic Financials (Parse from incoming filing first; fallback to Q1 benchmark truth only if historical test)
+      const extractedFin = extractDeterministicFinancials(docText, item.title);
       const groundTruth = getVerifiedGroundTruth(item.ticker);
-      const deterministicFin = groundTruth && groundTruth.revenue
-        ? {
-            isFinancialResult: true,
-            revenue: groundTruth.revenue,
-            revenueYoYGrowthPct: groundTruth.revenueYoYGrowthPct,
-            ebitda: groundTruth.ebitda,
-            ebitdaMarginPct: groundTruth.ebitdaMarginPct,
-            ebitdaMarginBpsDelta: groundTruth.ebitdaMarginBpsDelta,
-            patConsolidated: groundTruth.patConsolidated,
-            patAttributable: groundTruth.patConsolidated,
-            patYoYGrowthPct: groundTruth.patYoYGrowthPct,
-            isYoYDecline: groundTruth.patYoYGrowthPct !== null && groundTruth.patYoYGrowthPct < 0,
-            isMarginErosion: Boolean(groundTruth.isMarginErosion) || (groundTruth.ebitdaMarginBpsDelta !== null && groundTruth.ebitdaMarginBpsDelta < -100),
-            exceptionalGain: groundTruth.EXCEPTIONAL_ITEM || null,
-            normalisedPat: groundTruth.CORE_PAT || null
-          }
-        : extractDeterministicFinancials(docText, item.title);
+      
+      const filingQuarter = getIndianFiscalQuarter(item.filing_date);
+      const isHistoricalQ1Benchmark = groundTruth && groundTruth.period && (groundTruth.period === filingQuarter || !item.filing_date);
+
+      const deterministicFin = (extractedFin && extractedFin.revenue)
+        ? extractedFin
+        : (isHistoricalQ1Benchmark && groundTruth && groundTruth.revenue
+            ? {
+                isFinancialResult: true,
+                revenue: groundTruth.revenue,
+                revenueYoYGrowthPct: groundTruth.revenueYoYGrowthPct,
+                ebitda: groundTruth.ebitda,
+                ebitdaMarginPct: groundTruth.ebitdaMarginPct,
+                ebitdaMarginBpsDelta: groundTruth.ebitdaMarginBpsDelta,
+                patConsolidated: groundTruth.patConsolidated,
+                patAttributable: groundTruth.patConsolidated,
+                patYoYGrowthPct: groundTruth.patYoYGrowthPct,
+                isYoYDecline: groundTruth.patYoYGrowthPct !== null && groundTruth.patYoYGrowthPct < 0,
+                isMarginErosion: Boolean(groundTruth.isMarginErosion) || (groundTruth.ebitdaMarginBpsDelta !== null && groundTruth.ebitdaMarginBpsDelta < -100),
+                exceptionalGain: groundTruth.EXCEPTIONAL_ITEM || null,
+                normalisedPat: groundTruth.CORE_PAT || null
+              }
+            : extractedFin);
 
       // 2. Apply Post-Processing Institutional Guard Layer (Deterministic Rules & YoY Precedence)
       const verdict = applyInstitutionalGuard(rawVerdict, deterministicFin, item.title, item.ticker);
@@ -753,6 +848,50 @@ export async function processPendingDeepDives(options = {}) {
         [item.id, JSON.stringify({ institutional_verdict: verdict })]
       );
 
+      // Automatically persist evaluated quarter to quarterly_snapshots
+      const quarter = getIndianFiscalQuarter(item.filing_date);
+      if (item.stock_id && quarter && (item.is_earnings_release || verdict.financial_highlights)) {
+        const metricsObj = {
+          revenue_growth: {
+            value: verdict.financial_highlights?.revenue_yoy || "N/A",
+            evidence: verdict.financial_highlights?.revenue || "SEBI Filing"
+          },
+          pat_growth: {
+            value: verdict.financial_highlights?.pat_yoy || "N/A",
+            evidence: verdict.financial_highlights?.pat_consolidated || "SEBI Filing"
+          },
+          opm: {
+            value: verdict.financial_highlights?.ebitda_margin || "N/A",
+            evidence: verdict.financial_highlights?.ebitda_margin_delta || "SEBI Filing"
+          }
+        };
+
+        await pool.query(
+          `INSERT INTO quarterly_snapshots 
+            (stock_id, quarter, summary, thesis_status, thesis_status_reason, conviction_score, final_action, metrics, raw_ai_output)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+           ON CONFLICT (stock_id, quarter) DO UPDATE SET
+            summary = EXCLUDED.summary,
+            thesis_status = EXCLUDED.thesis_status,
+            thesis_status_reason = EXCLUDED.thesis_status_reason,
+            conviction_score = EXCLUDED.conviction_score,
+            final_action = EXCLUDED.final_action,
+            metrics = EXCLUDED.metrics,
+            raw_ai_output = EXCLUDED.raw_ai_output`,
+          [
+            item.stock_id,
+            quarter,
+            verdict.verdict_summary || verdict.summary || "Quarterly financial evaluation completed.",
+            verdict.thesis_gate_result?.statusClassification || verdict.thesis_status || "STABLE",
+            verdict.thesis_gate_result?.decisionExplanation || "Evaluated via Dual-Layer Quantitative Gate.",
+            verdict.conviction_score || 7,
+            verdict.final_action || verdict.action_signal || "HOLD",
+            JSON.stringify(metricsObj),
+            JSON.stringify(verdict)
+          ]
+        ).catch(err => console.warn(`[WORKER] Snapshot upsert warning for ${item.ticker} (${quarter}):`, err.message));
+      }
+
       // Automatically reconcile stock guidance statuses & regenerate 4 Institutional Syntheses
       await reconcileStockCommitments(item.ticker);
       await generateInstitutionalSyntheses(item.ticker).catch(err => console.warn(`[WORKER] Synthesis update warning for ${item.ticker}:`, err.message));
@@ -783,12 +922,12 @@ export async function processPendingDeepDives(options = {}) {
         const gateInfo = verdict.thesis_gate_result || {};
         const isAuthorizedBuy = (verdict.action_signal || '').includes('BUY') || (verdict.action_signal || '').includes('ADD');
         const signalEmoji = isAuthorizedBuy 
-          ? "🟢 [BUY / ACCUMULATE]" 
+          ? "🟢 *BUY / ACCUMULATE*" 
           : (verdict.action_signal === "WATCH / WAIT FOR CONFIRMATION" 
-            ? "🟡 [WATCH / WAIT FOR THESIS CONFIRMATION]" 
+            ? "🟡 *WATCH / WAIT FOR THESIS CONFIRMATION*" 
             : (verdict.action_signal === "REASSESS THESIS" 
-              ? "🔴 [REASSESS THESIS]" 
-              : "🟡 [HOLD / MONITOR]"));
+              ? "🔴 *REASSESS THESIS*" 
+              : "🟡 *HOLD / MONITOR*"));
         
         const stageInfo = getFilingStageDetails(item.deep_dive_status, item.title, docText);
         const stageName = stageInfo.stageName;
@@ -817,16 +956,28 @@ export async function processPendingDeepDives(options = {}) {
           gateAuditSec = `\n🎯 *THESIS GATE AUDIT:* ${gateBadge}\n• ${gateInfo.decisionExplanation}\n`;
         }
 
+        // Reconcile Prior Guidance vs Actual Delivered
+        const priorGuidanceComp = await reconcilePriorGuidanceVsActual(item.ticker, quarter, deterministicFin);
+        let guidanceReconciliationSec = "";
+        if (priorGuidanceComp) {
+          guidanceReconciliationSec = priorGuidanceComp.formattedSection || `\n🎯 *PREVIOUS GUIDANCE VS. ACTUAL DELIVERY:*\n• *Prior Guided Target:* ${priorGuidanceComp.guidedValue} _(from ${priorGuidanceComp.priorQuarter})_\n• *Actual Delivered:* ${priorGuidanceComp.actualValue}\n• *Delivery Verdict:* ${priorGuidanceComp.verdictBadge}\n`;
+        }
+
         // Format Commitment Reconciliation & Concall Checklist Sections
         let commText = "";
         if (verdict.commitments && Array.isArray(verdict.commitments) && verdict.commitments.length > 0) {
           const achieved = verdict.commitments.filter(c => (c.status || "").toLowerCase().includes("achieved"));
+          const delayed = verdict.commitments.filter(c => (c.status || "").toLowerCase().includes("delayed"));
           const missed = verdict.commitments.filter(c => (c.status || "").toLowerCase().includes("missed"));
           
           const commParts = [];
           if (achieved.length > 0) {
             commParts.push(`*✅ Fulfilled Commitments:*`);
             achieved.forEach(c => commParts.push(`• ${c.statement} (${c.status === "Achieved Ahead of Schedule" ? "⭐ Achieved Ahead of Schedule" : "Achieved"})`));
+          }
+          if (delayed.length > 0) {
+            commParts.push(`*⚠️ Delayed Commitments / Guidance Adjustments:*`);
+            delayed.forEach(c => commParts.push(`• ${c.statement} (Delayed: ${c.blockers_and_risks || c.timeline || 'Timeline pushed back'})`));
           }
           if (missed.length > 0) {
             commParts.push(`*🔴 Missed Commitments:*`);
@@ -886,12 +1037,19 @@ export async function processPendingDeepDives(options = {}) {
           const bizSec = (ch.business_performance || ch.segment_highlights || []).length > 0
             ? `\n📦 *BUSINESS EXECUTION & CONTRACT WINS:*\n${(ch.business_performance || ch.segment_highlights).map(b => `• ${b}`).join('\n')}\n`
             : "";
-          const opsSec = (ch.operational_highlights || []).length > 0
-            ? `\n🏭 *OPERATIONS & CAPACITY EXPANSION:*\n${ch.operational_highlights.map(o => `• ${o}`).join('\n')}\n`
+          const qGuidSec = (ch.quarterly_guidance || []).length > 0
+            ? `\n⏱️ *QUARTERLY GUIDANCE (NEXT QUARTER):*\n${ch.quarterly_guidance.map(g => `• ${g}`).join('\n')}\n`
             : "";
-          const guidSec = (ch.management_guidance || []).length > 0
+          const annGuidSec = (ch.annual_guidance || []).length > 0
+            ? `\n📅 *ANNUAL (FY) GUIDANCE:*\n${ch.annual_guidance.map(g => `• ${g}`).join('\n')}\n`
+            : "";
+          const multiYearSec = (ch.multi_year_targets || []).length > 0
+            ? `\n🎯 *MULTI-YEAR / LONG-TERM ROADMAP:*\n${ch.multi_year_targets.map(m => `• ${m}`).join('\n')}\n`
+            : "";
+          const legacyGuidSec = (!qGuidSec && !annGuidSec && !multiYearSec && (ch.management_guidance || []).length > 0)
             ? `\n📈 *FORWARD GUIDANCE & TARGETS:*\n${ch.management_guidance.map(g => `• ${g}`).join('\n')}\n`
             : "";
+          const guidSec = `${qGuidSec}${annGuidSec}${multiYearSec}${legacyGuidSec}`;
           const posSec = (ch.key_positives || []).length > 0
             ? `\n✅ *KEY POSITIVES:*\n${ch.key_positives.map(p => `• ${p}`).join('\n')}\n`
             : "";
@@ -907,11 +1065,11 @@ export async function processPendingDeepDives(options = {}) {
 
           const alertMsg = `
 🎙️ *${item.company_name.toUpperCase()} (${item.ticker}) | CONCALL AUDIT*
-─────────────────────────
+──────────────────────────────────────────
 🎯 *ACTION SIGNAL:* ${signalEmoji} (Conviction: ${verdict.conviction_score}/10 | Credibility: ${verdict.credibility_tier})
-─────────────────────────
-${gateAuditSec}${finSec}${bizSec}${opsSec}${guidSec}${commText}${posSec}${chalSec}${toneSec}${takeawaySec}
-─────────────────────────
+──────────────────────────────────────────
+${gateAuditSec}${finSec}${guidanceReconciliationSec}${bizSec}${opsSec}${guidSec}${commText}${posSec}${chalSec}${toneSec}${takeawaySec}
+──────────────────────────────────────────
 _Institutional Quarterly Concall Deep-Dive_
 `.trim();
 
@@ -919,27 +1077,44 @@ _Institutional Quarterly Concall Deep-Dive_
         } else {
           const validDrivers = (verdict.key_drivers || []).filter(d => d && d !== "Results under evaluation");
           const driversText = validDrivers.length > 0 
-            ? `\n🛡️ *Key Thesis Drivers:*\n${validDrivers.map(d => `• ${d}`).join('\n')}\n`
+            ? `\n🛡️ *Key Thesis Drivers:*\n${validDrivers.map(d => `• ${d.replace(/^•\s*/, '')}`).join('\n')}\n`
             : "";
 
-          const concallPoints = verdict.dodged_questions || verdict.concall_verification_points || verdict.concall_checklist;
+          const kpiList = (verdict.thesis_operational_kpis || []).filter(k => k && k.length > 5);
+          const kpiSec = kpiList.length > 0
+            ? `\n🎯 *THESIS OPERATIONAL KPIS & EXECUTION:*\n${kpiList.slice(0, 3).map(k => `• ${k.replace(/^•\s*/, '')}`).join('\n')}\n`
+            : "";
+
+          const posList = (verdict.key_positives || []).filter(p => p && p.length > 5);
+          const posSec = posList.length > 0
+            ? `\n✅ *WHAT WENT WELL (THE GOOD THINGS):*\n${posList.slice(0, 3).map(p => `• ${p.replace(/^•\s*/, '')}`).join('\n')}\n`
+            : "";
+
+          const dragList = (verdict.key_concerns_and_drags || []).filter(d => d && d.length > 5);
+          const dragSec = dragList.length > 0
+            ? `\n⚠️ *WATCH ITEMS & DRAGS (THE BAD THINGS):*\n${dragList.slice(0, 3).map(d => `• ${d.replace(/^•\s*/, '')}`).join('\n')}\n`
+            : "";
+
+          const concallPoints = verdict.concall_verification_points || verdict.dodged_questions || verdict.concall_checklist;
           if (concallPoints && Array.isArray(concallPoints) && concallPoints.length > 0) {
-            concallText = `\n🎙️ *Concall Checklist (What to Verify in Q&A):*\n${concallPoints.map(p => `• ${p}`).join('\n')}\n`;
+            concallText = `\n🎙️ *OPEN QUERIES FOR CONCALL & TRANSCRIPT AUDIT:*\n${concallPoints.slice(0, 3).map(p => `• ${p.replace(/^•\s*/, '')}`).join('\n')}\n`;
           }
 
+          const docLink = item.attachment_url ? `\n📄 [View Official Filing →](${item.attachment_url})` : "";
+
           const alertMsg = `
-📊 *INSTITUTIONAL QUARTERLY VERDICT*
+📊 *INSTITUTIONAL QUARTERLY FLASH (STAGE 1)*
 *Stock:* ${item.company_name} (${item.ticker})
 *Review Stage:* ${stageName}
-─────────────────────────
-🎯 *ACTION SIGNAL:* ${signalEmoji} (Conviction: ${verdict.conviction_score}/10 | Credibility: ${verdict.credibility_tier})
-─────────────────────────
-${gateAuditSec}${finText}${commText}
+──────────────────────────────────────────
+🎯 *INITIAL ACTION SIGNAL:* ${signalEmoji} (Conviction: ${verdict.conviction_score}/10 | Credibility: ${verdict.credibility_tier})
+──────────────────────────────────────────
+${gateAuditSec}${finText}${guidanceReconciliationSec}${kpiSec}${posSec}${dragSec}${commText}
 📋 *Verdict Summary:*
 ${verdict.verdict_summary}
 ${driversText}${concallText}
-─────────────────────────
-_Analysis generated by Institutional Engine_
+──────────────────────────────────────────
+${docLink ? `${docLink}\n` : ""}_Stage 1 initial snapshot. Concall transcript reconciler will verify open queries upon release._
 `.trim();
 
           await sendTelegramMessage(alertMsg);
@@ -1008,17 +1183,13 @@ export async function reconcileStockCommitments(ticker) {
     const verdict = latestAnn.event_analysis?.institutional_verdict;
     if (!verdict) return;
 
-    // 3. Process each commitment dynamically using deterministic guard & extracted highlights
+    // 3. Process each commitment dynamically using strict horizon guard & verified evidence
     for (const comm of pendingComms) {
+      const scopeInfo = classifyGuidanceScope(comm);
       const stmtLower = (comm.statement || "").toLowerCase();
       const metricLower = (comm.metric || "").toLowerCase();
 
-      // Check if financial highlights or verdict key drivers evidence fulfillment
-      const driversText = (verdict.key_drivers || []).join(" ").toLowerCase();
-      const summaryText = (verdict.verdict_summary || "").toLowerCase();
-      const fullContextText = `${driversText} ${summaryText}`;
-
-      // Exclude regulatory approvals from auto-achieved
+      // Guard Rule 2: Multi-stage regulatory approvals MUST NOT be auto-achieved
       const isRegulatoryAction = 
         stmtLower.includes("scheme of arrangement") || 
         stmtLower.includes("nclt") || 
@@ -1026,23 +1197,79 @@ export async function reconcileStockCommitments(ticker) {
         stmtLower.includes("demerger") ||
         metricLower.includes("regulatory");
 
-      if (!isRegulatoryAction) {
-        // Dynamic operational/financial target matching
-        if (
-          (stmtLower.includes("margin") && verdict.financial_highlights?.ebitda_margin) ||
-          (stmtLower.includes("revenue") && verdict.financial_highlights?.revenue) ||
-          (stmtLower.includes("capacity") && (fullContextText.includes("capacity") || fullContextText.includes("commissioned")))
-        ) {
+      if (isRegulatoryAction) {
+        // Can ONLY be marked achieved if final court order or approval is officially published
+        const isFinalApproval = (verdict.verdict_summary || "").toLowerCase().includes("final order") ||
+                                (latestAnn.title || "").toLowerCase().includes("final order") ||
+                                (verdict.verdict_summary || "").toLowerCase().includes("in-principle approval granted");
+        if (isFinalApproval) {
           await pool.query(
             `UPDATE management_commitments 
              SET status = 'Achieved',
                  credibility_impact = 'positive',
                  evidence_summary = $1
              WHERE id = $2`,
-            [`Validated dynamically by ${latestAnn.title}: ${(verdict.verdict_summary || "").substring(0, 150)}...`, comm.id]
+            [`Final regulatory clearance confirmed: ${(verdict.verdict_summary || "").substring(0, 150)}...`, comm.id]
           );
         }
+        continue;
       }
+
+      // Capex & Plant Commissioning
+      if (scopeInfo.scope === 'CAPEX_MILESTONE') {
+        const driversText = (verdict.key_drivers || []).join(" ").toLowerCase();
+        const summaryText = (verdict.verdict_summary || "").toLowerCase();
+        const titleText = (latestAnn.title || "").toLowerCase();
+        const fullContext = `${titleText} ${driversText} ${summaryText}`;
+
+        const isActuallyCommissioned = 
+          (fullContext.includes("commercial production") || fullContext.includes("commissioned") || fullContext.includes("operational")) &&
+          !fullContext.includes("expected to commission") &&
+          !fullContext.includes("likely to commission");
+
+        if (isActuallyCommissioned) {
+          await pool.query(
+            `UPDATE management_commitments 
+             SET status = 'Achieved',
+                 credibility_impact = 'positive',
+                 evidence_summary = $1
+             WHERE id = $2`,
+            [`Commissioning verified by ${latestAnn.title}: ${(verdict.verdict_summary || "").substring(0, 150)}...`, comm.id]
+          );
+        }
+        continue;
+      }
+
+      // Quarterly Guidance Reconciler
+      if (scopeInfo.scope === 'QUARTERLY') {
+        const currentQ = getIndianFiscalQuarter(latestAnn.filing_date);
+        const normCurrentQ = currentQ.replace(/_/g, ' ').toUpperCase();
+        const targetQ = scopeInfo.targetQuarter ? scopeInfo.targetQuarter.replace(/_/g, ' ').toUpperCase() : "";
+
+        // Only evaluate if this filing is for the target quarter
+        if (targetQ && (targetQ === normCurrentQ || normCurrentQ.includes(targetQ.split(' ')[0]))) {
+          const finRev = verdict.financial_highlights?.revenue ? parseFloat(String(verdict.financial_highlights.revenue).replace(/,/g, '')) : null;
+          const targetRev = scopeInfo.targetNumericValue;
+
+          if (finRev && targetRev && scopeInfo.targetUnit === 'CR') {
+            const isBeat = finRev >= targetRev;
+            const status = isBeat ? 'Achieved' : (finRev < targetRev - 5 ? 'Missed' : 'Achieved');
+            const impact = isBeat ? 'positive' : 'negative';
+            await pool.query(
+              `UPDATE management_commitments 
+               SET status = $1,
+                   credibility_impact = $2,
+                   evidence_summary = $3
+               WHERE id = $4`,
+              [status, impact, `Quarterly result for ${currentQ}: Actual Revenue ₹${finRev} Cr vs Guided ₹${targetRev} Cr (${isBeat ? 'Beat' : 'Missed'})`, comm.id]
+            );
+          }
+        }
+        continue;
+      }
+
+      // Annual & Multi-Year guidance MUST REMAIN PENDING during intermediate quarters!
+      // (Strict horizon isolation: zero false auto-achievements)
     }
   } catch (err) {
     console.warn(`[WORKER] Guidance reconciliation warning for ${ticker}:`, err.message);
@@ -1112,12 +1339,14 @@ export async function generateInstitutionalSyntheses(ticker, force = false) {
 - Quarterly Executive Summary: ${s.summary || 'N/A'}`;
     }).join('\n\n');
 
-    // Enforce Strict Temporal & Ground Truth Guard (Q1 FY27)
-    const currentGroundTruthPeriod = truth?.period || 'Q1 FY27';
+    // Enforce Strict Temporal & Ground Truth Guard (Derives current quarter dynamically from latest snapshot or truth)
+    const currentGroundTruthPeriod = (latestSnapshot && latestSnapshot.quarter) ? latestSnapshot.quarter : (truth?.period || 'Q1 FY27');
 
-    const groundTruthBlock = truth ? `
+    let groundTruthBlock = '';
+    if (truth && (!latestSnapshot || latestSnapshot.quarter === truth.period)) {
+      groundTruthBlock = `
 🔥 DEFINITIVE CURRENT REPORTING PERIOD GROUND TRUTH: ${currentGroundTruthPeriod}
-(CRITICAL TEMPORAL GUARD: All analysis MUST treat ${currentGroundTruthPeriod} as the current reporting period! Do NOT label past Q3 FY26 as current!)
+(CRITICAL TEMPORAL GUARD: All analysis MUST treat ${currentGroundTruthPeriod} as the current reporting period!)
 
 VERIFIED CANONICAL METRICS (${currentGroundTruthPeriod}):
 • TOTAL_REVENUE = ₹${truth.revenue} Cr (${truth.revenueYoYGrowthPct >= 0 ? '+' : ''}${truth.revenueYoYGrowthPct}% YoY)
@@ -1127,7 +1356,20 @@ VERIFIED CANONICAL METRICS (${currentGroundTruthPeriod}):
 • TOTAL_ORDER_BACKLOG = ${truth.orderBookTotal ? `₹${truth.orderBookTotal} Cr` : 'Not Disclosed'}
 • QUARTERLY_ORDER_INFLOW = ${truth.quarterlyOrderInflow ? `₹${truth.quarterlyOrderInflow} Cr booked in ${currentGroundTruthPeriod}` : 'Not Disclosed'}
 • EXPORT_BACKLOG = ${truth.exportOrderBook ? `₹${truth.exportOrderBook} Cr` : 'Not Disclosed'}
-` : '';
+`;
+    } else if (latestSnapshot) {
+      const m = latestSnapshot.metrics || {};
+      groundTruthBlock = `
+🔥 DEFINITIVE CURRENT REPORTING PERIOD GROUND TRUTH: ${currentGroundTruthPeriod}
+(CRITICAL TEMPORAL GUARD: All analysis MUST treat ${currentGroundTruthPeriod} as the current reporting period!)
+
+VERIFIED CANONICAL METRICS (${currentGroundTruthPeriod}):
+• REVENUE_GROWTH = ${m.revenue_growth ? m.revenue_growth.value : 'N/A'} [Evidence: ${m.revenue_growth?.evidence || 'SEBI Filing'}]
+• PAT_GROWTH = ${m.pat_growth ? m.pat_growth.value : 'N/A'} [Evidence: ${m.pat_growth?.evidence || 'SEBI Filing'}]
+• EBITDA_MARGIN = ${m.opm ? m.opm.value : 'N/A'} [Evidence: ${m.opm?.evidence || 'SEBI Filing'}]
+• LATEST_STATUS = Signal: ${latestSnapshot.thesis_status} | Momentum: ${latestSnapshot.thesis_momentum} | Action: ${latestSnapshot.final_action}
+`;
+    }
 
     const metricsPlaceholderContent = [
       `Key Thesis Definition: ${stock.key_thesis_metrics || 'Financial & Operational Performance'}`,
@@ -1334,11 +1576,13 @@ Extract the following structured sections:
 2. "business_performance": List contract wins, division details, specific customer orders (e.g. Aerospace orders, Semiconductor fab orders, LNG stations, CERN/ITER France, OEM contracts). Include exact monetary order sizes where available.
 3. "growth_initiatives": List new certifications, technology partnerships (e.g. Wayout Sweden), new product categories, prototype developments, and skill centers.
 4. "operational_highlights": List plant commissioning status (e.g. Savli, Kandla, Chakan), facility expansions, dealer network growth, and execution timelines.
-5. "management_guidance": List explicit full-year guidance for Revenue Growth %, EBITDA Margin %, Order Inflows, Capex guidance, and execution outlook.
-6. "key_positives": List 4-5 major positive execution catalysts.
-7. "key_challenges": List 3-4 operational risks (logistics, freight costs, shipment delays, commodity inflation).
-8. "management_tone": State tone in 2-3 words (e.g. "Highly Confident, Execution-Driven").
-9. "key_takeaway": Provide a 1-sentence institutional bottom line synthesis.
+5. "quarterly_guidance": List explicit guidance given specifically for next upcoming quarter (e.g. Q2 revenue ₹X Cr, Q2 EBITDA Margin Y%). If none given, return [].
+6. "annual_guidance": List explicit guidance given for full fiscal year (e.g. FY27 Revenue Growth X-Y%, FY27 EBITDA Margin Z%, Capex ₹W Cr). If none given, return [].
+7. "multi_year_targets": List long-term 3-5 year roadmap or Vision 2030 targets (e.g. Vision 2030 ₹10,000 Cr, 5-yr CAGR 25%). If none given, return [].
+8. "key_positives": List 4-5 major positive execution catalysts.
+9. "key_challenges": List 3-4 operational risks (logistics, freight costs, shipment delays, commodity inflation).
+10. "management_tone": State tone in 2-3 words (e.g. "Highly Confident, Execution-Driven").
+11. "key_takeaway": Provide a 1-sentence institutional bottom line synthesis.
 
 Return ONLY a valid JSON object:
 {
@@ -1346,7 +1590,9 @@ Return ONLY a valid JSON object:
   "business_performance": ["Aerospace orders: details & figures", "Semiconductor Dholera: details"],
   "growth_initiatives": ["Initiative 1", "Initiative 2"],
   "operational_highlights": ["Plant 1 status", "Timeline 2"],
-  "management_guidance": ["FY27 Revenue Growth: X-Y%", "EBITDA Margin: A-B%"],
+  "quarterly_guidance": ["Next Quarter (Q2): Revenue target ₹X Cr", "Next Quarter Margin: Y%"],
+  "annual_guidance": ["FY27 Full-Year Revenue Growth: X-Y%", "FY27 Full-Year EBITDA Margin: A-B%"],
+  "multi_year_targets": ["Vision 2030 / 3-5 Year Target: Details"],
   "key_positives": ["Positive 1", "Positive 2"],
   "key_challenges": ["Challenge 1", "Challenge 2"],
   "management_tone": "Highly Confident, Execution-Driven",
@@ -1362,7 +1608,15 @@ Return ONLY a valid JSON object:
     const lastBrace = cleaned.lastIndexOf("}");
     if (firstBrace !== -1 && lastBrace !== -1) {
       cleaned = cleaned.substring(firstBrace, lastBrace + 1);
-      return JSON.parse(cleaned);
+      const parsed = JSON.parse(cleaned);
+      if (!parsed.management_guidance) {
+        parsed.management_guidance = [
+          ...(parsed.quarterly_guidance || []),
+          ...(parsed.annual_guidance || []),
+          ...(parsed.multi_year_targets || [])
+        ];
+      }
+      return parsed;
     }
   } catch (err) {
     console.warn(`[CONCALL HIGHLIGHTS WARN] Failed for ${ticker}:`, err.message);

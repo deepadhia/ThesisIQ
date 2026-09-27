@@ -98,11 +98,17 @@ export function extractDeterministicFinancials(pdfText = "") {
   const revNumbers = parseRowNumbers(/(?:sales\/income\s+from\s+operations|revenue\s+from\s+operations|total\s+income|income\s+from\s+operations|^I\.\s*[\d,])/i);
   if (revNumbers && revNumbers.length >= 1) {
     result.revenue = revNumbers[0];
-    if (revNumbers.length >= 2 && revNumbers[1] > 0) {
-      result.revenueQoQGrowthPct = parseFloat((((result.revenue - revNumbers[1]) / revNumbers[1]) * 100).toFixed(2));
+    
+    // Detect if column 1 is a 6-month half-year total (H1) rather than sequential 3-month quarter
+    const isCol1HalfYear = revNumbers.length >= 4 && revNumbers[1] > 1.7 * revNumbers[0];
+    const seqRev = isCol1HalfYear ? null : revNumbers[1];
+    const yoyRev = isCol1HalfYear ? revNumbers[3] : revNumbers[2];
+
+    if (seqRev && seqRev > 0) {
+      result.revenueQoQGrowthPct = parseFloat((((result.revenue - seqRev) / seqRev) * 100).toFixed(2));
     }
-    if (revNumbers.length >= 3 && revNumbers[2] > 0) {
-      result.revenueYoYGrowthPct = parseFloat((((result.revenue - revNumbers[2]) / revNumbers[2]) * 100).toFixed(2));
+    if (yoyRev && yoyRev > 0) {
+      result.revenueYoYGrowthPct = parseFloat((((result.revenue - yoyRev) / yoyRev) * 100).toFixed(2));
     }
   }
 
@@ -141,6 +147,7 @@ export function extractDeterministicFinancials(pdfText = "") {
   const depNumbers = parseRowNumbers(/(?:depreciation|amortisation)/i);
 
   if (pbtNumbers && pbtNumbers.length >= 1) {
+    const isPbtCol1HalfYear = pbtNumbers.length >= 4 && pbtNumbers[1] > 1.7 * pbtNumbers[0];
     const currentPbt = pbtNumbers[0];
     const currentFin = (finNumbers && finNumbers.length >= 1) ? finNumbers[0] : 0;
     const currentDep = (depNumbers && depNumbers.length >= 1) ? depNumbers[0] : 0;
@@ -151,7 +158,7 @@ export function extractDeterministicFinancials(pdfText = "") {
       result.ebitdaMarginPct = parseFloat(((result.ebitda / result.revenue) * 100).toFixed(2));
     }
 
-    if (pbtNumbers.length >= 2) {
+    if (!isPbtCol1HalfYear && pbtNumbers.length >= 2) {
       const seqPbt = pbtNumbers[1];
       const seqFin = (finNumbers && finNumbers.length >= 2) ? finNumbers[1] : 0;
       const seqDep = (depNumbers && depNumbers.length >= 2) ? depNumbers[1] : 0;
@@ -161,12 +168,13 @@ export function extractDeterministicFinancials(pdfText = "") {
       }
     }
 
-    if (pbtNumbers.length >= 3 && result.revenue) {
-      const prevPbt = pbtNumbers[2];
-      const prevFin = (finNumbers && finNumbers.length >= 3) ? finNumbers[2] : 0;
-      const prevDep = (depNumbers && depNumbers.length >= 3) ? depNumbers[2] : 0;
+    const prevPbtIdx = isPbtCol1HalfYear ? 3 : 2;
+    if (pbtNumbers.length > prevPbtIdx && result.revenue) {
+      const prevPbt = pbtNumbers[prevPbtIdx];
+      const prevFin = (finNumbers && finNumbers.length > prevPbtIdx) ? finNumbers[prevPbtIdx] : 0;
+      const prevDep = (depNumbers && depNumbers.length > prevPbtIdx) ? depNumbers[prevPbtIdx] : 0;
       const prevEbitda = prevPbt + prevFin + prevDep;
-      const prevRev = (revNumbers && revNumbers.length >= 3) ? revNumbers[2] : null;
+      const prevRev = (revNumbers && revNumbers.length > prevPbtIdx) ? revNumbers[prevPbtIdx] : null;
 
       if (prevEbitda > 0) {
         result.ebitdaYoYGrowthPct = parseFloat((((result.ebitda - prevEbitda) / prevEbitda) * 100).toFixed(2));
@@ -189,15 +197,17 @@ export function extractDeterministicFinancials(pdfText = "") {
   // 4. Consolidated PAT & Exceptional Items Engine (YoY & QoQ)
   const patNumbers = parseRowNumbers(/(?:net\s+profit\s+for\s+the\s+period|profit\s+attributable\s+to\s+owners|profit\s+after\s+tax)/i);
   if (patNumbers && patNumbers.length >= 1) {
+    const isPatCol1HalfYear = patNumbers.length >= 4 && patNumbers[1] > 1.7 * patNumbers[0];
     result.patAttributable = patNumbers[0];
     result.patConsolidated = patNumbers[0];
 
-    if (patNumbers.length >= 2 && patNumbers[1] > 0) {
+    if (!isPatCol1HalfYear && patNumbers.length >= 2 && patNumbers[1] > 0) {
       result.patQoQGrowthPct = parseFloat((((result.patAttributable - patNumbers[1]) / patNumbers[1]) * 100).toFixed(2));
     }
 
-    if (patNumbers.length >= 3 && patNumbers[2] > 0) {
-      const prevYearPat = patNumbers[2];
+    const prevPatIdx = isPatCol1HalfYear ? 3 : 2;
+    if (patNumbers.length > prevPatIdx && patNumbers[prevPatIdx] > 0) {
+      const prevYearPat = patNumbers[prevPatIdx];
       const rawPatYoY = parseFloat((((result.patAttributable - prevYearPat) / prevYearPat) * 100).toFixed(2));
       // Annual column mismatch safeguard: If PAT appears to drop >75% but revenue growth is positive/flat, it's comparing a 3-month quarter against a 12-month annual column.
       if (rawPatYoY < -75.0 && (result.revenueYoYGrowthPct === null || result.revenueYoYGrowthPct > -10.0)) {

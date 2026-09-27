@@ -154,7 +154,7 @@ export async function sendAnnouncementAlert(params) {
     forward_catalysts, financial_metrics, corporate_actions,
     key_data, deep_dive_indicator, promises_reconciliation, thesis_strengthened, result_date,
     is_earnings_release, concall_type, concall_date, concall_time, is_rescheduled, category, filing_category, exchangeTimestamp, docUrl, source = "NSE",
-    is_agm, agm_status, agm_highlights, companyName, thesis_drift_state, root_cause, recovery_state, final_action, action_signal_authorized = false,
+    is_agm, is_egm, is_postal_ballot, agm_status, agm_highlights, companyName, thesis_drift_state, root_cause, recovery_state, final_action, action_signal_authorized = false,
     eventAnalysis = null, event_analysis = null
   } = params || {};
 
@@ -166,33 +166,53 @@ export async function sendAnnouncementAlert(params) {
     ? new Date(exchangeTimestamp).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit', hour12: true })
     : getIstTimestamp();
 
-  // Determine Event Label
+  // Determine Event Label with strict EGM / Postal Ballot / Milestone separation
   let eventTypeLabel = "Corporate Filing";
-  if (is_earnings_release) eventTypeLabel = "Financial Results";
+  let isMilestoneEvent = false;
+
+  const titleLower = (title || "").toLowerCase();
+  const isCommissioningFiling = 
+    filing_category === "CAPEX_COMMISSIONING" ||
+    titleLower.includes("commercial production") ||
+    titleLower.includes("commercial operation") ||
+    titleLower.includes("commissioning of plant") ||
+    titleLower.includes("plant commissioning");
+
+  if (is_earnings_release) eventTypeLabel = "Financial Results & Performance";
   else if (is_agm && agm_status === "completed") eventTypeLabel = "AGM Proceedings & Strategic Address";
-  else if (is_agm) eventTypeLabel = "Annual General Meeting Notice";
-  else if (filing_category === "CAPEX_COMMISSIONING") eventTypeLabel = "Capacity Expansion & Commissioning";
+  else if (is_agm) eventTypeLabel = "Annual General Meeting (AGM) Notice";
+  else if (is_egm) eventTypeLabel = "Extraordinary General Meeting (EGM) Notice";
+  else if (is_postal_ballot) eventTypeLabel = "Postal Ballot Notice";
+  else if (isCommissioningFiling) {
+    eventTypeLabel = "🏆 Key Thesis Milestone: Capacity Expansion & Commissioning";
+    isMilestoneEvent = true;
+  }
   else if (filing_category === "ORDER_WIN") eventTypeLabel = "Order Win & Contract Award";
   else if (filing_category === "CAPITAL_RAISE") eventTypeLabel = "Capital Raise (QIP / Preferential)";
   else if (filing_category === "CAPITAL_RETURN") eventTypeLabel = "Capital Action (Bonus / Split / Dividend)";
   else if (filing_category === "RESTRUCTURING") eventTypeLabel = "Corporate Restructuring / Demerger";
   else if (filing_category === "REGULATORY_ACTION") eventTypeLabel = "Regulatory Action / Clearance";
-  else if (filing_category === "GOVERNANCE_RISK") eventTypeLabel = "Management / KMP Change";
+  else if (filing_category === "GOVERNANCE_RISK") eventTypeLabel = "Management / Governance Update";
   else if (filing_category === "CREDIT_EVENT") eventTypeLabel = "Credit Rating Action";
-  else if (filing_category === "ACQUISITION") eventTypeLabel = "M&A / Strategic Investment";
+  else if (filing_category === "ACQUISITION") eventTypeLabel = "🤝 M&A / Strategic Acquisition";
   else if (concall_type === "transcript") eventTypeLabel = "Concall Transcript Audit";
   else if (concall_type === "audio") eventTypeLabel = "Concall Audio Recording";
 
   const cleanedCompany = cleanCompanyName(companyName);
   const companyHeader = cleanedCompany ? `*${ticker.toUpperCase()}* | ${cleanedCompany}` : `*${ticker.toUpperCase()}*`;
 
-  let message = `📌 ${companyHeader}\n`;
-  message    += `*Event:* ${eventTypeLabel} • ${priorityBadge}\n`;
-  message    += `────────────────────────────────────────\n\n`;
+  let message = `🏢 ${companyHeader}\n`;
+  message    += `📢 *Event:* ${eventTypeLabel} • ${isMilestoneEvent ? "🟢 *High Catalyst*" : priorityBadge}\n`;
+  message    += `──────────────────────────────────────────\n\n`;
 
-  // 1. Executive Summary
+  // Milestone Highlight Banner
+  if (isMilestoneEvent) {
+    message += `⭐ *MILESTONE FULFILLMENT:* 🟢 *COMMISSIONED & OPERATIONAL*\n\n`;
+  }
+
+  // 1. Key Takeaway / What Happened
   if (summary) {
-    message += `*Executive Summary:*\n${formatToBullets(summary)}\n\n`;
+    message += `💡 *Key Takeaway:*\n${formatToBullets(summary)}\n\n`;
   }
 
   // 2. Specialized Key Details / Metrics (strictly deduplicated against summary)
@@ -217,7 +237,28 @@ export async function sendAnnouncementAlert(params) {
       orderDetails.push(`• Execution Timeline: ${ext.execution_period_months} months`);
     }
     if (orderDetails.length > 0) {
-      message += `*Order Breakdown & Scope:*\n${orderDetails.join("\n")}\n\n`;
+      message += `📊 *Order Breakdown & Scope:*\n${orderDetails.join("\n")}\n\n`;
+    }
+  } else if (filing_category === "ACQUISITION" && analysis?.extracted_data) {
+    const ext = analysis.extracted_data;
+    const acqDetails = [];
+    if (ext.target_company && ext.target_company !== "Not Disclosed") {
+      acqDetails.push(`• Target Entity: ${ext.target_company}`);
+    }
+    if (ext.deal_value_cr && ext.deal_value_cr !== "Not Disclosed") {
+      acqDetails.push(`• Total Consideration: ₹${ext.deal_value_cr} Cr`);
+    }
+    if (ext.cash_consideration_cr) {
+      acqDetails.push(`• Cash Payout: ₹${ext.cash_consideration_cr} Cr`);
+    }
+    if (ext.equity_swap_cr) {
+      acqDetails.push(`• Share Swap Consideration: ₹${ext.equity_swap_cr} Cr`);
+    }
+    if (ext.strategic_rationale) {
+      acqDetails.push(`• Strategic Rationale: ${ext.strategic_rationale}`);
+    }
+    if (acqDetails.length > 0) {
+      message += `📊 *M&A Consideration & Details:*\n${acqDetails.join("\n")}\n\n`;
     }
   } else {
     // Collect distinct metrics/catalysts without duplication
@@ -255,7 +296,10 @@ export async function sendAnnouncementAlert(params) {
     if (Array.isArray(corporate_actions)) corporate_actions.forEach(addUniqueBullet);
 
     if (detailBullets.length > 0) {
-      message += `*Key Details & Catalysts:*\n${detailBullets.slice(0, 4).join("\n")}\n\n`;
+      const sectionHeader = isCommissioningFiling 
+        ? "📊 *Capacity Addition & Milestone Details:*"
+        : (filing_category === "ACQUISITION" ? "📊 *M&A Consideration & Synergies:*" : "📊 *Key Details:*");
+      message += `${sectionHeader}\n${detailBullets.slice(0, 3).join("\n")}\n\n`;
     }
   }
 
@@ -263,30 +307,32 @@ export async function sendAnnouncementAlert(params) {
   const thesisContent = thesis_strengthened || deep_dive_indicator;
   const isAuditedAction = Boolean(action_signal_authorized) && (Boolean(is_earnings_release) || Boolean(concall_type));
 
-  let impactBadge = `⚪ *NEUTRAL:* No Material Thesis Change`;
+  let impactBadge = `⚪ *NEUTRAL* — No Material Thesis Change`;
   if (impact === 'POSITIVE') {
-    impactBadge = `🟢 *POSITIVE:* Strategic Catalyst / Value Accretive`;
+    impactBadge = `🟢 *POSITIVE* — Strategic Catalyst / Value Accretive`;
   } else if (impact === 'NEGATIVE') {
-    impactBadge = `🔴 *NEGATIVE:* Potential Thesis Deviation / Headwind`;
+    impactBadge = `🔴 *NEGATIVE* — Potential Thesis Deviation / Headwind`;
   }
 
   if (isAuditedAction && final_action) {
     const actionUpper = final_action.toUpperCase();
     const actionEmoji = actionUpper.includes('BUY') || actionUpper.includes('ACCUMULATE') ? '🟢' : actionUpper.includes('HOLD') ? '🟡' : '🔴';
-    message += `*Action Verdict:* ${actionEmoji} *${actionUpper}*\n\n`;
+    message += `🎯 *Action Verdict:* ${actionEmoji} *${actionUpper}*\n\n`;
   } else {
-    message += `*Strategic & Thesis Impact:*\n• ${impactBadge}\n`;
+    message += `🎯 *Thesis Impact:*\n${impactBadge}\n`;
     if (thesisContent && !thesisContent.toLowerCase().includes("no specific") && !thesisContent.toLowerCase().includes("does not reinforce")) {
       const cleanThesis = thesisContent.replace(/^•\s*/, "").trim();
-      message += `• _Context:_ ${cleanThesis}\n`;
+      if (!summaryLower.includes(cleanThesis.slice(0, 30).toLowerCase())) {
+        message += `_${cleanThesis}_\n`;
+      }
     }
     message += `\n`;
   }
 
   // 4. Footer
-  message += `────────────────────────────────────────\n`;
+  message += `──────────────────────────────────────────\n`;
   if (docUrl) {
-    message += `📎 [View Official Filing](${docUrl}) • 🕐 ${timestamp} (${source})`;
+    message += `📄 [View Official Filing →](${docUrl}) • 🕐 ${timestamp} (${source})`;
   } else {
     message += `🕐 ${timestamp} (${source})`;
   }

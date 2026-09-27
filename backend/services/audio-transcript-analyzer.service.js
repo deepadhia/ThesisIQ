@@ -27,12 +27,16 @@ export function extractAudioUrlFromFiling(pdfText = "", attachmentUrl = "") {
   const combined = `${attachmentUrl}\n${pdfText}`;
   
   // Look for direct audio/video links
-  const directMatch = combined.match(/https?:\/\/[^\s"'<>]+\.(?:mp3|mp4|m4a|wav|aac)(?:\?[^\s"'<>]*)?/i);
-  if (directMatch) return directMatch[0];
+  const directMatch = combined.match(/https?:\/\/[^\s"'<>]+\.(?:mp3|mp4|m4a|wav|aac|ogg)(?:\?[^\s"'<>]*)?/i);
+  if (directMatch) return directMatch[0].replace(/[.,;)\]]+$/, "");
 
-  // Look for common Indian corporate audio hosting / webcast links
-  const webcastMatch = combined.match(/https?:\/\/(?:www\.)?(?:cclproducts|researchbytes|choruscall|zoom|webex|youtube|youtu\.be|drive\.google|dropbox|vimeo)[^\s"'<>]+/i);
-  if (webcastMatch) return webcastMatch[0];
+  // Look for common Indian corporate audio hosting, IR short links, or webcast links
+  const webcastMatch = combined.match(/https?:\/\/(?:www\.)?(?:[a-zA-Z0-9-]+\.)*(?:researchbytes|choruscall|orientcapital|zoom|webex|youtube|youtu\.be|drive\.google|dropbox|vimeo|tinyurl|bit\.ly)[^\s"'<>]+/i);
+  if (webcastMatch) return webcastMatch[0].replace(/[.,;)\]]+$/, "");
+
+  // Look for generic URLs containing audio/concall/recording/webcast pathways
+  const genericAudioMatch = combined.match(/https?:\/\/[^\s"'<>]+\/(?:audio|concall|recording|webcast|media)[^\s"'<>]*/i);
+  if (genericAudioMatch) return genericAudioMatch[0].replace(/[.,;)\]]+$/, "");
 
   return null;
 }
@@ -218,7 +222,8 @@ Return ONLY a valid JSON object with the following schema:
       "statement": "Verbatim or precise paraphrased management guidance or commitment",
       "metric": "Revenue | EBITDA Margin | Volume | CapEx | Debt Reduction | Timeline",
       "target_value": "Explicit numeric target (e.g. '₹10,000 Cr', '80-85% utilization', 'Zero net debt')",
-      "timeline": "Explicit target quarter or fiscal year (e.g. 'FY31', 'FY28')",
+      "guidance_scope": "QUARTERLY | ANNUAL | MULTI_YEAR | CAPEX_MILESTONE",
+      "timeline": "Explicit target quarter or fiscal year (e.g. 'Q2 FY27' for quarterly, 'FY27' for annual, 'FY31' for multi-year)",
       "status": "Pending"
     }
   ],
@@ -284,9 +289,9 @@ Return ONLY a valid JSON object:
 {
   "executive_summary": "High-level summary of the written transcript",
   "guidance_numbers": {
-    "revenue_guidance": "Explicit guidance if mentioned, else 'None'",
-    "ebitda_margin_guidance": "Explicit margin guidance if mentioned, else 'None'",
-    "volume_growth_guidance": "Explicit volume % guidance if mentioned, else 'None'",
+    "quarterly_guidance": "Explicit guidance specifically for next quarter (e.g. Q2 revenue/margin) if mentioned, else 'None'",
+    "annual_guidance": "Explicit guidance for full fiscal year (e.g. FY27 revenue/margin) if mentioned, else 'None'",
+    "multi_year_targets": "Long term / Vision 2030 targets if mentioned, else 'None'",
     "capex_guidance": "Explicit capex guidance if mentioned, else 'None'"
   },
   "commitments": [
@@ -294,6 +299,7 @@ Return ONLY a valid JSON object:
       "statement": "Management commitment",
       "metric": "Operational | Financial",
       "target_value": "Specific target",
+      "guidance_scope": "QUARTERLY | ANNUAL | MULTI_YEAR | CAPEX_MILESTONE",
       "timeline": "Target timeline",
       "status": "Pending"
     }

@@ -291,14 +291,31 @@ export async function scan({ isDryRun = false, runUrl = null, targetTicker = nul
         // 7. Alert ONLY if non-earnings routine/regulatory event (Earnings Results & Concalls/Audio are deferred to Quarterly Deep-Dive Worker for verified full-page/audio audit)
         let sentToTelegram = false;
         const isRegulatoryOrCredit = ["REGULATORY_ACTION", "CREDIT_EVENT"].includes(filingCategory);
-        const isAgm = Boolean(
+        
+        const isEgm = Boolean(
+          aiResult?.is_egm ||
+          eventAnalysis?.is_egm ||
+          title.toUpperCase().includes("EGM") ||
+          title.toUpperCase().includes("EXTRAORDINARY GENERAL MEETING") ||
+          (ann.attachment && ann.attachment.toLowerCase().includes("egm"))
+        );
+
+        const isPostalBallot = Boolean(
+          aiResult?.is_postal_ballot ||
+          eventAnalysis?.is_postal_ballot ||
+          title.toLowerCase().includes("postal ballot") ||
+          (ann.attachment && ann.attachment.toLowerCase().includes("postalballot"))
+        );
+
+        const isAgm = !isEgm && !isPostalBallot && Boolean(
           aiResult?.is_agm || 
           eventAnalysis?.is_agm || 
           title.toUpperCase().includes("AGM") || 
-          title.toLowerCase().includes("shareholders meeting") ||
           title.toUpperCase().includes("ANNUAL GENERAL MEETING") ||
+          (title.toLowerCase().includes("shareholders meeting") && !title.toUpperCase().includes("EGM")) ||
           (ann.attachment && ann.attachment.toLowerCase().includes("agm"))
         );
+
         const isAgmCompleted = isAgm && (
           aiResult?.agm_status === "completed" ||
           title.toUpperCase().includes("OUTCOME") || 
@@ -340,7 +357,7 @@ export async function scan({ isDryRun = false, runUrl = null, targetTicker = nul
 
         const shouldHaveAlerted = !isQueuedForDeepDive && !isUnparsedZipFallback && (
           aiResult.priority === "HIGH" ||
-          isMajorCorporateAction ||
+          (isMajorCorporateAction && aiResult.priority !== "LOW") ||
           (isAgmCompleted && hasMaterialAgmHighlights) ||
           (aiResult.priority === "MEDIUM" && (aiResult.has_substantive_business_insights || hasMaterialAgmHighlights))
         );
@@ -396,6 +413,8 @@ export async function scan({ isDryRun = false, runUrl = null, targetTicker = nul
                 docUrl,
                 source: annSource,
                 is_agm: isAgm,
+                is_egm: isEgm,
+                is_postal_ballot: isPostalBallot,
                 agm_status: isAgmCompleted ? "completed" : (aiResult.agm_status || "scheduled"),
                 agm_highlights: aiResult.agm_highlights,
                 eventAnalysis

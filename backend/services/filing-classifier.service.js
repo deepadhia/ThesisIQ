@@ -84,21 +84,27 @@ export function classifyFilingCategory(title = "", text = "") {
   }
 
   // 4. CAPEX_COMMISSIONING (Plant commissioning, Capacity Expansion, Brownfield/Greenfield additions)
+  const isClarificationNotice = titleLower.includes("clarification on") || titleLower.includes("clarification regarding") || titleLower.includes("fire incident");
   if (
-    combined.includes("brownfield") ||
-    combined.includes("greenfield") ||
-    combined.includes("capacity expansion") ||
-    combined.includes("expansion of capacity") ||
-    combined.includes("capacity addition") ||
-    combined.includes("commercial production") ||
-    combined.includes("commissioning of plant") ||
-    combined.includes("commissioning of") ||
-    combined.includes("commissioned") ||
-    combined.includes("manufacturing facility") ||
-    combined.includes("commercial operation") ||
-    combined.includes("plant expansion") ||
-    combined.includes("commencement of") ||
-    combined.includes("production facility")
+    !isClarificationNotice && (
+      combined.includes("brownfield") ||
+      combined.includes("greenfield") ||
+      combined.includes("capacity expansion") ||
+      combined.includes("expansion of capacity") ||
+      combined.includes("capacity addition") ||
+      combined.includes("commercial production") ||
+      combined.includes("commissioning of plant") ||
+      combined.includes("commissioning of") ||
+      combined.includes("commissioned") ||
+      combined.includes("new manufacturing facility") ||
+      combined.includes("setting up of manufacturing") ||
+      combined.includes("expansion of manufacturing") ||
+      combined.includes("commenced commercial operation") ||
+      combined.includes("commencement of commercial") ||
+      combined.includes("commercial operation date") ||
+      combined.includes("plant expansion") ||
+      combined.includes("new production facility")
+    )
   ) {
     return "CAPEX_COMMISSIONING";
   }
@@ -212,6 +218,102 @@ export function classifyFilingCategory(title = "", text = "") {
   }
 
   return "GENERAL";
+}
+
+/**
+ * Detects the multi-stage lifecycle of a filing (Stage 1 Results, Stage 1 PPT, Stage 2 Transcript, Stage 2 Audio, Corporate Action, Routine).
+ */
+export function detectFilingLifecycleStage(title = "", text = "", url = "") {
+  const tLower = (title || "").toLowerCase();
+  const txtLower = (text || "").toLowerCase();
+  const urlLower = (url || "").toLowerCase();
+  const combined = `${tLower} ${urlLower} ${txtLower.slice(0, 3000)}`;
+
+  // 0. Explicit Routine Secretarial & Procedural Compliance Filter
+  const isRoutineSecretarial =
+    tLower.includes("voting result") ||
+    tLower.includes("scrutinizer") ||
+    tLower.includes("newspaper publication") ||
+    tLower.includes("newspaper advertisement") ||
+    tLower.includes("trading window") ||
+    tLower.includes("loss of share") ||
+    tLower.includes("duplicate share") ||
+    tLower.includes("compliance certificate") ||
+    tLower.includes("certificate under reg") ||
+    tLower.includes("record date") ||
+    tLower.includes("appointment of") ||
+    tLower.includes("cessation of") ||
+    urlLower.includes("votingresult") ||
+    urlLower.includes("scrutinizer") ||
+    urlLower.includes("newspaper");
+
+  if (isRoutineSecretarial && !tLower.includes("financial result") && !combined.includes("un-audited financial")) {
+    return "ROUTINE_COMPLIANCE";
+  }
+
+  // 1. Concall Transcript (Stage 2)
+  if (
+    urlLower.includes("transcript") ||
+    tLower.includes("transcript") ||
+    combined.includes("transcript of the earnings") ||
+    combined.includes("transcript of conference call") ||
+    combined.includes("transcript of earnings call") ||
+    combined.includes("earnings call transcript") ||
+    combined.includes("concall transcript")
+  ) {
+    return "STAGE_2_TRANSCRIPT";
+  }
+
+  // 2. Concall Audio Recording (Stage 2)
+  if (
+    urlLower.includes("audio") ||
+    urlLower.includes("recording") ||
+    tLower.includes("audio recording") ||
+    tLower.includes("recording of earnings") ||
+    combined.includes("audio recording of the") ||
+    combined.includes("link for audio recording") ||
+    combined.includes("recording of the earnings call") ||
+    combined.includes("recording of the concall")
+  ) {
+    return "STAGE_2_AUDIO";
+  }
+
+  // 3. Investor Presentation (Stage 1 PPT)
+  if (
+    urlLower.includes("presentation") ||
+    urlLower.includes("investorppt") ||
+    urlLower.includes("earningpresentation") ||
+    tLower.includes("investor presentation") ||
+    tLower.includes("earnings presentation") ||
+    tLower.includes("investor deck") ||
+    tLower.includes("presentation on the unaudited") ||
+    tLower.includes("presentation on the financial")
+  ) {
+    return "STAGE_1_PPT";
+  }
+
+  // 4. Financial Results Release (Stage 1 Results)
+  const isFinancialResultDoc =
+    tLower.includes("financial result") ||
+    tLower.includes("un-audited financial") ||
+    tLower.includes("unaudited financial") ||
+    tLower.includes("audited financial") ||
+    tLower.includes("financial results for the quarter") ||
+    (tLower.includes("outcome of board meeting") && (combined.includes("financial result") || combined.includes("un-audited") || combined.includes("unaudited") || combined.includes("standalone and consolidated results"))) ||
+    (urlLower.includes("financial_result") || urlLower.includes("resultrelease") || urlLower.includes("financialresults"));
+
+  if (isFinancialResultDoc && !isRoutineSecretarial) {
+    return "STAGE_1_RESULTS";
+  }
+
+  // 5. Major Corporate Actions
+  const cat = classifyFilingCategory(title, text);
+  if (["ORDER_WIN", "CAPEX_COMMISSIONING", "CAPITAL_RAISE", "CAPITAL_RETURN", "RESTRUCTURING", "ACQUISITION", "REGULATORY_ACTION", "CREDIT_EVENT"].includes(cat)) {
+    return "MAJOR_CORPORATE_ACTION";
+  }
+
+  // 6. Routine Compliance Notice
+  return "ROUTINE_COMPLIANCE";
 }
 
 /**
