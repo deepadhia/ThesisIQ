@@ -525,22 +525,37 @@ export async function isAnnouncementProcessed(ticker, sourceId, titleHash) {
  * Prevents duplicate alerts when NSE and BSE publish slightly different titles or multiple
  * circulars for the exact same underlying event, while allowing distinct events to pass.
  */
-export async function isEventAlertRecentlySent({ ticker, title, concall_type, is_earnings_release, attachment_url, filing_category }) {
+export async function isEventAlertRecentlySent({ ticker, title, summary, concall_type, is_earnings_release, attachment_url, filing_category }) {
   if (!ticker) return false;
 
-  // 1. Check attachment URL / filename matching first if present (Exact document deduplication)
+  // 1. Check attachment URL / filename matching first if present (Exact & Base Document Deduplication)
   if (attachment_url) {
-    const filename = attachment_url.split('/').pop()?.split('?')[0];
-    if (filename && filename.length > 8) {
+    const rawFilename = attachment_url.split('/').pop()?.split('?')[0];
+    if (rawFilename && rawFilename.length > 8) {
+      // 1a. Exact filename match
       const res = await pool.query(
         `SELECT id FROM corporate_announcements 
          WHERE ticker = $1 
            AND sent_to_telegram = true 
            AND attachment_url ILIKE $2 
            AND processed_at > NOW() - interval '24 hours'`,
-        [ticker, `%${filename}%`]
+        [ticker, `%${rawFilename}%`]
       );
       if (res.rows.length > 0) return true;
+
+      // 1b. Base document match (stripping NSE timestamp prefix e.g. TIMETECHNO_29092026204150_Outcome29092026_signed.pdf -> Outcome29092026_signed.pdf)
+      const baseFilename = rawFilename.replace(/^[A-Z0-9]+_\d{14}_/i, "").replace(/^\d{14}_/, "");
+      if (baseFilename && baseFilename.length >= 10 && baseFilename !== rawFilename) {
+        const baseRes = await pool.query(
+          `SELECT id FROM corporate_announcements 
+           WHERE ticker = $1 
+             AND sent_to_telegram = true 
+             AND attachment_url ILIKE $2 
+             AND processed_at > NOW() - interval '24 hours'`,
+          [ticker, `%${baseFilename}%`]
+        );
+        if (baseRes.rows.length > 0) return true;
+      }
     }
   }
 
@@ -578,7 +593,53 @@ export async function isEventAlertRecentlySent({ ticker, title, concall_type, is
     if (res.rows.length > 0) return true;
   }
 
-  // 4. Same-Day Event Identity Deduplication (Same ticker + matching subject tokens within 12 hours)
+  // 4. Major Board Action / Restructuring Same-Day Event Deduplication (Rolling 3-hour window)
+  // Prevents duplicate alerts when a board meeting outcome is filed, followed by an annexure/scheme filing minutes later.
+  const SINGULAR_CATEGORIES = new Set([
+    "RESTRUCTURING",
+    "CAPITAL_RAISE",
+    "CAPITAL_RETURN",
+    "ACQUISITION",
+    "CREDIT_EVENT"
+  ]);
+
+  if (filing_category && SINGULAR_CATEGORIES.has(filing_category)) {
+    const { rows: recentCatRows } = await pool.query(
+      `SELECT id, title, summary, raw_text, filing_category FROM corporate_announcements 
+       WHERE ticker = $1 
+         AND sent_to_telegram = true 
+         AND filing_category = $2
+         AND processed_at > NOW() - interval '3 hours'`,
+      [ticker, filing_category]
+    );
+
+    if (recentCatRows.length > 0) {
+      for (const prev of recentCatRows) {
+        // If either title is generic corporate outcome/announcement wording
+        const genericTitles = new Set(["outcome", "board", "meeting", "scheme", "arrangement", "disclosure", "regulation", "general", "update", "updates", "intimation"]);
+        const titleWords = (title || "").toLowerCase().split(/[^a-z0-9]+/).filter(w => w.length > 3);
+        const prevTitleWords = (prev.title || "").toLowerCase().split(/[^a-z0-9]+/).filter(w => w.length > 3);
+        const isCurrentGeneric = titleWords.length === 0 || titleWords.every(w => genericTitles.has(w));
+        const isPrevGeneric = prevTitleWords.length === 0 || prevTitleWords.every(w => genericTitles.has(w));
+
+        if (isCurrentGeneric || isPrevGeneric) {
+          return true;
+        }
+
+        // Check summary keyword/entity overlap (e.g., subsidiary or transaction name)
+        if (summary && prev.summary) {
+          const currentSumTokens = summary.toLowerCase().replace(/[^a-z0-9\s]/g, " ").split(/\s+/).filter(w => w.length >= 4);
+          const prevSumLower = prev.summary.toLowerCase();
+          const overlap = currentSumTokens.filter(t => prevSumLower.includes(t));
+          if (overlap.length >= 2) {
+            return true;
+          }
+        }
+      }
+    }
+  }
+
+  // 5. Same-Day Event Identity Deduplication (Same ticker + matching subject tokens within 12 hours)
   if (title) {
     // Extract key identifying words (ignore generic stock/corporate stop words)
     const stopWords = new Set(["outcome", "board", "meeting", "intimation", "disclosure", "update", "updates", "general", "under", "regulation", "sebi", "lodr", "ltd", "limited", "the", "and", "for", "with", "share", "shares", "company", "announcement"]);
@@ -586,7 +647,7 @@ export async function isEventAlertRecentlySent({ ticker, title, concall_type, is
     
     if (tokens.length > 0) {
       const { rows } = await pool.query(
-        `SELECT id, title, raw_text, filing_category FROM corporate_announcements 
+        `SELECT id, title, summary, raw_text, filing_category FROM corporate_announcements 
          WHERE ticker = $1 
            AND sent_to_telegram = true 
            AND processed_at > NOW() - interval '12 hours'`,
@@ -594,10 +655,38 @@ export async function isEventAlertRecentlySent({ ticker, title, concall_type, is
       );
       
       for (const prev of rows) {
-        const prevText = `${prev.title || ""} ${prev.raw_text || ""}`.toLowerCase();
-        // If at least 2 distinct tokens match, or 1 token matches when only 1 specific token exists
+        const prevText = `${prev.title || ""} ${prev.summary || ""} ${prev.raw_text || ""}`.toLowerCase();
+        // If at least 2 distinct tokens match, or 1 token matches when only 1 specific token exists,
+        // or at least 1 token matches AND the filing category matches (e.g. "scheme" + RESTRUCTURING)
         const matchingTokens = tokens.filter(t => prevText.includes(t));
-        if (matchingTokens.length >= 2 || (matchingTokens.length === 1 && tokens.length === 1)) {
+        if (
+          matchingTokens.length >= 2 ||
+          (matchingTokens.length === 1 && tokens.length === 1) ||
+          (matchingTokens.length >= 1 && prev.filing_category === filing_category)
+        ) {
+          return true;
+        }
+      }
+    }
+  }
+
+  // 6. Summary Entity & Subject Overlap (If summary mentions the exact same subsidiary or transaction within 12 hours)
+  if (summary) {
+    const { rows: sumRows } = await pool.query(
+      `SELECT id, title, summary, filing_category FROM corporate_announcements 
+       WHERE ticker = $1 
+         AND sent_to_telegram = true 
+         AND processed_at > NOW() - interval '12 hours'`,
+      [ticker]
+    );
+
+    for (const prev of sumRows) {
+      if (prev.summary && prev.filing_category === filing_category) {
+        const sumWords = summary.toLowerCase().replace(/[^a-z0-9\s]/g, " ").split(/\s+/).filter(w => w.length >= 4);
+        const prevSumLower = prev.summary.toLowerCase();
+        const commonWords = sumWords.filter(w => prevSumLower.includes(w));
+        // If 4 or more content words match across summaries in the same category
+        if (commonWords.length >= 4) {
           return true;
         }
       }

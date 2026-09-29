@@ -327,10 +327,12 @@ export async function scan({ isDryRun = false, runUrl = null, targetTicker = nul
         // Defer Stage 1 results, Stage 2 concall, and audio deep dives to quarterly-deepdive-worker.js
         const isQueuedForDeepDive = deepDiveStatus === "pending_stage1" || deepDiveStatus === "pending_stage2" || deepDiveStatus === "pending_audio";
         
-        const hasMaterialAgmHighlights = isAgm && Boolean(
+        // AGM filings must only alert if they contain genuine substantive business insights (e.g. Chairman speech, capacity roadmap, order pipeline)
+        // Routine procedural voting cover letters (ordinary business, dividend confirmation, director rotation) are LOW priority and must be suppressed.
+        const isAgmFiling = isAgm || isAgmCompleted;
+        const hasMaterialAgmHighlights = isAgmFiling && Boolean(
           aiResult?.has_substantive_business_insights ||
-          (aiResult?.agm_highlights && (Array.isArray(aiResult.agm_highlights) ? aiResult.agm_highlights.length > 0 : (aiResult.agm_highlights.trim().length > 20 && !aiResult.agm_highlights.toLowerCase().includes("null")))) ||
-          (aiResult?.key_data && aiResult.key_data !== "No specific figures disclosed." && aiResult.key_data.length > 10)
+          (aiResult?.agm_highlights && (Array.isArray(aiResult.agm_highlights) ? aiResult.agm_highlights.length > 0 : (aiResult.agm_highlights.trim().length > 20 && !aiResult.agm_highlights.toLowerCase().includes("null"))))
         );
 
         // Alert only on genuine business/thesis catalysts & material risks (Strict zero-suppression gate for all price-sensitive events)
@@ -358,7 +360,7 @@ export async function scan({ isDryRun = false, runUrl = null, targetTicker = nul
         const shouldHaveAlerted = !isQueuedForDeepDive && !isUnparsedZipFallback && (
           aiResult.priority === "HIGH" ||
           (isMajorCorporateAction && aiResult.priority !== "LOW") ||
-          (isAgmCompleted && hasMaterialAgmHighlights) ||
+          (isAgmFiling && aiResult.priority !== "LOW" && hasMaterialAgmHighlights) ||
           (aiResult.priority === "MEDIUM" && (aiResult.has_substantive_business_insights || hasMaterialAgmHighlights))
         );
 
@@ -368,6 +370,7 @@ export async function scan({ isDryRun = false, runUrl = null, targetTicker = nul
           isDuplicateEvent = await isEventAlertRecentlySent({
             ticker,
             title,
+            summary: aiResult.summary,
             concall_type: concallType,
             is_earnings_release: aiResult.is_earnings_release,
             attachment_url: docUrl,
@@ -417,6 +420,7 @@ export async function scan({ isDryRun = false, runUrl = null, targetTicker = nul
                 is_postal_ballot: isPostalBallot,
                 agm_status: isAgmCompleted ? "completed" : (aiResult.agm_status || "scheduled"),
                 agm_highlights: aiResult.agm_highlights,
+                has_substantive_business_insights: aiResult.has_substantive_business_insights,
                 eventAnalysis
               }), "Telegram Alert");
               sentToTelegram = true;

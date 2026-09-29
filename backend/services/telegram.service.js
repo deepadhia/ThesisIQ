@@ -146,15 +146,16 @@ function cleanCompanyName(name) {
 }
 
 /**
- * Sends a high-impact, professional institutional flash note alert to Telegram.
+ * Formats a high-impact, professional institutional flash note alert for Telegram.
  */
-export async function sendAnnouncementAlert(params) {
+export function formatAnnouncementMessage(params) {
   const {
     ticker, title, priority = "MEDIUM", impact = "NEUTRAL", summary, confidence,
     forward_catalysts, financial_metrics, corporate_actions,
     key_data, deep_dive_indicator, promises_reconciliation, thesis_strengthened, result_date,
     is_earnings_release, concall_type, concall_date, concall_time, is_rescheduled, category, filing_category, exchangeTimestamp, docUrl, source = "NSE",
-    is_agm, is_egm, is_postal_ballot, agm_status, agm_highlights, companyName, thesis_drift_state, root_cause, recovery_state, final_action, action_signal_authorized = false,
+    is_agm, is_egm, is_postal_ballot, agm_status, agm_highlights, has_substantive_business_insights,
+    companyName, thesis_drift_state, root_cause, recovery_state, final_action, action_signal_authorized = false,
     eventAnalysis = null, event_analysis = null
   } = params || {};
 
@@ -178,9 +179,27 @@ export async function sendAnnouncementAlert(params) {
     titleLower.includes("commissioning of plant") ||
     titleLower.includes("plant commissioning");
 
+  const hasSubstantiveInsights = Boolean(
+    has_substantive_business_insights ||
+    titleLower.includes("speech") ||
+    titleLower.includes("address") ||
+    titleLower.includes("presentation") ||
+    titleLower.includes("investor presentation")
+  );
+
   if (is_earnings_release) eventTypeLabel = "Financial Results & Performance";
-  else if (is_agm && agm_status === "completed") eventTypeLabel = "AGM Proceedings & Strategic Address";
-  else if (is_agm) eventTypeLabel = "Annual General Meeting (AGM) Notice";
+  else if (is_agm && (titleLower.includes("presentation") || titleLower.includes("investor presentation"))) {
+    eventTypeLabel = "AGM Investor Presentation & Strategy";
+  }
+  else if (is_agm && (titleLower.includes("speech") || titleLower.includes("address") || (agm_status === "completed" && hasSubstantiveInsights))) {
+    eventTypeLabel = "AGM Chairman's Strategic Address";
+  }
+  else if (is_agm && agm_status === "completed") {
+    eventTypeLabel = "AGM Voting Proceedings (Procedural)";
+  }
+  else if (is_agm) {
+    eventTypeLabel = "Annual General Meeting (AGM) Notice";
+  }
   else if (is_egm) eventTypeLabel = "Extraordinary General Meeting (EGM) Notice";
   else if (is_postal_ballot) eventTypeLabel = "Postal Ballot Notice";
   else if (isCommissioningFiling) {
@@ -298,7 +317,7 @@ export async function sendAnnouncementAlert(params) {
     if (detailBullets.length > 0) {
       const sectionHeader = isCommissioningFiling 
         ? "📊 *Capacity Addition & Milestone Details:*"
-        : (filing_category === "ACQUISITION" ? "📊 *M&A Consideration & Synergies:*" : "📊 *Key Details:*");
+        : (filing_category === "ACQUISITION" ? "📊 *M&A Consideration & Synergies:*" : ((is_agm && hasSubstantiveInsights) ? "📊 *Strategic Insights & Forward Guidance:*" : "📊 *Key Details:*"));
       message += `${sectionHeader}\n${detailBullets.slice(0, 3).join("\n")}\n\n`;
     }
   }
@@ -337,6 +356,14 @@ export async function sendAnnouncementAlert(params) {
     message += `🕐 ${timestamp} (${source})`;
   }
 
+  return message;
+}
+
+/**
+ * Sends a high-impact, professional institutional flash note alert to Telegram.
+ */
+export async function sendAnnouncementAlert(params) {
+  const message = formatAnnouncementMessage(params);
   return sendTelegramMessage(message);
 }
 
