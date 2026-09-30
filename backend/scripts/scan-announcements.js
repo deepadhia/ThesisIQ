@@ -12,6 +12,7 @@ import {
   isHeartbeatNeeded,
   markHeartbeatSent,
   extractTextFromPdfUrl,
+  extractResultDateFromText,
   isConcallOrTranscript,
   getConcallType
 } from "../services/announcement.service.js";
@@ -197,9 +198,28 @@ export async function scan({ isDryRun = false, runUrl = null, targetTicker = nul
           extractedText = await extractTextFromPdfUrl(docUrl);
         }
 
+        const isMaterialActionText = 
+          title.toLowerCase().includes("rights issue") ||
+          title.toLowerCase().includes("preferential") ||
+          title.toLowerCase().includes("qip") ||
+          title.toLowerCase().includes("acquisition") ||
+          title.toLowerCase().includes("merger") ||
+          title.toLowerCase().includes("demerger") ||
+          title.toLowerCase().includes("amalgamation") ||
+          (ann.attachment_text && (
+            ann.attachment_text.toLowerCase().includes("rights issue") ||
+            ann.attachment_text.toLowerCase().includes("preferential") ||
+            ann.attachment_text.toLowerCase().includes("qip") ||
+            ann.attachment_text.toLowerCase().includes("acquisition") ||
+            ann.attachment_text.toLowerCase().includes("subsidiary")
+          ));
+
         if (extractedText && extractedText.trim().length > 50) {
           announcementText = `TITLE: ${title}\n\nCONTENT:\n${extractedText}`;
           console.log(`[PDF] Successfully extracted ${extractedText.length} chars.`);
+        } else if (docUrl && isMaterialActionText && (!extractedText || extractedText.trim().length <= 50)) {
+          console.log(`[PDF DEFER] Material corporate action PDF not replicated yet on CDN (${ticker} - ${title}). Deferring to next scan cycle for full extraction.`);
+          continue;
         } else if (ann.attachment_text) {
           console.log(`[TEXT] Using provided attachment text for ${ticker}`);
           announcementText = `TITLE: ${title}\n\nSUMMARY:\n${ann.attachment_text}`;
@@ -357,8 +377,11 @@ export async function scan({ isDryRun = false, runUrl = null, targetTicker = nul
           aiResult.confidence === "LOW"
         );
 
-        const shouldHaveAlerted = !isQueuedForDeepDive && !isUnparsedZipFallback && (
-          aiResult.priority === "HIGH" ||
+        // Procedural AGM voting tallies and scrutinizer reports must NEVER alert
+        const isProceduralAgm = isAgmFiling && !hasMaterialAgmHighlights && !aiResult?.has_substantive_business_insights;
+
+        const shouldHaveAlerted = !isQueuedForDeepDive && !isUnparsedZipFallback && !isProceduralAgm && (
+          (aiResult.priority === "HIGH" && !isAgmFiling) ||
           (isMajorCorporateAction && aiResult.priority !== "LOW") ||
           (isAgmFiling && aiResult.priority !== "LOW" && hasMaterialAgmHighlights) ||
           (aiResult.priority === "MEDIUM" && (aiResult.has_substantive_business_insights || hasMaterialAgmHighlights))
@@ -404,6 +427,7 @@ export async function scan({ isDryRun = false, runUrl = null, targetTicker = nul
                 deep_dive_indicator: aiResult.deep_dive_indicator,
                 promises_reconciliation: aiResult.promises_reconciliation,
                 thesis_strengthened: aiResult.thesis_strengthened,
+                key_omissions_or_risks: aiResult.key_omissions_or_risks,
                 result_date: aiResult.result_date,
                 is_earnings_release: aiResult.is_earnings_release,
                 concall_type: concallType,
@@ -492,9 +516,10 @@ export async function scan({ isDryRun = false, runUrl = null, targetTicker = nul
           }
         }
 
-        // 9. Update Result Date if found
-        if (aiResult.result_date) {
-          await updateStockResultDate(stock.id, aiResult.result_date, aiResult.confidence);
+        // 9. Update Result Date if found (AI extraction or deterministic board meeting pattern)
+        const detectedResultDate = aiResult.result_date || extractResultDateFromText(announcementText);
+        if (detectedResultDate) {
+          await updateStockResultDate(stock.id, detectedResultDate, "HIGH");
         }
       }
     } catch (err) {

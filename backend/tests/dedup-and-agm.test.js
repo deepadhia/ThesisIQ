@@ -4,8 +4,77 @@
  * 2. AGM Procedural vs Strategic Filtering and Labeling
  */
 
-import { isEventAlertRecentlySent } from '../services/announcement.service.js';
-import { formatAnnouncementMessage } from '../services/telegram.service.js';
+import { isEventAlertRecentlySent, extractResultDateFromText } from '../services/announcement.service.js';
+import { formatAnnouncementMessage, sendAnnouncementAlert } from '../services/telegram.service.js';
+import { classifyFilingCategory } from '../services/filing-classifier.service.js';
+import { pool } from '../db/pool.js';
+
+// Hermetic mock of pool.query to simulate recent historical DB alerts
+const origPoolQuery = pool.query;
+pool.query = async (text, params) => {
+  const queryStr = String(text || '');
+  const ticker = params && params[0];
+
+  if (ticker === 'TIMETECHNO') {
+    // 1. Filename match: only match if checking for Outcome29092026
+    if (queryStr.includes('attachment_url ILIKE')) {
+      const matchPattern = params && params[1];
+      if (matchPattern && String(matchPattern).includes('Outcome29092026')) {
+        return {
+          rows: [{
+            id: 'test-timetechno-prev',
+            ticker: 'TIMETECHNO',
+            title: 'Scheme of Arrangement',
+            summary: 'Time Technoplast board approved merger of 74.86% subsidiary TPL Plastech into parent company.',
+            attachment_url: 'https://nsearchives.nseindia.com/corporate/TIMETECHNO_29092026204150_Outcome29092026_signed.pdf',
+            filing_category: 'RESTRUCTURING',
+            sent_to_telegram: true,
+            processed_at: new Date()
+          }]
+        };
+      }
+      return { rows: [] };
+    }
+
+    // 2. Category match: only match if checking for RESTRUCTURING
+    if (queryStr.includes('filing_category =')) {
+      const catParam = params && (params[1] || params[2]);
+      if (catParam === 'RESTRUCTURING' || queryStr.includes("'RESTRUCTURING'")) {
+        return {
+          rows: [{
+            id: 'test-timetechno-prev',
+            ticker: 'TIMETECHNO',
+            title: 'Scheme of Arrangement',
+            summary: 'Time Technoplast board approved merger of 74.86% subsidiary TPL Plastech into parent company.',
+            attachment_url: 'https://nsearchives.nseindia.com/corporate/TIMETECHNO_29092026204150_Outcome29092026_signed.pdf',
+            filing_category: 'RESTRUCTURING',
+            sent_to_telegram: true,
+            processed_at: new Date()
+          }]
+        };
+      }
+      return { rows: [] };
+    }
+
+    // 3. Entity overlap match: check if summary matches TPL Plastech
+    if (queryStr.includes('summary ILIKE') || queryStr.includes('title ILIKE')) {
+      return {
+        rows: [{
+          id: 'test-timetechno-prev',
+          ticker: 'TIMETECHNO',
+          title: 'Scheme of Arrangement',
+          summary: 'Time Technoplast board approved merger of 74.86% subsidiary TPL Plastech into parent company.',
+          attachment_url: 'https://nsearchives.nseindia.com/corporate/TIMETECHNO_29092026204150_Outcome29092026_signed.pdf',
+          filing_category: 'RESTRUCTURING',
+          sent_to_telegram: true,
+          processed_at: new Date()
+        }]
+      };
+    }
+  }
+
+  return origPoolQuery.apply(pool, [text, params]);
+};
 
 // Polyfill describe / test / expect for standalone node execution
 const testFn = typeof test !== 'undefined' ? test : (name, fn) => {
@@ -150,13 +219,75 @@ async function runTests() {
       expectFn(message).toContain('AGM Investor Presentation & Strategy');
     });
 
+    await testFn('Procedural AGM voting proceeding must be suppressed by sendAnnouncementAlert', async () => {
+      const res = await sendAnnouncementAlert({
+        ticker: 'POLICYBZR',
+        companyName: 'PB Fintech Ltd',
+        title: 'Shareholders meeting',
+        priority: 'HIGH',
+        impact: 'NEUTRAL',
+        summary: 'Adoption of audited financial statements and director reappointments passed with 99.8% majority.',
+        is_agm: true,
+        agm_status: 'completed',
+        has_substantive_business_insights: false
+      });
+
+      expectFn(res).toBe(false);
+    });
+
+  });
+
+  await describeFn('Filing Classification & High-Impact Keyword Invariants (SJS Case Study)', async () => {
+
+    await testFn('Generic "General Updates" title with Rights Issue text must classify as CAPITAL_RAISE', () => {
+      const category = classifyFilingCategory(
+        'General Updates',
+        'Intimation of investment through Rights Issue in SJS Display Electronics Private Limited (SDEPL), a wholly owned subsidiary'
+      );
+      expectFn(category).toBe('CAPITAL_RAISE');
+    });
+
+    await testFn('Procedural voting results title must classify as ROUTINE_COMPLIANCE', () => {
+      const category = classifyFilingCategory(
+        'Voting Results of 18th Annual General Meeting',
+        'Details of voting results as per Regulation 44 of SEBI LODR Regulations'
+      );
+      expectFn(category).toBe('ROUTINE_COMPLIANCE');
+    });
+
+  });
+
+  await describeFn('Board Meeting Result Date Extraction Invariants', async () => {
+
+    await testFn('Must extract upcoming results date from standard board meeting intimation (ANANTRAJ Case Study)', () => {
+      const text = `a meeting of the Board of Directors of Anant Raj Limited ('the Company') is scheduled to be held on Wednesday, October 28, 2026, inter-alia, to consider, approve and take on record the Unaudited Financial Results (Standalone and Consolidated) for the quarter and half year ending September 30, 2026.`;
+      const date = extractResultDateFromText(text);
+      expectFn(date).toBe('2026-10-28');
+    });
+
+    await testFn('Must extract date from day-first format (28th October, 2026)', () => {
+      const text = `The Board Meeting is scheduled to be held on 28th October, 2026 to consider unaudited quarterly financial results.`;
+      const date = extractResultDateFromText(text);
+      expectFn(date).toBe('2026-10-28');
+    });
+
+    await testFn('Must return null if meeting is not considering financial results', () => {
+      const text = `A meeting of the Board of Directors is scheduled to be held on October 28, 2026 to consider issue of employee stock options.`;
+      const date = extractResultDateFromText(text);
+      expectFn(date).toBe(null);
+    });
+
   });
 }
 
-runTests().then(() => {
-  console.log('\n✅ All Deduplication and AGM tests passed successfully!');
-  process.exit(0);
-}).catch((err) => {
-  console.error('\n❌ Tests failed:', err);
-  process.exit(1);
-});
+if (!process.env.VITEST) {
+  runTests().then(() => {
+    console.log('\n✅ All Deduplication and AGM tests passed successfully!');
+    process.exit(0);
+  }).catch((err) => {
+    console.error('\n❌ Tests failed:', err);
+    process.exit(1);
+  });
+} else {
+  await runTests();
+}

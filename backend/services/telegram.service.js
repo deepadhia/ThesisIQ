@@ -111,12 +111,59 @@ export async function sendTelegramMessage(text) {
  * @param {number}  [params.pdf_flag]         - BSE PDFFLAG (0/1/2) for URL routing
  * @param {string}  [params.source]           - "BSE" | "NSE"
  */
+function cleanReaderFriendlyText(text) {
+  if (!text) return "";
+  return text
+    // Convert Indian crore expressions: "Rs. 94.81/- Crores only", "574 crore" -> "₹574 Cr"
+    .replace(/(?:₹|Rs\.?|INR)?\s*([\d,]+(?:\.\d+)?)\s*(?:\/-)?\s*crores?(?:\s*only)?/gi, " ₹$1 Cr ")
+    // Convert Lakhs to ₹ Cr if >= 100 Lakhs, else ₹X Lakhs
+    .replace(/(?:₹|Rs\.?|INR)?\s*([\d,]+(?:\.\d+)?)\s*(?:\/-)?\s*lakhs?(?:\s*only)?/gi, (match, numStr) => {
+      const val = parseFloat(numStr.replace(/,/g, ""));
+      return val >= 100 ? ` ₹${(val / 100).toFixed(2)} Cr ` : ` ₹${val.toFixed(2)} Lakhs `;
+    })
+    // Convert 7 or 8-digit full rupees (e.g. ₹5,00,00,000 or Rs. 10,00,00,000/-) into ₹ Cr
+    .replace(/(?:₹|Rs\.?|INR)\s*([\d,]+)(?:\/-)?\s*(?:only)?/gi, (match, numStr) => {
+      const cleanNum = parseFloat(numStr.replace(/,/g, ""));
+      if (cleanNum >= 10000000) {
+        return ` ₹${(cleanNum / 10000000).toFixed(2)} Cr `;
+      } else if (cleanNum >= 100000) {
+        return ` ₹${(cleanNum / 100000).toFixed(2)} Lakhs `;
+      }
+      return match;
+    })
+    .replace(/([\d,]+)\s*\/-(\s*(?:only)?)?/gi, (match, numStr) => {
+      const cleanNum = parseFloat(numStr.replace(/,/g, ""));
+      if (cleanNum >= 10000000) {
+        return ` ₹${(cleanNum / 10000000).toFixed(2)} Cr `;
+      } else if (cleanNum >= 100000) {
+        return ` ₹${(cleanNum / 100000).toFixed(2)} Lakhs `;
+      }
+      return match;
+    })
+    // Clean legalistic boilerplate
+    .replace(/pursuant to regulation \d+[^,\.]*[,.]?/gi, "")
+    .replace(/under regulation \d+ of (?:the )?sebi [^,\.]*[,.]?/gi, "")
+    .replace(/in terms of regulation \d+[^,\.]*[,.]?/gi, "")
+    .replace(/pursuant to a rights issue made by [^,\.]*under section \d+[^,\.]*[,.]?/gi, "")
+    .replace(/read with sebi master circular[^,\.]*[,.]?/gi, "")
+    .replace(/with effect from the appointed date of/gi, "effective")
+    .replace(/further to our letter dated[^,\.]*[,.]?/gi, "")
+    .replace(/intimation under regulation \d+[^,\.]*[-–]?/gi, "")
+    .replace(/hereby informs that|we wish to inform that|this is to inform you that/gi, "announced that")
+    .replace(/\s+([,.;:])/g, "$1")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 function formatToBullets(text) {
   if (!text) return "";
-  const cleaned = text.trim();
-  if (cleaned.startsWith("•") || cleaned.startsWith("-") || cleaned.startsWith("*")) {
-    return cleaned;
-  }
+  const cleaned = cleanReaderFriendlyText(
+    text
+      .replace(/^•\s*/, "")
+      .replace(/^(summary|executive summary|key takeaways?|highlights?):\s*/i, "")
+      .trim()
+  );
+
   // Protect abbreviations, titles, and decimal numbers before splitting
   const protectedText = cleaned
     .replace(/\b(Sr|Jr|Mr|Mrs|Ms|Dr|Prof|Ltd|Inc|Corp|Co|Pvt|Rs|vs|approx|viz|No|Dept|EVP|SVP|VP|CTO|CFO|CEO|MD|AGM|EGM)\./gi, "$1__DOT__")
@@ -145,6 +192,42 @@ function cleanCompanyName(name) {
     .trim();
 }
 
+function isNotDisclosed(val) {
+  if (!val) return true;
+  const s = String(val).trim().toLowerCase();
+  return (
+    s === "null" ||
+    s === "undefined" ||
+    s === "not disclosed" ||
+    s === "not applicable" ||
+    s === "n/a" ||
+    s === "none" ||
+    s === "nil" ||
+    s.startsWith("not disclosed") ||
+    s.startsWith("none disclosed")
+  );
+}
+
+function isValidBullet(bullet) {
+  if (!bullet) return false;
+  const s = String(bullet).trim().toLowerCase();
+  if (s.length < 5) return false;
+  if (
+    s.includes("not disclosed") ||
+    s.includes("no export orders") ||
+    s.includes("none disclosed") ||
+    s.includes("voltage classes not disclosed")
+  ) {
+    return false;
+  }
+  return true;
+}
+
+function cleanBullet(text) {
+  if (!text) return "";
+  return String(text).replace(/^•\s*/, "").trim();
+}
+
 /**
  * Formats a high-impact, professional institutional flash note alert for Telegram.
  */
@@ -152,7 +235,7 @@ export function formatAnnouncementMessage(params) {
   const {
     ticker, title, priority = "MEDIUM", impact = "NEUTRAL", summary, confidence,
     forward_catalysts, financial_metrics, corporate_actions,
-    key_data, deep_dive_indicator, promises_reconciliation, thesis_strengthened, result_date,
+    key_data, key_omissions_or_risks, deep_dive_indicator, promises_reconciliation, thesis_strengthened, result_date,
     is_earnings_release, concall_type, concall_date, concall_time, is_rescheduled, category, filing_category, exchangeTimestamp, docUrl, source = "NSE",
     is_agm, is_egm, is_postal_ballot, agm_status, agm_highlights, has_substantive_business_insights,
     companyName, thesis_drift_state, root_cause, recovery_state, final_action, action_signal_authorized = false,
@@ -207,9 +290,9 @@ export function formatAnnouncementMessage(params) {
     isMilestoneEvent = true;
   }
   else if (filing_category === "ORDER_WIN") eventTypeLabel = "Order Win & Contract Award";
-  else if (filing_category === "CAPITAL_RAISE") eventTypeLabel = "Capital Raise (QIP / Preferential)";
+  else if (filing_category === "CAPITAL_RAISE") eventTypeLabel = "Capital Raise & Strategic Infusion";
   else if (filing_category === "CAPITAL_RETURN") eventTypeLabel = "Capital Action (Bonus / Split / Dividend)";
-  else if (filing_category === "RESTRUCTURING") eventTypeLabel = "Corporate Restructuring / Demerger";
+  else if (filing_category === "RESTRUCTURING") eventTypeLabel = "Corporate Restructuring & Scheme of Merger";
   else if (filing_category === "REGULATORY_ACTION") eventTypeLabel = "Regulatory Action / Clearance";
   else if (filing_category === "GOVERNANCE_RISK") eventTypeLabel = "Management / Governance Update";
   else if (filing_category === "CREDIT_EVENT") eventTypeLabel = "Credit Rating Action";
@@ -222,16 +305,16 @@ export function formatAnnouncementMessage(params) {
 
   let message = `🏢 ${companyHeader}\n`;
   message    += `📢 *Event:* ${eventTypeLabel} • ${isMilestoneEvent ? "🟢 *High Catalyst*" : priorityBadge}\n`;
-  message    += `──────────────────────────────────────────\n\n`;
+  message    += `──────────────────────────────\n\n`;
 
   // Milestone Highlight Banner
   if (isMilestoneEvent) {
     message += `⭐ *MILESTONE FULFILLMENT:* 🟢 *COMMISSIONED & OPERATIONAL*\n\n`;
   }
 
-  // 1. Key Takeaway / What Happened
+  // 1. Executive Summary / What Happened
   if (summary) {
-    message += `💡 *Key Takeaway:*\n${formatToBullets(summary)}\n\n`;
+    message += `💡 *Executive Summary:*\n${formatToBullets(summary)}\n\n`;
   }
 
   // 2. Specialized Key Details / Metrics (strictly deduplicated against summary)
@@ -240,44 +323,176 @@ export function formatAnnouncementMessage(params) {
   if (filing_category === "ORDER_WIN" && analysis?.extracted_data) {
     const ext = analysis.extracted_data;
     const orderDetails = [];
-    if (ext.order_value_cr && ext.order_value_cr !== "Not Disclosed") {
-      orderDetails.push(`• Total Order Value: ₹${ext.order_value_cr} Cr`);
+    if (ext.order_value_cr && !isNotDisclosed(ext.order_value_cr)) {
+      orderDetails.push(`• Total Value: ₹${ext.order_value_cr} Cr`);
     }
-    if (Array.isArray(ext.order_breakdown) && ext.order_breakdown.length > 0) {
-      ext.order_breakdown.forEach(b => orderDetails.push(`• ${b.replace(/^•\s*/, "")}`));
+    if (ext.revenue_visibility_impact && !isNotDisclosed(ext.revenue_visibility_impact)) {
+      const cleanScale = cleanBullet(ext.revenue_visibility_impact)
+        .replace(/^(order scale relative to annual run-rate|scale relative to run-rate|relative scale|order scale):\s*/i, "");
+      orderDetails.push(`• Relative Scale: ${cleanReaderFriendlyText(cleanScale)}`);
     }
-    if (ext.scope_and_voltage && ext.scope_and_voltage !== "Not Disclosed") {
-      orderDetails.push(`• Technical Scope: ${ext.scope_and_voltage}`);
+    if (ext.scope_and_voltage && !isNotDisclosed(ext.scope_and_voltage)) {
+      orderDetails.push(`• Scope: ${cleanReaderFriendlyText(cleanBullet(ext.scope_and_voltage))}`);
+    } else if (Array.isArray(ext.order_breakdown) && ext.order_breakdown.length > 0) {
+      const validItems = ext.order_breakdown.filter(b => isValidBullet(b));
+      if (validItems.length > 0) {
+        orderDetails.push(`• Scope: ${validItems.map(b => cleanReaderFriendlyText(cleanBullet(b))).slice(0, 2).join(", ")}`);
+      }
     }
-    if (ext.client_name && ext.client_name !== "Not Disclosed") {
-      orderDetails.push(`• Client / Counterparty: ${ext.client_name}`);
+    if (ext.client_name && !isNotDisclosed(ext.client_name)) {
+      orderDetails.push(`• Client: ${cleanBullet(ext.client_name)}`);
     }
-    if (ext.execution_period_months && ext.execution_period_months !== "Not Disclosed") {
+    if (ext.margin_and_thesis_impact && !isNotDisclosed(ext.margin_and_thesis_impact)) {
+      orderDetails.push(`• Margin Driver: ${cleanReaderFriendlyText(cleanBullet(ext.margin_and_thesis_impact))}`);
+    } else if (ext.thesis_relevance && !isNotDisclosed(ext.thesis_relevance)) {
+      orderDetails.push(`• Margin Driver: ${cleanReaderFriendlyText(cleanBullet(ext.thesis_relevance))}`);
+    }
+    if (ext.execution_period_months && !isNotDisclosed(ext.execution_period_months)) {
       orderDetails.push(`• Execution Timeline: ${ext.execution_period_months} months`);
     }
     if (orderDetails.length > 0) {
-      message += `📊 *Order Breakdown & Scope:*\n${orderDetails.join("\n")}\n\n`;
+      message += `📊 *Order Highlights:*\n${orderDetails.join("\n")}\n\n`;
+    }
+  } else if (filing_category === "CAPITAL_RAISE" && analysis?.extracted_data) {
+    const ext = analysis.extracted_data;
+    const capDetails = [];
+    let targetStr = "";
+    if (ext.target_entity) {
+      if (typeof ext.target_entity === "object") {
+        const entName = ext.target_entity.entity || ext.target_entity.name || "";
+        const relName = ext.target_entity.relationship ? ` (${ext.target_entity.relationship})` : "";
+        targetStr = `${entName}${relName}`.trim();
+      } else {
+        targetStr = cleanBullet(ext.target_entity);
+      }
+    }
+    targetStr = targetStr.replace(/^(?:rights issue|investment|preferential allotment|qip)\s+(?:in|into)\s+/i, "");
+    if (targetStr && !isNotDisclosed(targetStr)) {
+      capDetails.push(`• Target Entity: ${cleanReaderFriendlyText(targetStr)}`);
+    }
+    if (ext.raise_type && !isNotDisclosed(ext.raise_type)) {
+      capDetails.push(`• Instrument: ${cleanReaderFriendlyText(cleanBullet(ext.raise_type))}`);
+    }
+    if (ext.total_amount_cr && !isNotDisclosed(ext.total_amount_cr)) {
+      let cumStr = "";
+      if (ext.cumulative_infused_cr && !isNotDisclosed(ext.cumulative_infused_cr)) {
+        const cVal = String(ext.cumulative_infused_cr).trim();
+        cumStr = cVal.includes("Cr") ? ` (Cumulative: ${cVal})` : ` (Cumulative: ₹${cVal} Cr)`;
+      }
+      capDetails.push(`• Infusion Amount: ₹${ext.total_amount_cr} Cr${cumStr}`);
+    } else if (ext.total_amount_raised_cr && !isNotDisclosed(ext.total_amount_raised_cr)) {
+      capDetails.push(`• Total Amount Raised: ₹${ext.total_amount_raised_cr} Cr`);
+    }
+    if (ext.issue_price && !isNotDisclosed(ext.issue_price)) {
+      const pVal = String(ext.issue_price).trim();
+      const formattedPrice = /^\d+(\.\d+)?$/.test(pVal) ? `₹${pVal}/share at par` : pVal;
+      capDetails.push(`• Issue Terms: ${cleanReaderFriendlyText(cleanBullet(formattedPrice))}`);
+    }
+    if (ext.shareholding_pct && !isNotDisclosed(ext.shareholding_pct)) {
+      const sVal = String(ext.shareholding_pct).trim();
+      const formattedPct = /^\d+(\.\d+)?$/.test(sVal) ? `${sVal}% ownership retained` : sVal;
+      capDetails.push(`• Ownership Post-Issue: ${cleanBullet(formattedPct)}`);
+    } else if (ext.dilution_percentage && !isNotDisclosed(ext.dilution_percentage)) {
+      capDetails.push(`• Equity Dilution: ${cleanBullet(ext.dilution_percentage)}`);
+    }
+    if (ext.parent_cash_outflow_cr && !isNotDisclosed(ext.parent_cash_outflow_cr)) {
+      capDetails.push(`• Parent Cash Outgo: ${cleanReaderFriendlyText(cleanBullet(ext.parent_cash_outflow_cr))}`);
+    }
+    if (ext.use_of_proceeds && !isNotDisclosed(ext.use_of_proceeds)) {
+      capDetails.push(`• Strategic Purpose: ${cleanReaderFriendlyText(cleanBullet(ext.use_of_proceeds))}`);
+    }
+    if (capDetails.length > 0) {
+      message += `📊 *Capital Infusion Details:*\n${capDetails.join("\n")}\n\n`;
+    }
+  } else if (filing_category === "RESTRUCTURING" && analysis?.extracted_data) {
+    const ext = analysis.extracted_data;
+    const restDetails = [];
+    let transEntity = "";
+    if (ext.transferor_entity) {
+      transEntity = typeof ext.transferor_entity === "object" 
+        ? (ext.transferor_entity.entity || ext.transferor_entity.name || "") 
+        : ext.transferor_entity;
+      transEntity = cleanBullet(transEntity);
+    }
+    if (transEntity && !isNotDisclosed(transEntity)) {
+      restDetails.push(`• Merging Entity: ${cleanReaderFriendlyText(transEntity)}`);
+    }
+    if (ext.scheme_type && !isNotDisclosed(ext.scheme_type)) {
+      restDetails.push(`• Structure: ${cleanReaderFriendlyText(cleanBullet(ext.scheme_type))}`);
+    }
+    if (ext.swap_ratio && !isNotDisclosed(ext.swap_ratio)) {
+      restDetails.push(`• Share Swap Ratio: ${cleanReaderFriendlyText(cleanBullet(ext.swap_ratio))}`);
+    }
+    if (ext.dilution_percentage && !isNotDisclosed(ext.dilution_percentage)) {
+      restDetails.push(`• Equity Dilution: ${cleanBullet(ext.dilution_percentage)}`);
+    }
+    if (ext.financials_absorbed && !isNotDisclosed(ext.financials_absorbed)) {
+      let finStr = "";
+      if (typeof ext.financials_absorbed === "object") {
+        const parts = [];
+        if (ext.financials_absorbed.turnover) parts.push(`Revenue: ${cleanReaderFriendlyText(ext.financials_absorbed.turnover)}`);
+        if (ext.financials_absorbed.net_profit || ext.financials_absorbed.ebitda) parts.push(`PAT: ${cleanReaderFriendlyText(ext.financials_absorbed.net_profit || ext.financials_absorbed.ebitda)}`);
+        if (ext.financials_absorbed.net_worth) parts.push(`Net Worth: ${cleanReaderFriendlyText(ext.financials_absorbed.net_worth)}`);
+        finStr = parts.join(" | ");
+      } else {
+        finStr = cleanReaderFriendlyText(cleanBullet(ext.financials_absorbed));
+      }
+      if (finStr) {
+        restDetails.push(`• Financials Absorbed: ${finStr}`);
+      }
+    }
+    if (ext.strategic_rationale && !isNotDisclosed(ext.strategic_rationale)) {
+      restDetails.push(`• Strategic Rationale: ${cleanReaderFriendlyText(cleanBullet(ext.strategic_rationale))}`);
+    }
+    if (ext.approval_horizon_months && !isNotDisclosed(ext.approval_horizon_months)) {
+      restDetails.push(`• Regulatory Horizon: ${cleanBullet(ext.approval_horizon_months)}`);
+    } else if (ext.nclt_sebi_stage && !isNotDisclosed(ext.nclt_sebi_stage)) {
+      restDetails.push(`• Approval Stage: ${cleanBullet(ext.nclt_sebi_stage)}`);
+    }
+    if (restDetails.length > 0) {
+      message += `📊 *Merger Terms & Valuation:*\n${restDetails.join("\n")}\n\n`;
+    }
+  } else if (filing_category === "CAPEX_COMMISSIONING" && analysis?.extracted_data) {
+    const ext = analysis.extracted_data;
+    const capexDetails = [];
+    if (ext.capacity_added_or_expanded && !isNotDisclosed(ext.capacity_added_or_expanded)) {
+      capexDetails.push(`• Capacity Added: ${cleanReaderFriendlyText(cleanBullet(ext.capacity_added_or_expanded))}`);
+    }
+    if (ext.facility_location && !isNotDisclosed(ext.facility_location)) {
+      capexDetails.push(`• Plant Location: ${cleanBullet(ext.facility_location)}`);
+    }
+    if (ext.phase_details && !isNotDisclosed(ext.phase_details)) {
+      capexDetails.push(`• Milestone Status: ${cleanBullet(ext.phase_details)}`);
+    }
+    if (ext.backward_integration_impact && !isNotDisclosed(ext.backward_integration_impact)) {
+      capexDetails.push(`• Margin Benefit: ${cleanReaderFriendlyText(cleanBullet(ext.backward_integration_impact))}`);
+    }
+    if (ext.revenue_and_order_visibility && !isNotDisclosed(ext.revenue_and_order_visibility)) {
+      capexDetails.push(`• Order Support: ${cleanReaderFriendlyText(cleanBullet(ext.revenue_and_order_visibility))}`);
+    }
+    if (capexDetails.length > 0) {
+      message += `📊 *Capacity & Capex Details:*\n${capexDetails.join("\n")}\n\n`;
     }
   } else if (filing_category === "ACQUISITION" && analysis?.extracted_data) {
     const ext = analysis.extracted_data;
     const acqDetails = [];
-    if (ext.target_company && ext.target_company !== "Not Disclosed") {
+    if (ext.target_company && !isNotDisclosed(ext.target_company)) {
       acqDetails.push(`• Target Entity: ${ext.target_company}`);
     }
-    if (ext.deal_value_cr && ext.deal_value_cr !== "Not Disclosed") {
+    if (ext.deal_value_cr && !isNotDisclosed(ext.deal_value_cr)) {
       acqDetails.push(`• Total Consideration: ₹${ext.deal_value_cr} Cr`);
     }
-    if (ext.cash_consideration_cr) {
+    if (ext.cash_consideration_cr && !isNotDisclosed(ext.cash_consideration_cr)) {
       acqDetails.push(`• Cash Payout: ₹${ext.cash_consideration_cr} Cr`);
     }
-    if (ext.equity_swap_cr) {
+    if (ext.equity_swap_cr && !isNotDisclosed(ext.equity_swap_cr)) {
       acqDetails.push(`• Share Swap Consideration: ₹${ext.equity_swap_cr} Cr`);
     }
-    if (ext.strategic_rationale) {
-      acqDetails.push(`• Strategic Rationale: ${ext.strategic_rationale}`);
+    if (ext.strategic_rationale && !isNotDisclosed(ext.strategic_rationale)) {
+      acqDetails.push(`• Strategic Rationale: ${cleanReaderFriendlyText(ext.strategic_rationale)}`);
     }
     if (acqDetails.length > 0) {
-      message += `📊 *M&A Consideration & Details:*\n${acqDetails.join("\n")}\n\n`;
+      message += `📊 *M&A Consideration & Synergies:*\n${acqDetails.join("\n")}\n\n`;
     }
   } else {
     // Collect distinct metrics/catalysts without duplication
@@ -286,8 +501,8 @@ export function formatAnnouncementMessage(params) {
 
     const addUniqueBullet = (item) => {
       if (!item) return;
-      const clean = String(item).replace(/^•\s*/, "").trim();
-      if (clean.length < 5 || clean.toLowerCase().includes("null") || clean.toLowerCase().includes("no specific")) return;
+      const clean = cleanReaderFriendlyText(cleanBullet(item));
+      if (clean.length < 5 || isNotDisclosed(clean) || clean.toLowerCase().includes("no specific")) return;
       
       const cleanLower = clean.toLowerCase();
       // Extract numeric & key token fingerprint (e.g. "dividend_0.20", "slump_sale")
@@ -316,9 +531,18 @@ export function formatAnnouncementMessage(params) {
 
     if (detailBullets.length > 0) {
       const sectionHeader = isCommissioningFiling 
-        ? "📊 *Capacity Addition & Milestone Details:*"
+        ? "📊 *Capacity & Capex Details:*"
         : (filing_category === "ACQUISITION" ? "📊 *M&A Consideration & Synergies:*" : ((is_agm && hasSubstantiveInsights) ? "📊 *Strategic Insights & Forward Guidance:*" : "📊 *Key Details:*"));
       message += `${sectionHeader}\n${detailBullets.slice(0, 3).join("\n")}\n\n`;
+    }
+  }
+
+  // Information Gaps & Omissions (Institutional Red Flags)
+  const rawOmission = analysis?.extracted_data?.key_omissions_or_risks || key_omissions_or_risks;
+  if (rawOmission && !isNotDisclosed(rawOmission)) {
+    const cleanOmission = cleanReaderFriendlyText(cleanBullet(rawOmission));
+    if (cleanOmission.length > 5 && !cleanOmission.toLowerCase().includes("none") && !cleanOmission.toLowerCase().includes("null")) {
+      message += `⚠️ *Key Information Gaps:*\n• ${cleanOmission}\n\n`;
     }
   }
 
@@ -349,7 +573,7 @@ export function formatAnnouncementMessage(params) {
   }
 
   // 4. Footer
-  message += `──────────────────────────────────────────\n`;
+  message += `──────────────────────────────\n`;
   if (docUrl) {
     message += `📄 [View Official Filing →](${docUrl}) • 🕐 ${timestamp} (${source})`;
   } else {
@@ -363,6 +587,18 @@ export function formatAnnouncementMessage(params) {
  * Sends a high-impact, professional institutional flash note alert to Telegram.
  */
 export async function sendAnnouncementAlert(params) {
+  const { is_agm, agm_status, has_substantive_business_insights, title = "" } = params || {};
+  const tLower = (title || "").toLowerCase();
+  const isProceduralVoting = 
+    (is_agm && agm_status === "completed" && !has_substantive_business_insights) ||
+    tLower.includes("voting result") || 
+    tLower.includes("scrutinizer report");
+
+  if (isProceduralVoting) {
+    console.log(`[ALERT SUPPRESSED] Procedural AGM/Voting proceedings suppressed from live Telegram dispatch: ${title}`);
+    return false;
+  }
+
   const message = formatAnnouncementMessage(params);
   return sendTelegramMessage(message);
 }

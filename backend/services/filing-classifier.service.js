@@ -34,8 +34,7 @@ export function classifyFilingCategory(title = "", text = "") {
     "newspaper publication",
     "newspaper advertisement",
     "voting results",
-    "scrutinizer report",
-    "general update"
+    "scrutinizer report"
   ];
   if (PROCEDURAL_ROUTINE_TITLES.some(p => titleLower.includes(p))) {
     return "ROUTINE_COMPLIANCE";
@@ -325,39 +324,48 @@ function getCategoryPrompt(category, ticker, announcementText, investmentThesis 
   const categoryInstructions = {
     RESTRUCTURING: `
 Extract restructurings details (Demergers, Mergers, Spin-Offs):
-- swap_ratio: Exact ratio (e.g. "1 share of Ashok Cloud Ltd for every 1 share of Anant Raj Ltd")
-- entity_split: Names of resulting separate listed/unlisted entities
-- business_divisions: Which verticals go to which entity
-- nclt_sebi_stage: Current approval stage (e.g., Board approval, SEBI approval, NCLT sanction)
-- listing_timeline: Expected listing date/quarter for demerged entity
-- thesis_impact: Qualitative impact on thesis (unlocking value, removing conglomerate discount)
+- scheme_type: Nature of transaction (e.g. Amalgamation / Merger by Absorption, Demerger, Slump Sale)
+- transferor_entity: Entity/subsidiary being merged (with existing ownership % if stated in text)
+- transferee_entity: Resulting parent / operating entity
+- swap_ratio: Exact share exchange ratio explicitly stated in this document (e.g. X shares of transferee for Y shares of transferor)
+- dilution_percentage: Equity dilution percentage or new shares to be issued to public shareholders, if stated
+- financials_absorbed: Turnover and EBITDA or PAT of the merged entity absorbed by the parent (stated with unit; note if figures are in Lakhs or Crores)
+- nclt_sebi_stage: Current approval stage and appointed date
+- approval_horizon_months: Indicative or statutory approval timeline (e.g. NCLT, SEBI/Exchanges & shareholder approvals)
+- strategic_rationale: Stated operational synergies, cost efficiencies, or structural simplification
+- key_omissions_or_risks: Critical missing terms or regulatory approval risks
 `,
     CAPEX_COMMISSIONING: `
 Extract Plant Commissioning & Capacity Expansion details:
-- capacity_added_or_expanded: Added/expanded capacity metrics (e.g., +70%, 40,800 km/yr, MTPA, MW, Units)
-- facility_location: Facility or manufacturing plant location (e.g. Silvassa)
-- phase_details: Phase number and future phase targets (e.g. Phase 1 commissioned; Phase 2 in progress to double capacity)
-- backward_integration_impact: How in-house production impacts gross margins, supply chain, and raw material dependence
-- revenue_and_order_visibility: How expansion supports execution of current order backlog
+- capacity_added_or_expanded: Capacity addition metric with explicit unit from this document
+- facility_location: Manufacturing plant or facility location stated in this document
+- phase_details: Phase number and current operational status stated in this document
+- backward_integration_impact: Operational impact on margins or supply chain independence
+- revenue_and_order_visibility: Stated support for order backlog execution
+- key_omissions_or_risks: Any disclosed capex overruns, gestation period, or trial run conditions
 `,
     CAPITAL_RAISE: `
-Extract Capital Raise details (QIP, Preferential Issue, Rights Issue):
-- issue_price: Issue price per share in ₹
-- total_amount_raised_cr: Total amount raised in ₹ Crores
-- dilution_percentage: Share count dilution %
-- allottees: Key marquee institutional allottees if named
-- use_of_proceeds: Primary usage (CapEx, Debt reduction, Working Capital)
-- price_anchor_assessment: Short-term price impact vs long-term thesis impact
+Extract Capital Raise details (QIP, Preferential Issue, Rights Issue, Subsidiary Infusion):
+- raise_type: Method of issuance (e.g. Rights Issue, QIP, Preferential Allotment, Subsidiary Infusion)
+- target_entity: Entity receiving capital and relationship (e.g. wholly-owned or material subsidiary, or parent company)
+- total_amount_cr: Total capital amount in ₹ Crores explicitly stated in this document
+- cumulative_infused_cr: Cumulative capital infused to date vs approved limit, if stated
+- parent_cash_outflow_cr: Explicit cash outgo from parent balance sheet, if stated
+- shareholding_pct: Post-issue shareholding percentage stated in this document
+- issue_price: Issue price per share and face value stated in this document
+- use_of_proceeds: Stated operational purpose or deployment of funds
+- key_omissions_or_risks: Crucial terms withheld by management (e.g. undisclosed valuation, unstated subscription share, or missing pricing)
 `,
     ORDER_WIN: `
 Extract Order Bagging & Contract Win details:
-- order_value_cr: Total order value in ₹ Crores (e.g. 797)
-- order_breakdown: List of specific domestic vs export contracts, geographies (e.g., Australia, Middle East, India), and client segments
-- scope_and_voltage: Technical scope (voltage classes like 765 kV, products like transmission towers, monopoles, substations)
-- client_name: Client or developer counterparty name if stated
-- execution_period_months: Execution timeframe in months (or "Not Disclosed")
-- revenue_visibility_impact: Estimated impact on annual revenue % or order backlog
-- thesis_relevance: Impact on operating leverage, export mix, and high-margin product mix
+- order_value_cr: Total order or contract value in ₹ Crores explicitly stated in this document
+- order_breakdown: List ONLY positive substantive project components (scope, geography, product lines). NEVER include negative statements like "not disclosed" or "none disclosed".
+- scope_and_voltage: Technical engineering scope explicitly stated in this document
+- client_name: Client, counterparty, or developer name if disclosed, or "Anonymous Developer" if withheld
+- execution_period_months: Execution timeline in months if explicitly stated, else null
+- revenue_visibility_impact: Order scale relative to annual run-rate or order backlog if stated or calculable
+- margin_and_thesis_impact: Product mix characteristics (e.g. higher-margin manufactured items vs generic EPC)
+- key_omissions_or_risks: Red flags or withheld details (e.g. counterparty anonymity, unstated delivery timeline)
 `,
     CAPITAL_RETURN: `
 Extract Capital Return details (Bonus, Split, Buyback, Dividend):
@@ -433,7 +441,7 @@ Rule: Output ONLY a valid JSON object matching this structure:
     /* Put the exact fields requested above in category instruction here */
   }
 }
-If any metric is not disclosed in the text, use string "Not Disclosed". Never hallucinate missing numbers.
+If any metric is not disclosed in the text, use null. NEVER output filler strings like "Not Disclosed" or "None". Never hallucinate missing numbers.
 `;
 }
 
@@ -454,7 +462,6 @@ export async function extractCorporateActionDetails(category, ticker, announceme
 
   const prompt = getCategoryPrompt(category, ticker, cappedText, investmentThesis);
   const ACTIVE_MODELS = [
-    "nvidia/nemotron-3-ultra-550b-a55b",
     "meta/llama-3.2-11b-vision-instruct",
     "openai/gpt-oss-20b",
     "nvidia/nemotron-3-super-120b-a12b"
@@ -506,7 +513,11 @@ export async function extractCorporateActionDetails(category, ticker, announceme
 
       const data = await response.json();
       const content = data.choices[0].message.content;
-      const cleanJson = content.replace(/```json\n?/, "").replace(/\n?```/, "").trim();
+      let cleanJson = content.replace(/```json\n?/, "").replace(/\n?```/, "").trim();
+      const jsonMatch = cleanJson.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        cleanJson = jsonMatch[0];
+      }
       return JSON.parse(cleanJson);
     } catch (err) {
       clearTimeout(timeoutId);

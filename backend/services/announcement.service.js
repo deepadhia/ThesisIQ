@@ -774,6 +774,74 @@ export async function saveAnnouncement({
 
 
 /**
+ * Deterministically extracts upcoming financial results board meeting dates from filing text.
+ * Covers standard Indian exchange phrasing (e.g. "scheduled to be held on Wednesday, October 28, 2026 ... to consider ... Financial Results")
+ * 
+ * @param {string} text 
+ * @returns {string|null} YYYY-MM-DD or null
+ */
+export function extractResultDateFromText(text) {
+  if (!text) return null;
+  const lower = text.toLowerCase();
+  
+  // Must be about financial results & board meeting
+  const hasResults = lower.includes("financial results") || lower.includes("financial statement") || lower.includes("quarterly results") || lower.includes("unaudited financial") || lower.includes("audited financial");
+  const hasBoardMeet = lower.includes("board of directors") || lower.includes("board meeting") || lower.includes("meeting of the board") || lower.includes("inter-alia, to consider") || lower.includes("inter alia to consider");
+  
+  if (!hasResults || !hasBoardMeet) return null;
+
+  const months = {
+    jan: "01", january: "01",
+    feb: "02", february: "02",
+    mar: "03", march: "03",
+    apr: "04", april: "04",
+    may: "05",
+    jun: "06", june: "06",
+    jul: "07", july: "07",
+    aug: "08", august: "08",
+    sep: "09", sept: "09", september: "09",
+    oct: "10", october: "10",
+    nov: "11", november: "11",
+    dec: "12", december: "12"
+  };
+
+  // Pattern 1: "held on [Day,] October 28, 2026" or "scheduled on October 28, 2026"
+  const m1 = text.match(/(?:held\s+on|scheduled\s+(?:to\s+be\s+held\s+)?on|meeting\s+on)\s+(?:(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)[,\s]+)?([A-Za-z]+)\s+(\d{1,2})(?:st|nd|rd|th)?[,\s]+(\d{4})/i);
+  if (m1) {
+    const month = months[m1[1].toLowerCase()];
+    const day = m1[2].padStart(2, "0");
+    const year = m1[3];
+    if (month && year >= "2024" && year <= "2035") {
+      return `${year}-${month}-${day}`;
+    }
+  }
+
+  // Pattern 2: "held on [Day,] 28th October, 2026" or "28 October 2026"
+  const m2 = text.match(/(?:held\s+on|scheduled\s+(?:to\s+be\s+held\s+)?on|meeting\s+on)\s+(?:(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)[,\s]+)?(\d{1,2})(?:st|nd|rd|th)?\s+([A-Za-z]+)[,\s]+(\d{4})/i);
+  if (m2) {
+    const day = m2[1].padStart(2, "0");
+    const month = months[m2[2].toLowerCase()];
+    const year = m2[3];
+    if (month && year >= "2024" && year <= "2035") {
+      return `${year}-${month}-${day}`;
+    }
+  }
+
+  // Pattern 3: "held on 28/10/2026" or "28-10-2026"
+  const m3 = text.match(/(?:held\s+on|scheduled\s+(?:to\s+be\s+held\s+)?on|meeting\s+on)\s+(?:(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)[,\s]+)?(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})/i);
+  if (m3) {
+    const day = m3[1].padStart(2, "0");
+    const month = m3[2].padStart(2, "0");
+    const year = m3[3];
+    if (year >= "2024" && year <= "2035" && parseInt(month) >= 1 && parseInt(month) <= 12) {
+      return `${year}-${month}-${day}`;
+    }
+  }
+
+  return null;
+}
+
+/**
  * Validates date format YYYY-MM-DD.
  */
 export function isValidDate(dateStr) {
@@ -846,66 +914,82 @@ export async function extractTextFromPdfUrl(url) {
     }
   }
 
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 30000); // 30s timeout for PDF download
+  const MAX_ATTEMPTS = 2;
+  let lastErr = null;
 
-  try {
-    console.log(`[PDF] Downloading... ${downloadUrl}`);
-    const response = await fetch(downloadUrl, {
-      headers: {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-      },
-      signal: controller.signal,
-    });
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 30000); // 30s timeout for PDF download
 
-    clearTimeout(timeoutId);
-
-    if (!response.ok) {
-      throw new Error(`Failed to download PDF: ${response.status}`);
-    }
-
-    console.log(`[PDF] Parsing...`);
-    const arrayBuffer = await response.arrayBuffer();
-    const uint8 = new Uint8Array(arrayBuffer);
-
-    // Suppress noisy pdf.js standardFontDataUrl / TT bytecode / getHexString warnings from stdout
-    const origWarn = console.warn;
-    console.warn = (...args) => {
-      const msg = args.join(" ");
-      if (
-        msg.includes("standardFontDataUrl") ||
-        msg.includes("TT: undefined function") ||
-        msg.includes("getHexString") ||
-        msg.includes("Indexing all PDF objects")
-      ) return;
-      origWarn(...args);
-    };
-
-    let data;
     try {
-      const parser = new PDFParse(uint8);
-      data = await parser.getText();
-    } finally {
-      console.warn = origWarn;
-    }
-    
-    // Clean up text: remove extra whitespace and truncate
-    const cleanText = data.text
-      .replace(/\s+/g, ' ')
-      .trim()
-      .substring(0, 60000);
+      if (attempt > 1) {
+        console.log(`[PDF RETRY] Retrying download (attempt ${attempt}/${MAX_ATTEMPTS}): ${downloadUrl}`);
+      } else {
+        console.log(`[PDF] Downloading... ${downloadUrl}`);
+      }
+      
+      const response = await fetch(downloadUrl, {
+        headers: {
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        },
+        signal: controller.signal,
+      });
 
-    console.log(`[PDF] Extracted ${cleanText.length} characters.`);
-    return cleanText;
-  } catch (err) {
-    clearTimeout(timeoutId);
-    if (err.name === "AbortError") {
-      console.warn(`[PDF TIMEOUT] Failed to download PDF within 30s: ${url}`);
-    } else {
-      console.error(`[PDF ERROR] Failed to extract text from ${url}:`, err.message);
+      clearTimeout(timeoutId);
+
+      if (!response.ok) {
+        throw new Error(`Failed to download PDF: ${response.status}`);
+      }
+
+      console.log(`[PDF] Parsing...`);
+      const arrayBuffer = await response.arrayBuffer();
+      const uint8 = new Uint8Array(arrayBuffer);
+
+      // Suppress noisy pdf.js standardFontDataUrl / TT bytecode / getHexString warnings from stdout
+      const origWarn = console.warn;
+      console.warn = (...args) => {
+        const msg = args.join(" ");
+        if (
+          msg.includes("standardFontDataUrl") ||
+          msg.includes("TT: undefined function") ||
+          msg.includes("getHexString") ||
+          msg.includes("Indexing all PDF objects")
+        ) return;
+        origWarn(...args);
+      };
+
+      let data;
+      try {
+        const parser = new PDFParse(uint8);
+        data = await parser.getText();
+      } finally {
+        console.warn = origWarn;
+      }
+      
+      // Clean up text: remove extra whitespace and truncate
+      const cleanText = data.text
+        .replace(/\s+/g, ' ')
+        .trim()
+        .substring(0, 60000);
+
+      console.log(`[PDF] Extracted ${cleanText.length} characters.`);
+      return cleanText;
+    } catch (err) {
+      clearTimeout(timeoutId);
+      lastErr = err;
+      if (attempt < MAX_ATTEMPTS) {
+        console.warn(`[PDF RETRY] Download/parse failed (${err.message}). Waiting 2s before retry...`);
+        await new Promise(r => setTimeout(r, 2000));
+      }
     }
-    return "";
   }
+
+  if (lastErr?.name === "AbortError") {
+    console.warn(`[PDF TIMEOUT] Failed to download PDF within 30s: ${url}`);
+  } else {
+    console.error(`[PDF ERROR] Failed to extract text from ${url}:`, lastErr?.message || "Unknown error");
+  }
+  return "";
 }
 
 /**

@@ -78,6 +78,12 @@ export async function classifyAnnouncementWithNim(ticker, announcementText, titl
     4. CAPITAL ALLOCATION & BALANCE SHEET: List specific actions (QIP details, Debt reduction, Merger terms, Capex outlay, Bonus/Split ratio, Dividend per share) ONLY if explicitly stated in this text. If none, return an empty array [].
     5. STRICT ZERO-HALLUCINATION & ANTI-DUPLICATION RULE: Extract ONLY facts present in this document. NEVER invent figures, company names, or copy example templates. If an event type is not present, return an empty array [].
     6. DYNAMIC UNIT NORMALIZATION: Convert all Lakhs / Millions into standardized INR CRORES (₹ Cr) with explicit labels.
+    7. INSTITUTIONAL DEPTH & RED FLAGS:
+       • For Order Wins: Explicitly note relative scale vs annual revenue/orderbook and highlight margin accretive products (e.g. HTLS reconductoring).
+       • For Capital Raises / Infusions: Distinguish parent cash outgo vs subsidiary inflow, equity dilution %, and operational purpose.
+       • For Restructurings / Mergers: State swap ratio, equity dilution %, absorbed turnover/EBITDA, and regulatory approval horizon.
+       • For key_omissions_or_risks: Identify critical missing information withheld by management (e.g. undisclosed valuation, client anonymity, lack of execution timeline, customer concentration). If none, return null.
+    8. UPCOMING RESULTS DATE: If this filing announces a scheduled Board Meeting date to consider or approve financial results, extract that scheduled meeting date in YYYY-MM-DD format as result_date. Otherwise return null.
 
     Return ONLY a valid JSON object matching this schema:
     {
@@ -95,6 +101,7 @@ export async function classifyAnnouncementWithNim(ticker, announcementText, titl
         "Action Type: Explicit transaction size and terms from this document..."
       ],
       "key_data": "Formatted single summary line of key figures if applicable, else null.",
+      "key_omissions_or_risks": "1 concise sentence identifying critical undisclosed terms or risks, else null",
       "deep_dive_indicator": "1 sharp line detailing the exact thesis risk or catalyst.",
       "thesis_strengthened": "1 sharp line on how this event impacts the core investment thesis.",
       "is_earnings_release": true | false,
@@ -113,7 +120,6 @@ export async function classifyAnnouncementWithNim(ticker, announcementText, titl
 
   const ACTIVE_MODELS = [
     "meta/llama-3.2-11b-vision-instruct",
-    "nvidia/nemotron-3-ultra-550b-a55b",
     "openai/gpt-oss-20b",
     "nvidia/nemotron-3-super-120b-a12b"
   ];
@@ -175,7 +181,11 @@ export async function classifyAnnouncementWithNim(ticker, announcementText, titl
       const content = data.choices[0].message.content;
 
       try {
-        const cleanJson = content.replace(/```json\n?/, "").replace(/\n?```/, "").trim();
+        let cleanJson = content.replace(/```json\n?/, "").replace(/\n?```/, "").trim();
+        const jsonMatch = cleanJson.match(/\{[\s\S]*\}/);
+        if (jsonMatch) {
+          cleanJson = jsonMatch[0];
+        }
         const parsed = JSON.parse(cleanJson);
 
         // Apply Deterministic Financial Extractor & Post-Processing Guard Layer
