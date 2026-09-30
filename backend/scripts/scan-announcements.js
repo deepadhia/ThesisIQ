@@ -14,7 +14,9 @@ import {
   extractTextFromPdfUrl,
   extractResultDateFromText,
   isConcallOrTranscript,
-  getConcallType
+  getConcallType,
+  isNightlyQuietSummaryNeeded,
+  sendNightlyQuietSummary
 } from "../services/announcement.service.js";
 import { classifyAnnouncementWithNim } from "../services/nim.service.js";
 import { classifyFilingCategory, extractCorporateActionDetails } from "../services/filing-classifier.service.js";
@@ -554,6 +556,17 @@ export async function scan({ isDryRun = false, runUrl = null, targetTicker = nul
     });
   } catch (err) {
     console.error("[WARN] Failed to send run summary:", err.message);
+  }
+
+  // ── Nightly quiet-day summary ─────────────────────────────────────────────
+  // Sends once per day at >= 21:00 IST, only when zero Telegram alerts fired.
+  try {
+    if (!isDryRun && await isNightlyQuietSummaryNeeded()) {
+      console.log("[SCAN] Sending nightly quiet-day summary...");
+      await sendNightlyQuietSummary(stocks.length);
+    }
+  } catch (err) {
+    console.error("[WARN] Failed to send nightly quiet summary:", err.message);
   }
 
   return { stocksScanned: stocks.length, newAnnouncements, alertsSent, bseErrors, nseErrors, durationMs };

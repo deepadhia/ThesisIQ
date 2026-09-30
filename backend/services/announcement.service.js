@@ -1,6 +1,7 @@
 import crypto from "crypto";
 import { pool } from "../db/pool.js";
 import { PDFParse } from "pdf-parse";
+import { sendTelegramMessage } from "./telegram.service.js";
 
 const HIGH_KEYWORDS = [
   "order", "contract", "work order", "order win", "loa", "letter of award",
@@ -877,24 +878,62 @@ export async function updateStockResultDate(stockId, resultDate, confidence) {
 }
 
 /**
- * Checks if a heartbeat is needed for today.
+ * Checks if the end-of-day quiet day summary is needed.
+ * Triggered ONLY:
+ * 1. At night (>= 21:00 / 9:00 PM IST)
+ * 2. If ZERO alerts were sent to Telegram the entire day
+ * 3. Has NOT already been sent today
  */
-export async function isHeartbeatNeeded() {
-  const res = await pool.query("SELECT value FROM system_settings WHERE key = 'last_heartbeat_at'");
-  const lastHeartbeat = res.rows[0]?.value;
-  const today = new Date().toISOString().split('T')[0];
-  return lastHeartbeat !== today;
+export async function isNightlyQuietSummaryNeeded() {
+  const now = new Date();
+  const istHour = parseInt(now.toLocaleString("en-US", { timeZone: "Asia/Kolkata", hour: 'numeric', hour12: false }), 10);
+  if (istHour < 21) return false;
+
+  const todayIst = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata" }).format(now);
+  
+  // Check if already sent today
+  const res = await pool.query("SELECT value FROM system_settings WHERE key = 'last_nightly_summary_at'");
+  const lastSent = res.rows[0]?.value ? (typeof res.rows[0].value === 'string' ? res.rows[0].value.replace(/"/g, '') : res.rows[0].value) : null;
+  if (lastSent === todayIst) return false;
+
+  // Check if any alerts were sent to Telegram today
+  const alertRes = await pool.query(
+    `SELECT COUNT(*) FROM corporate_announcements 
+     WHERE sent_to_telegram = true 
+       AND (processed_at AT TIME ZONE 'Asia/Kolkata')::date = $1::date`,
+    [todayIst]
+  );
+  const count = parseInt(alertRes.rows[0]?.count || 0, 10);
+  return count === 0;
 }
 
 /**
- * Marks today's heartbeat as sent.
+ * Sends the single nightly quiet day summary to Telegram and marks it as sent.
  */
-export async function markHeartbeatSent() {
-  const today = new Date().toISOString().split('T')[0];
+export async function sendNightlyQuietSummary(stocksCount) {
+  const now = new Date();
+  const todayIst = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata" }).format(now);
+  const dateFormatted = now.toLocaleDateString("en-IN", { timeZone: "Asia/Kolkata", weekday: 'short', day: '2-digit', month: 'short', year: 'numeric' });
+  const timestamp = now.toLocaleTimeString("en-IN", { timeZone: "Asia/Kolkata", hour: '2-digit', minute: '2-digit', hour12: true });
+
+  let message = `🌙 *DAILY ANNOUNCEMENT SCANNER STATUS*\n`;
+  message    += `──────────────────────────────\n`;
+  message    += `• *Monitored Coverage:* ${stocksCount} stocks (BSE & NSE)\n`;
+  message    += `• *Today's Alerts:* 0 material / price-sensitive events\n`;
+  message    += `• *Status:* Clean run — all routine filings processed & archived\n`;
+  message    += `• *System Health:* Active 24/7 daemon operating normally\n`;
+  message    += `──────────────────────────────\n`;
+  message    += `🕐 ${timestamp} IST (${dateFormatted})`;
+
+  await sendTelegramMessage(message);
+
   await pool.query(
-    "UPDATE system_settings SET value = $1, updated_at = NOW() WHERE key = 'last_heartbeat_at'",
-    [JSON.stringify(today)]
+    `INSERT INTO system_settings (key, value, updated_at) 
+     VALUES ('last_nightly_summary_at', $1, NOW()) 
+     ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
+    [JSON.stringify(todayIst)]
   );
+  console.log("[SUMMARY] Sent nightly quiet day summary to Telegram.");
 }
 
 
