@@ -146,17 +146,45 @@ PRICE → / ↑   │ HOLD /                       │ REVALIDATE /             
 
 ---
 
+## 🎯 Asymmetric Valuation Dislocation Watchdog (v4.2)
+
+The **Asymmetric Valuation Dislocation Watchdog** operates as an automated, market-hours surveillance engine designed to detect genuine institutional entry dislocations without falling into de-rating traps:
+
+### 1. Dual-Trigger Qualification (Approach A)
+Candidates must qualify under rigorous institutional criteria:
+* **Economic Engine:** `PROVEN` or `EMERGING` operating track record with intact/strengthening thesis.
+* **Cash Flow & Balance Sheet Risk Controls:** Statutory cash flow conversion ($\text{CFO/PAT} \ge 0.70$), low leverage ($\text{D/E} \le 0.60$), and healthy working capital cycle.
+* **3-Year Base Case Compounding IRR:** Evaluates intrinsic value growth over a 36-month fundamental compounding horizon:
+  $$\text{Target}_{\text{3Yr}} = \text{FairValue} \times (1 + \text{CAGR})^3 \implies \text{IRR}_{\text{3Yr}} = \left(\frac{\text{Target}_{\text{3Yr}}}{\text{CMP}}\right)^{1/3} - 1 \ge 20\%$$
+* **Qualification Legs:**
+  * **Leg A (Institutional MoS & Compounding Hurdle):** Margin of Safety $\ge 20.0\%$ to DCF Fair Value **AND** 3Y Compounding IRR $\ge 20.0\%$.
+  * **Leg B (Deep Price Dislocation):** Current Price $\le \text{BuyBelow}$ **OR** Asymmetry Ratio $\ge 2.0:1$ **OR** 3Y Asymmetry $\ge 3.0:1$.
+
+### 2. Market-Hours Timing & Exchange Holiday Guard
+* **Midday Market-Hours Execution (1:00 PM IST):** Watchdog evaluates the portfolio daily at `13:00 IST` (`07:30 UTC` Mon–Fri) during active market hours, capturing intraday price pullbacks and 200 EMA confluence tests.
+* **Dynamic Exchange Holiday Guard (`market-holidays.service.js`):**
+  * Ingests official trading holidays dynamically from the National Stock Exchange (NSE) API (`https://www.nseindia.com/api/holiday-master?type=trading`).
+  * Normalizes and persists holidays into PostgreSQL (`system_settings`), maintaining an in-memory sub-millisecond cache.
+  * Automatically suppresses runs, alerts, and live market data scraping on exchange holidays (e.g. Mahatma Gandhi Jayanti, Diwali, Holi) and weekends.
+  * Seamless fail-safe offline fallback to verified static baseline if network or exchange API is unavailable.
+* **7-Day Anti-Spam Cooldown:** Thread-safe idempotency prevents repetitive alert noise for the same ticker within a 7-day window.
+
+---
+
 ## 🧪 Invariant Test Coverage
 
-ThesisIQ enforces strict mathematical invariant test suites with **100% pass rate (574 / 574 tests passing)**:
+ThesisIQ enforces strict mathematical invariant test suites with **100% pass rate (614 / 614 tests passing)**:
 
 | Test Suite | File | Tests Passed | Key Invariants Verified |
 | :--- | :--- | :---: | :--- |
+| **v4.2 Valuation Dislocation Watchdog** | `backend/scripts/test-valuation-dislocation-watchdog.js` | **29 / 29 PASS** | Gate 6 Dual-Trigger, 3Y Compounding IRR, 7-Day Cooldown, Market Closed Guard |
+| **NSE/BSE Market Holiday Calendar** | `backend/tests/market-holidays.test.js` | **7 / 7 PASS** | Dynamic NSE Ingestion, DB Upsert/Load, Weekend Check, UTC-to-IST Mapping |
+| **Institutional Alert Formatting** | `backend/tests/alert-formatting.test.js` | **4 / 4 PASS** | Standard Headers, 30-Char Dividers, Zero Invalid Markdown, Entity Parsing Fallback |
 | **v4.1 Duration & Capital Deployment** | `backend/scripts/test-v4-duration-intelligence.js` | **22 / 22 PASS** | 7 Deployment States, Dual Triggers, 2x2 Matrix Invariants, Milestone & Next-Leg Gates |
 | **v3.1.1 Reverse DCF & FCFF Integrity** | `backend/scripts/test-reverse-dcf-v3-integrity.js` | **63 / 63 PASS** | FCFF Accounting Identity, Forward iROIC, Dual Bear Floors, Asymmetry Ratios |
 | **v3.2 Fundamental Trajectory & Ledger** | `backend/scripts/test-fundamental-trajectory-engine.js` | **279 / 279 PASS** | Promise Ledger Schema, Dynamic Credibility Derivation, Database Adapter, Multi-Engine Vectors |
 | **v3.3.1 Market-Thesis Reconciliation** | `backend/scripts/test-market-thesis-reconciliation.js` | **210 / 210 PASS** | 9-State Taxonomy, Sequential Scenario Bridge, 7-Gap Deconstruction |
-| **TOTAL VERIFIED COVERAGE** | | **574 / 574 PASS** | **100% Mathematical & Invariant Safety** |
+| **TOTAL VERIFIED COVERAGE** | | **614 / 614 PASS** | **100% Mathematical & Invariant Safety** |
 
 ---
 
@@ -174,14 +202,22 @@ node --env-file=.env.local backend/scripts/run-duration-compounder-backtest.js
 ```
 Generates walk-forward backtest audit at `reports/thesis_board/DURATION_COMPOUNDER_BACKTEST_AUDIT.md`.
 
-### 3. Run Fundamental Trajectory & Management Evidence Engine
+### 3. Run Midday Market-Hours Valuation Dislocation Watchdog
 ```bash
-node --env-file=.env.local backend/scripts/run-fundamental-trajectory-engine.js
+node --env-file=.env.local backend/scripts/run-daily-valuation-watchdog.js
+# Or simulate without sending live Telegram alerts:
+node --env-file=.env.local backend/scripts/run-daily-valuation-watchdog.js --dry-run
 ```
-Generates fundamental trajectory dossier at `reports/thesis_board/FUNDAMENTAL_TRAJECTORY_DOSSIER_V3_2.md`.
 
-### 4. Run Invariant Test Suites
+### 4. Sync Dynamic NSE/BSE Market Holidays
 ```bash
+node --env-file=.env.local backend/scripts/sync-market-holidays.js
+```
+
+### 5. Run Invariant Test Suites
+```bash
+npx vitest run
+node --env-file=.env.local backend/scripts/test-valuation-dislocation-watchdog.js
 node --env-file=.env.local backend/scripts/test-v4-duration-intelligence.js
 node --env-file=.env.local backend/scripts/test-market-thesis-reconciliation.js
 node --env-file=.env.local backend/scripts/test-fundamental-trajectory-engine.js

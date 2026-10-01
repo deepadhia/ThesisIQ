@@ -1,5 +1,30 @@
 # Changelog
 
+## [v4.2.0] - 2026-10-01 (Asymmetric Valuation Dislocation Watchdog, Midday Market-Hours Engine & Dynamic NSE Holiday Ingestion)
+
+### Added
+- **Asymmetric Valuation Dislocation Watchdog (`valuation-dislocation-watchdog.service.js`)**:
+  - Continuous automated surveillance engine evaluating the audited portfolio against the Dual-Lens Valuation Architecture.
+  - Implements calibrated 3-Year Base Case Compounding IRR over fundamental investment horizon: $\text{Target}_{\text{3Yr}} = \text{FairValue} \times (1 + \text{CAGR})^3$.
+  - Dual-Leg Qualification (Approach A): Leg A (MoS $\ge 20\%$, 3Y Compounding IRR $\ge 20\%$, clean balance sheet $\text{D/E} \le 0.60$, $\text{CFO/PAT} \ge 0.70$) OR Leg B (Deep Price Dislocation $\text{Price} \le \text{BuyBelow}$ or Asymmetry $\ge 2.0:1$).
+  - Thread-safe 7-day anti-spam cooldown suppressing repetitive alert noise for the same ticker.
+- **Midday Market-Hours Workflow (`midday-valuation-watchdog.yml`)**:
+  - Scheduled daily at `13:00 IST` (`07:30 UTC` Monday–Friday) during active market hours to sync live market prices and audit intraday dislocations.
+- **Dynamic NSE/BSE Market Holiday Calendar Service (`market-holidays.service.js`)**:
+  - Ingests official exchange trading holidays dynamically from National Stock Exchange (`https://www.nseindia.com/api/holiday-master?type=trading`).
+  - Persists holiday schedule into PostgreSQL (`system_settings` table) and maintains sub-millisecond in-memory cache.
+  - Fail-safe fallback to multi-year static calendar on network or HTTP 403 blocks.
+  - Market Open Guard (`isMarketOpenDay`): Suppresses watchdog execution, alerts, and live market price scraping on weekends and exchange holidays (e.g. Oct 2 Mahatma Gandhi Jayanti).
+  - Production CLI runner: `node backend/scripts/sync-market-holidays.js`.
+  - Added Step 5c to `run-nightly-reconciliation.js` to automatically sync holidays every night.
+- **Institutional Telegram Alert Formatting Standards**:
+  - Standardized layout across all alerts: `🏢 *TICKER* | Company Name`, `📢 *Event:* ...`, uniform 30-character divider `──────────────────────────────`, zero double asterisks, clean Markdown escaping, and resilient entity fallback.
+- **Expanded Invariant Test Suites**:
+  - `backend/tests/market-holidays.test.js`: 7 passing invariant tests for holiday calendar and date parsing.
+  - `backend/tests/alert-formatting.test.js`: 4 passing invariant tests for layout, dividers, and formatting.
+  - `backend/scripts/test-valuation-dislocation-watchdog.js`: 29 passing invariant tests for Gate 6, compounding IRR, cooldown, and holiday skip guard.
+  - Total test coverage: **614 / 614 passing assertions**.
+
 ## [v4.1.0] - 2026-09-20 (Transition Compounder, Duration Intelligence & Capital Deployment Action Layer)
 
 ### Added
