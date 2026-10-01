@@ -1,9 +1,8 @@
 name: 🎯 Midday Market-Hours Valuation Watchdog (1:00 PM IST)
 
 on:
-  schedule:
-    # Run every weekday (Monday-Friday) at 07:30 UTC = 13:00 IST (1:00 PM IST during live market hours)
-    - cron: '30 7 * * 1-5'
+  # schedule: DISABLED — now triggered by Oracle server crontab (30 7 * * 1-5 UTC = 13:00 IST)
+  # Keeping workflow_dispatch for manual reruns from GitHub UI only
   workflow_dispatch:
     inputs:
       dry_run:

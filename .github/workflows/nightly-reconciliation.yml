@@ -1,9 +1,8 @@
 name: 🌙 Nightly Reconciliation & Valuation Watchdog
 
 on:
-  schedule:
-    # Run every weekday (Monday-Friday) at 12:45 UTC (18:15 IST) after Indian market close
-    - cron: '45 12 * * 1-5'
+  # schedule: DISABLED — now triggered by Oracle server crontab (45 12 * * 1-5 UTC = 18:15 IST)
+  # Keeping workflow_dispatch for manual reruns from GitHub UI only
   workflow_dispatch:
     inputs:
       dry_run:
