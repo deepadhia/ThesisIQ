@@ -191,10 +191,28 @@ async function runWatchdogTestSuite() {
   // Clear any existing dry run emitted records to test clean first run
   await pool.query("DELETE FROM valuation_dislocation_alerts WHERE notification_status = 'DRY_RUN_EMITTED';");
 
-  // First Run (Dry-run): Evaluates all 18 holdings
-  const run1 = await evaluateAndDispatchDislocationAlerts({ pool, isDryRun: true });
+  // First Run (Dry-run with forceAlert to test full ranking & qualification regardless of runner time)
+  const run1 = await evaluateAndDispatchDislocationAlerts({ pool, isDryRun: true, forceAlert: true });
   assert(run1.evaluatedCount === 18, 'Evaluated all 18 holdings');
   assert(run1.dislocationsFound >= 0, `Correctly evaluated dislocation candidates (Found: ${run1.dislocationsFound})`);
+
+  // -------------------------------------------------------------------------
+  // Test 5: Market Closed & Exchange Holiday Guard Invariants
+  // -------------------------------------------------------------------------
+  console.log('\n--- 5. Testing Market Closed & Exchange Holiday Guard ---');
+  const { isMarketOpenDay, getMarketHolidayDetails } = await import('../services/market-holidays.service.js');
+  
+  // Verify tomorrow 2026-10-02 (Mahatma Gandhi Jayanti) is recognized as market closed
+  const tomorrowHoliday = getMarketHolidayDetails('2026-10-02T13:00:00+05:30');
+  assert(tomorrowHoliday.isHoliday === true, 'Tomorrow 2026-10-02 is detected as Gandhi Jayanti');
+  assert(isMarketOpenDay('2026-10-02T13:00:00+05:30') === false, 'Market open check returns false on Gandhi Jayanti');
+
+  // Verify weekend detection
+  assert(isMarketOpenDay('2026-10-03T13:00:00+05:30') === false, 'Market open check returns false on Saturday');
+  assert(isMarketOpenDay('2026-10-04T13:00:00+05:30') === false, 'Market open check returns false on Sunday');
+
+  // Verify normal trading day
+  assert(isMarketOpenDay('2026-10-05T13:00:00+05:30') === true, 'Market open check returns true on Monday');
 
   // Clean up test records
   await pool.query(`DELETE FROM valuation_dislocation_alerts WHERE ticker LIKE 'TEST_%';`);

@@ -78,6 +78,24 @@ export async function sendTelegramMessage(text) {
     if (!response.ok) {
       const errorData = await response.json();
       console.error("[TELEGRAM ERROR] API failed:", errorData);
+
+      // Resilient fallback: If Telegram Markdown parsing fails due to unescaped characters, retry cleanly
+      if (errorData.description && errorData.description.includes("can't parse entities")) {
+        console.warn("[TELEGRAM WARN] Retrying alert dispatch without Markdown parse_mode due to entity parsing error...");
+        const fallbackRes = await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            chat_id: TELEGRAM_CHAT_ID,
+            text: text.replace(/[*_`\[\]]/g, ""),
+            disable_web_page_preview: true,
+          }),
+        });
+        if (fallbackRes.ok) {
+          return await fallbackRes.json();
+        }
+      }
+
       throw new Error(`Telegram API error: ${errorData.description}`);
     }
 
@@ -184,11 +202,12 @@ function formatToBullets(text) {
   return `• ${cleaned}`;
 }
 
-function cleanCompanyName(name) {
+export function cleanCompanyName(name) {
   if (!name) return "";
   return name
     .replace(/\s+share\s+price\s*$/i, "")
-    .replace(/\s+ltd\b\.?/i, " Ltd")
+    .replace(/\s+(?:ltd|limited)\b\.?/gi, " Ltd")
+    .replace(/\s+ltd\s+ltd/gi, " Ltd")
     .trim();
 }
 
@@ -669,7 +688,7 @@ export async function sendRunSummary({
   else                           status = "🔵 Clean run — no new announcements";
 
   let message = `📊 *DAILY PROCESSOR SCAN SUMMARY* ${isDryRun ? "_(DRY RUN)_" : ""}\n`;
-  message    += `────────────────────────────────────────────\n`;
+  message    += `──────────────────────────────\n`;
   message    += `🏢 *Stocks Scanned:* ${stocksScanned}\n`;
   message    += `📋 *New Filings Found:* ${newAnnouncements}\n`;
   message    += `📣 *Alerts Dispatched:* ${alertsSent}\n`;
@@ -697,7 +716,7 @@ export async function sendRunSummary({
     message += `\n📄 [View Workflow Run →](${runUrl})\n`;
   }
 
-  message += `────────────────────────────────────────────\n`;
+  message += `──────────────────────────────\n`;
   message += `_🕐 ${timestamp}_`;
 
   return sendTelegramMessage(message);
@@ -716,10 +735,11 @@ export async function sendConcallDiscrepancyAlert({
   docUrl
 }) {
   const timestamp = getIstTimestamp();
-  const companyHeader = companyName ? `${ticker.toUpperCase()} (${companyName})` : ticker.toUpperCase();
-  let message = `⚠️ *${companyHeader}*\n`;
-  message += `*Event:* Forensic Concall Audit | *Severity:* ${discrepancyScore}/10 🚨\n`;
-  message += `────────────────────────────────────────────\n`;
+  const cleanedCompany = cleanCompanyName(companyName);
+  const companyHeader = cleanedCompany ? `*${ticker.toUpperCase()}* | ${cleanedCompany}` : `*${ticker.toUpperCase()}*`;
+  let message = `🏢 ${companyHeader}\n`;
+  message += `🚨 *Event:* Forensic Concall Audit • *Severity:* ${discrepancyScore}/10\n`;
+  message += `──────────────────────────────\n`;
   message += `🔍 *AUDIT SUMMARY*\n${formatToBullets(summaryVerdict)}\n\n`;
 
   if (discrepancies && discrepancies.length > 0) {
@@ -736,7 +756,7 @@ export async function sendConcallDiscrepancyAlert({
   if (docUrl) {
     message += `📄 [View Official Transcript Filing →](${docUrl})\n`;
   }
-  message += `────────────────────────────────────────────\n`;
+  message += `──────────────────────────────\n`;
   message += `_Institutional Forensic Concall Audit • 🕐 ${timestamp}_`;
 
   return sendTelegramMessage(message);

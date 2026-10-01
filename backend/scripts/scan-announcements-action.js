@@ -45,11 +45,16 @@ if (notifyStart) {
   }).toUpperCase();
 
   try {
-    await sendTelegramMessage(
-      `🚀 *Scanner Starting* ${isDryRun ? "_(DRY RUN)_" : ""}\n\n` +
-      `Announcement scan triggered at ${istTime} IST.\n` +
-      (runUrl ? `[View Run →](${runUrl})` : "")
-    );
+    let startMsg = `🚀 *SCANNER TRIGGERED* ${isDryRun ? "_(DRY RUN)_" : ""}\n`;
+    startMsg += `──────────────────────────────\n`;
+    startMsg += `🕐 *Trigger Time:* ${istTime} IST\n`;
+    startMsg += `📡 *Environment:* GitHub Actions Runner\n`;
+    if (runUrl) {
+      startMsg += `📄 [View Workflow Run →](${runUrl})\n`;
+    }
+    startMsg += `──────────────────────────────\n`;
+    startMsg += `_ThesisIQ Automated Filing Scanner_`;
+    await sendTelegramMessage(startMsg);
   } catch (err) {
     // Non-fatal — don't let a start notification failure abort the scan
     console.warn("[WARN] Could not send start notification:", err.message);

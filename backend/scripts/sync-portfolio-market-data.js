@@ -13,8 +13,23 @@ import dotenv from 'dotenv';
 dotenv.config({ path: './.env.local' });
 import { pool } from '../db/pool.js';
 import { syncAllPortfolioValuations } from '../services/portfolio-market-valuation.service.js';
+import { isMarketOpenDay, getMarketHolidayDetails } from '../services/market-holidays.service.js';
 
 async function main() {
+  const forceSync = process.argv.includes('--force');
+
+  // Market Open Guard: Skips sync on weekends and official NSE/BSE holidays unless forced
+  if (!forceSync && !isMarketOpenDay()) {
+    const { isHoliday, holidayName, dateYmd } = getMarketHolidayDetails();
+    const reason = isHoliday ? `Official Market Holiday: ${holidayName}` : `Weekend`;
+    console.log('========================================================================================');
+    console.log(`⏸️  MARKET CLOSED GUARD: ${dateYmd} (${reason})`);
+    console.log('Indian stock exchanges (NSE/BSE) are closed. Live market data sync skipped.');
+    console.log('(Pass --force to override holiday check)');
+    console.log('========================================================================================\n');
+    return;
+  }
+
   console.log('========================================================================================');
   console.log('🛡️  PORTFOLIO LIVE MARKET DATA SYNCHRONIZATION & MATHEMATICAL AUDIT');
   console.log('========================================================================================\n');

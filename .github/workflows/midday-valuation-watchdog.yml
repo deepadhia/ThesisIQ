@@ -1,0 +1,49 @@
+name: 🎯 Midday Market-Hours Valuation Watchdog (1:00 PM IST)
+
+on:
+  schedule:
+    # Run every weekday (Monday-Friday) at 07:30 UTC = 13:00 IST (1:00 PM IST during live market hours)
+    - cron: '30 7 * * 1-5'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run (simulate without Telegram alerts)'
+        type: boolean
+        default: false
+      force:
+        description: 'Force alert (bypass 7-day anti-spam cooldown)'
+        type: boolean
+        default: false
+
+concurrency:
+  group: midday-valuation-watchdog
+  cancel-in-progress: false
+
+jobs:
+  watchdog:
+    name: Market-Hours Valuation Watchdog
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci --omit=dev --ignore-scripts
+
+      - name: Sync Live Prices & Run Midday Valuation Watchdog
+        env:
+          DATABASE_URL:        ${{ secrets.DATABASE_URL }}
+          JWT_SECRET:          ${{ secrets.JWT_SECRET }}
+          TELEGRAM_BOT_TOKEN:  ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:    ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          node backend/scripts/sync-portfolio-market-data.js
+          node backend/scripts/run-daily-valuation-watchdog.js ${{ inputs.dry_run && '--dry-run' || '' }} ${{ inputs.force && '--force' || '' }}

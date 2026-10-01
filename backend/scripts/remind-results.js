@@ -279,7 +279,7 @@ export async function checkAndSendReminders({ isDryRun = false } = {}) {
 
   // 2. Fetch all stocks with next results date
   const { rows: stocks } = await pool.query(
-    "SELECT id, ticker, next_results_date FROM stocks WHERE next_results_date IS NOT NULL"
+    "SELECT id, ticker, company_name, next_results_date FROM stocks WHERE next_results_date IS NOT NULL"
   );
 
   // Get local YYYY-MM-DD for today timezone-safely
@@ -298,6 +298,12 @@ export async function checkAndSendReminders({ isDryRun = false } = {}) {
     const diffDays = getDaysDifference(resultDateStr, todayYmd);
     let message = null;
 
+    const cleanedCompany = (stock.company_name || stock.ticker)
+      .replace(/\s+share\s+price\s*$/i, "")
+      .replace(/\s+ltd\b\.?/i, " Ltd")
+      .trim();
+    const companyHeader = cleanedCompany ? `*${stock.ticker.toUpperCase()}* | ${cleanedCompany}` : `*${stock.ticker.toUpperCase()}*`;
+
     if (diffDays === 3) {
       // Skip if results were already published (e.g. published early)
       const hasResults = await checkResultsPublished(stock.id, stock.next_results_date);
@@ -305,7 +311,14 @@ export async function checkAndSendReminders({ isDryRun = false } = {}) {
         console.log(`[SKIP] Skipped upcoming reminder for ${stock.ticker} (diffDays=3) because results were already published.`);
         continue;
       }
-      message = `📅 *Upcoming Result Reminder*\n\n*${stock.ticker}* will publish its results in *3 days* (${resultDateStr}).`;
+      message = `📅 *UPCOMING EARNINGS CALENDAR*\n` +
+        `🏢 ${companyHeader}\n` +
+        `──────────────────────────────\n` +
+        `📢 *Event:* Board Meeting for Financial Results\n` +
+        `🗓️ *Scheduled Date:* ${resultDateStr} (in 3 days)\n` +
+        `🎯 *Status:* Pre-Result Stance Active\n` +
+        `──────────────────────────────\n` +
+        `_Auto-monitoring BSE/NSE feeds for financial results & concall intimation._`;
     } else if (diffDays === 1) {
       // Skip if results were already published
       const hasResults = await checkResultsPublished(stock.id, stock.next_results_date);
@@ -313,7 +326,14 @@ export async function checkAndSendReminders({ isDryRun = false } = {}) {
         console.log(`[SKIP] Skipped upcoming reminder for ${stock.ticker} (diffDays=1) because results were already published.`);
         continue;
       }
-      message = `📅 *Upcoming Result Reminder*\n\n*${stock.ticker}* will publish its results *TOMORROW* (${resultDateStr}).`;
+      message = `📅 *UPCOMING EARNINGS CALENDAR*\n` +
+        `🏢 ${companyHeader}\n` +
+        `──────────────────────────────\n` +
+        `📢 *Event:* Board Meeting for Financial Results\n` +
+        `🗓️ *Scheduled Date:* *TOMORROW* (${resultDateStr})\n` +
+        `⚡ *Watch Items:* YoY/QoQ revenue growth, EBITDA margin resilience, order intake\n` +
+        `──────────────────────────────\n` +
+        `_Stage 1 Flash note will trigger automatically upon exchange publication._`;
     } else if (diffDays === 0) {
       // Skip if results were already published
       const hasResults = await checkResultsPublished(stock.id, stock.next_results_date);
@@ -321,7 +341,14 @@ export async function checkAndSendReminders({ isDryRun = false } = {}) {
         console.log(`[SKIP] Skipped upcoming reminder for ${stock.ticker} (diffDays=0) because results were already published.`);
         continue;
       }
-      message = `🚨 *RESULT DAY TODAY*\n\n*${stock.ticker}* is scheduled to publish its results *TODAY*. Watch out for the announcements!`;
+      message = `🚨 *EARNINGS RELEASE EXPECTED TODAY*\n` +
+        `🏢 ${companyHeader}\n` +
+        `──────────────────────────────\n` +
+        `📢 *Event:* Quarterly Results Board Meeting\n` +
+        `🗓️ *Scheduled Date:* *TODAY* (${resultDateStr})\n` +
+        `🎯 *System Status:* High-priority scanner active on BSE/NSE corporate feeds\n` +
+        `──────────────────────────────\n` +
+        `_Stage 1 Flash note will dispatch immediately upon filing receipt._`;
     } else if (diffDays === -1) {
       // 3a. Verify results are actually published for post-result review
       const hasResults = await checkResultsPublished(stock.id, stock.next_results_date);
@@ -329,7 +356,14 @@ export async function checkAndSendReminders({ isDryRun = false } = {}) {
         console.log(`[SKIP] Skipped review reminder for ${stock.ticker} (diffDays=-1): No earnings release found around ${resultDateStr}.`);
         continue;
       }
-      message = `📋 *Post-Result Review Action*\n\n*${stock.ticker}* results were published *yesterday*. Have you reviewed the numbers and updated the thesis?`;
+      message = `📋 *POST-RESULT REVIEW ACTION*\n` +
+        `🏢 ${companyHeader}\n` +
+        `──────────────────────────────\n` +
+        `📢 *Event:* Results Published Yesterday (${resultDateStr})\n` +
+        `🔍 *Audit Action:* Review Stage 1 Flash numbers against management commitments\n` +
+        `🎯 *Decision Gate:* Verify if thesis assumptions hold or concall queries need tracking\n` +
+        `──────────────────────────────\n` +
+        `_ThesisIQ Post-Earnings Governance_`;
     } else if (diffDays === -3) {
       // 3b. Verify results are actually published for final post-result reminder
       const hasResults = await checkResultsPublished(stock.id, stock.next_results_date);
@@ -337,7 +371,13 @@ export async function checkAndSendReminders({ isDryRun = false } = {}) {
         console.log(`[SKIP] Skipped final reminder for ${stock.ticker} (diffDays=-3): No earnings release found around ${resultDateStr}.`);
         continue;
       }
-      message = `📋 *Final Post-Result Reminder*\n\n*${stock.ticker}* results were published *3 days ago*. Time to make a decision or update the system.`;
+      message = `📋 *FINAL POST-RESULT REMINDER*\n` +
+        `🏢 ${companyHeader}\n` +
+        `──────────────────────────────\n` +
+        `📢 *Event:* Results Published 3 Days Ago (${resultDateStr})\n` +
+        `🔍 *Audit Action:* Finalize quarterly thesis rating, forward IRR, and allocation posture\n` +
+        `──────────────────────────────\n` +
+        `_ThesisIQ Portfolio Governance_`;
     }
 
     if (message) {

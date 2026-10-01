@@ -944,11 +944,19 @@ export function calculateThesisIqScorecard(equity = {}) {
   const downsideRupees = Math.max(1.0, currentPrice - bearFloorPrice);
   const asymmetryRatio = parseFloat((netUpsideRupees / downsideRupees).toFixed(2));
 
-  // 12. Projected 3-Year Base Case IRR (% p.a. to Fair Value over 36 months)
+  // 12. Projected 3-Year Base Case Compounding IRR (% p.a. over 36-month fundamental compounding horizon)
+  // In an institutional compounding model, Fair Value compounds at the underwritten NOPAT CAGR:
+  // Target_3Yr = FairValue * (1 + CAGR)^3
+  // 3Y Compounding IRR = (Target_3Yr / CMP)^(1/3) - 1
+  const fairValue3Yr = parseFloat((fairValuePrice * Math.pow(1.0 + (underwrittenNopatCagr / 100.0), 3.0)).toFixed(2));
   let projected3YrIrr = 0.0;
-  if (currentPrice > 0 && fairValuePrice > 0) {
-    projected3YrIrr = parseFloat(((Math.pow(fairValuePrice / currentPrice, 1.0 / 3.0) - 1.0) * 100.0).toFixed(1));
+  if (currentPrice > 0 && fairValue3Yr > 0) {
+    projected3YrIrr = parseFloat(((Math.pow(fairValue3Yr / currentPrice, 1.0 / 3.0) - 1.0) * 100.0).toFixed(1));
   }
+
+  // 12b. 3-Year Compounding Asymmetry: (3Yr Target - CMP) / (CMP - Bear Floor)
+  const netUpside3YrRupees = Math.max(0.0, fairValue3Yr - currentPrice);
+  const asymmetry3YrRatio = parseFloat((netUpside3YrRupees / downsideRupees).toFixed(2));
 
   // 13. Margin of Safety at Current Price
   const marginOfSafetyPct = parseFloat((((fairValuePrice - currentPrice) / fairValuePrice) * 100.0).toFixed(1));
@@ -967,8 +975,8 @@ export function calculateThesisIqScorecard(equity = {}) {
   else economicConviction = 'LOW';
 
   let valuationConviction = 'FAIR_VALUE';
-  if (asymmetryRatio >= 3.0 && marginOfSafetyPct >= 25.0 && projected3YrIrr >= 20.0) valuationConviction = 'DEEP_DISLOCATION';
-  else if (asymmetryRatio >= 1.5 && marginOfSafetyPct >= 15.0) valuationConviction = 'ATTRACTIVE';
+  if ((asymmetryRatio >= 3.0 || asymmetry3YrRatio >= 3.0) && marginOfSafetyPct >= 20.0 && projected3YrIrr >= 20.0) valuationConviction = 'DEEP_DISLOCATION';
+  else if ((asymmetryRatio >= 1.5 || asymmetry3YrRatio >= 2.0) && marginOfSafetyPct >= 15.0) valuationConviction = 'ATTRACTIVE';
   else if (currentPE > 60.0 || marginOfSafetyPct < -40.0) valuationConviction = 'EXTREME';
   else if (currentPrice > fairValuePrice * 1.15) valuationConviction = 'OVERVALUED';
   else valuationConviction = 'FAIR_VALUE';
@@ -981,12 +989,14 @@ export function calculateThesisIqScorecard(equity = {}) {
 
   return {
     fairValuePrice,
+    fairValue3Yr,
     bearFloorPrice,
     dcfBearFloor: dualBear.dcfBearFloor,
     multipleStressFloor: dualBear.multipleStressFloor,
     buyBelowPrice,
     trimAbovePrice,
     asymmetryRatio,
+    asymmetry3YrRatio,
     projected3YrIrr,
     marginOfSafetyPct,
     effectiveIroic,
@@ -1196,16 +1206,27 @@ export function evaluateEquityMispricing(auditedEquity) {
     strategicActionNarrative = `COMPOUNDING AT FAIR PRICE (UNDER REVALIDATION): Valuation Conviction is DEEP_DISLOCATION (${scorecard.asymmetryRatio}:1, MoS ${scorecard.marginOfSafetyPct}%), but Economic Conviction is LOW due to recent working capital/cash friction. Action: MONITOR (Do not accumulate until WC normalizes).`;
   }
   // Gate 6: Top Conviction Dislocation (ACCUMULATE)
-  // Triggered when Price is in Buy Below zone OR strict mathematical hurdles (>= 3:1 Asym, >= 25% MoS, >= 20% 3Y IRR) are satisfied
+  // Triggered under Approach A (Dual-Trigger Institutional Dislocation):
+  // - Economic Engine: PROVEN or EMERGING
+  // - Thesis: STRENGTHENING or INTACT
+  // - Evidence Recency: Not STALE
+  // - Balance Sheet Risk Controls: Clean cash flow & balance sheet (CFO/PAT >= 0.70 or D/E <= 0.60 or Net Cash)
+  // - Dislocation Trigger (either Leg A or Leg B):
+  //   Leg A (Institutional MoS & Compounding Hurdle): Margin of Safety >= 20.0% against DCF Fair Value AND 3Y Compounding IRR >= 20.0%
+  //   Leg B (Deep Price Dislocation): Current Price <= buyBelowPrice OR Asymmetry >= 2.0:1 OR 3Y Asymmetry >= 3.0:1
   else if (
-    (currentPrice <= scorecard.buyBelowPrice || (scorecard.asymmetryRatio >= 3.0 && scorecard.marginOfSafetyPct >= 25.0 && scorecard.projected3YrIrr >= 20.0)) &&
     (scorecard.economicEngineState === ECONOMIC_ENGINE_STATE.PROVEN || scorecard.economicEngineState === ECONOMIC_ENGINE_STATE.EMERGING) &&
     (thesisHealth === 'STRENGTHENING' || thesisHealth === 'INTACT') &&
-    scorecard.evidenceRecency !== EVIDENCE_RECENCY.STALE
+    scorecard.evidenceRecency !== EVIDENCE_RECENCY.STALE &&
+    (cashFlowEvidence.cfoPatRatio === undefined || cashFlowEvidence.cfoPatRatio >= 0.70 || cashFlowEvidence.netDebtCr <= 0) &&
+    (
+      (scorecard.marginOfSafetyPct >= 20.0 && scorecard.projected3YrIrr >= 20.0) ||
+      (currentPrice <= scorecard.buyBelowPrice || scorecard.asymmetryRatio >= 2.0 || (scorecard.asymmetry3YrRatio && scorecard.asymmetry3YrRatio >= 3.0))
+    )
   ) {
     opportunityTier = MISPRICING_OPPORTUNITY_TIER.TOP_CONVICTION_DISLOCATION;
     finalScore = 95.0;
-    strategicActionNarrative = `TOP CONVICTION DISLOCATION (ACCUMULATE): Multi-layer dislocation verified. Price (₹${currentPrice}) is in Buy Below zone (<= ₹${scorecard.buyBelowPrice}) with ${scorecard.asymmetryRatio}:1 Asymmetry, ${scorecard.marginOfSafetyPct}% MoS, and +${scorecard.projected3YrIrr}% 3Y IRR. Prime capital deployment.`;
+    strategicActionNarrative = `TOP CONVICTION DISLOCATION (ACCUMULATE): Multi-layer dislocation verified. Price (₹${currentPrice}) offers ${scorecard.marginOfSafetyPct}% Margin of Safety to Fair Value (₹${scorecard.fairValuePrice}) with +${scorecard.projected3YrIrr}% 3Y Compounding IRR and strong downside protection (Bear Floor ₹${scorecard.bearFloorPrice}). Prime capital deployment.`;
   }
   // Gate 7: Compounding at Fair Price (Core Hold)
   else {

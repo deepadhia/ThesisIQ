@@ -20,6 +20,7 @@ import { scan } from "./scan-announcements.js";
 import { generatePortfolioThesisBoard } from "./generate-portfolio-thesis-board.js";
 import { sendTelegramMessage } from "../services/telegram.service.js";
 import { evaluateAndDispatchDislocationAlerts } from "../services/valuation-dislocation-watchdog.service.js";
+import { syncDynamicMarketHolidays } from "../services/market-holidays.service.js";
 import crypto from "crypto";
 
 // Table to guarantee strict idempotency across nightly/morning runs
@@ -158,7 +159,7 @@ export async function runNightlyReconciliation({ isDryRun = false } = {}) {
       summaryReport.newAlerts.push({
         ticker: ev.ticker,
         type: "MATERIAL_GROWTH_CATALYST",
-        text: `${icon} **${ev.ticker}**: ${ev.title}\n   ${ev.summary ? `_${ev.summary.substring(0, 180)}..._` : ""}`
+        text: `${icon} *${ev.ticker}* | ${ev.title}\n   ${ev.summary ? `_${ev.summary.substring(0, 180)}..._` : ""}`
       });
     }
   } catch (err) {
@@ -188,6 +189,17 @@ export async function runNightlyReconciliation({ isDryRun = false } = {}) {
     console.log(`✅ Valuation Dislocation Watchdog: ${dislocationRes.alertsDispatched} dispatched, ${dislocationRes.alertsSuppressed} suppressed under 7-day cooldown.`);
   } catch (err) {
     console.error("[ERROR] Step 5b Valuation Dislocation Watchdog failed:", err.message);
+  }
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // STEP 5c: Dynamic Market Holiday Calendar Sync (NSE Live Sync)
+  // ──────────────────────────────────────────────────────────────────────────
+  console.log("\n--- 📅 Step 5c: Syncing Dynamic Market Holiday Calendar (NSE API) ---");
+  try {
+    const holidaySync = await syncDynamicMarketHolidays(pool);
+    console.log(`✅ Market Holidays Synced: ${holidaySync.source} (${holidaySync.count} total active holidays loaded).`);
+  } catch (err) {
+    console.warn(`[WARN] Step 5c Market Holiday sync failed: ${err.message}`);
   }
 
 
@@ -228,12 +240,21 @@ export async function runNightlyReconciliation({ isDryRun = false } = {}) {
       year: "numeric"
     });
 
-    let msg = `🌅 *Morning Thesis Reconciliation Digest (${dateStr})*\n\n`;
-    msg += `📊 *Summary*: ${summaryReport.pricesRefreshed} prices synced | ${summaryReport.newFilingsIngested} late filings reconciled\n\n`;
+    let msg = `🌅 *MORNING THESIS RECONCILIATION DIGEST*\n`;
+    msg += `📅 *Date:* ${dateStr}\n`;
+    msg += `──────────────────────────────\n`;
+    msg += `📊 *Nightly Summary:*\n`;
+    msg += `• Prices Synced: ${summaryReport.pricesRefreshed}\n`;
+    msg += `• Filings Reconciled: ${summaryReport.newFilingsIngested}\n`;
+    msg += `• Verified Catalysts: ${pendingMorningDigest.length}\n`;
+    msg += `──────────────────────────────\n\n`;
 
     for (const item of pendingMorningDigest.slice(0, 10)) {
-      msg += `• ${item.text}\n\n`;
+      msg += `${item.text}\n\n`;
     }
+
+    msg += `──────────────────────────────\n`;
+    msg += `_ThesisIQ Automated Nightly Governance_`;
 
     try {
       await sendTelegramMessage(msg);

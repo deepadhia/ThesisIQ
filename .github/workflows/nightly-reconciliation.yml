@@ -1,7 +1,9 @@
-name: 🌙 Nightly Reconciliation (Manual Dispatch)
+name: 🌙 Nightly Reconciliation & Valuation Watchdog
 
-# Scheduled reconciliation runs 24/7 exclusively on Oracle Cloud Server daemon
 on:
+  schedule:
+    # Run every weekday (Monday-Friday) at 12:45 UTC (18:15 IST) after Indian market close
+    - cron: '45 12 * * 1-5'
   workflow_dispatch:
     inputs:
       dry_run:

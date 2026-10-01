@@ -1070,14 +1070,21 @@ export async function processPendingDeepDives(options = {}) {
             ? `\n🔑 *DECISION BOTTOM LINE:*\n• ${ch.key_takeaway}\n`
             : "";
 
+          const cleanedCompany = (item.company_name || item.ticker)
+            .replace(/\s+share\s+price\s*$/i, "")
+            .replace(/\s+ltd\b\.?/i, " Ltd")
+            .trim();
+          const docLink = item.attachment_url ? `\n📄 [View Official Filing →](${item.attachment_url})` : "";
+
           const alertMsg = `
-🎙️ *${item.company_name.toUpperCase()} (${item.ticker}) | CONCALL AUDIT*
-──────────────────────────────────────────
+🏢 *${item.ticker.toUpperCase()}* | ${cleanedCompany}
+🎙️ *Event:* Institutional Concall Audit & Forensic Verification
+──────────────────────────────
 🎯 *ACTION SIGNAL:* ${signalEmoji} (Conviction: ${verdict.conviction_score}/10 | Credibility: ${verdict.credibility_tier})
-──────────────────────────────────────────
+──────────────────────────────
 ${gateAuditSec}${finSec}${guidanceReconciliationSec}${bizSec}${opsSec}${growthSec}${guidSec}${commText}${posSec}${chalSec}${toneSec}${takeawaySec}
-──────────────────────────────────────────
-_Institutional Quarterly Concall Deep-Dive_
+──────────────────────────────
+${docLink ? `${docLink}\n` : ""}_Institutional Quarterly Concall Deep-Dive_
 `.trim();
 
           await sendTelegramMessage(alertMsg);
@@ -1107,20 +1114,23 @@ _Institutional Quarterly Concall Deep-Dive_
             concallText = `\n🎙️ *OPEN QUERIES FOR CONCALL & TRANSCRIPT AUDIT:*\n${concallPoints.slice(0, 3).map(p => `• ${p.replace(/^•\s*/, '')}`).join('\n')}\n`;
           }
 
+          const cleanedCompany = (item.company_name || item.ticker)
+            .replace(/\s+share\s+price\s*$/i, "")
+            .replace(/\s+ltd\b\.?/i, " Ltd")
+            .trim();
           const docLink = item.attachment_url ? `\n📄 [View Official Filing →](${item.attachment_url})` : "";
 
           const alertMsg = `
-📊 *INSTITUTIONAL QUARTERLY FLASH (STAGE 1)*
-*Stock:* ${item.company_name} (${item.ticker})
-*Review Stage:* ${stageName}
-──────────────────────────────────────────
+🏢 *${item.ticker.toUpperCase()}* | ${cleanedCompany}
+📊 *Event:* Quarterly Results Flash Note (Stage 1) • ${stageName}
+──────────────────────────────
 🎯 *INITIAL ACTION SIGNAL:* ${signalEmoji} (Conviction: ${verdict.conviction_score}/10 | Credibility: ${verdict.credibility_tier})
-──────────────────────────────────────────
+──────────────────────────────
 ${gateAuditSec}${finText}${guidanceReconciliationSec}${kpiSec}${posSec}${dragSec}${commText}
 📋 *Verdict Summary:*
 ${verdict.verdict_summary}
 ${driversText}${concallText}
-──────────────────────────────────────────
+──────────────────────────────
 ${docLink ? `${docLink}\n` : ""}_Stage 1 initial snapshot. Concall transcript reconciler will verify open queries upon release._
 `.trim();
 

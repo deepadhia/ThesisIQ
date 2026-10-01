@@ -22,6 +22,12 @@ import { classifyAnnouncementWithNim } from "../services/nim.service.js";
 import { classifyFilingCategory, extractCorporateActionDetails } from "../services/filing-classifier.service.js";
 import { processPendingDeepDives } from "../workers/quarterly-deepdive-worker.js";
 import { sendAnnouncementAlert, sendRunSummary, sendTelegramMessage, buildBseDocumentUrl } from "../services/telegram.service.js";
+import { 
+  evaluateAndDispatchDislocationAlerts,
+  isDailyValuationWatchdogNeeded,
+  markDailyValuationWatchdogExecuted
+} from "../services/valuation-dislocation-watchdog.service.js";
+import { syncAllPortfolioValuations } from "../services/portfolio-market-valuation.service.js";
 import { pool } from "../db/pool.js";
 
 /**
@@ -53,8 +59,16 @@ const MAX_ALERTS_PER_RUN = 10;
 async function sendHeartbeat() {
   const needed = await isHeartbeatNeeded();
   if (needed) {
-    const today = new Date().toLocaleDateString("en-IN", { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
-    await sendTelegramMessage(`🟢 *System Heartbeat*\n\nScanner is active and monitoring watchlist.\nDate: ${today}`);
+    const today = new Date().toLocaleDateString("en-IN", { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', timeZone: 'Asia/Kolkata' });
+    const time = new Date().toLocaleTimeString("en-IN", { hour: '2-digit', minute: '2-digit', hour12: true, timeZone: 'Asia/Kolkata' });
+    const msg = `🟢 *SYSTEM HEARTBEAT ACTIVE*\n` +
+      `──────────────────────────────\n` +
+      `📡 *Status:* 24/7 Corporate Filing Scanner Online\n` +
+      `📅 *Date:* ${today} (${time} IST)\n` +
+      `🎯 *Scope:* BSE & NSE Watchlist Filings\n` +
+      `──────────────────────────────\n` +
+      `_ThesisIQ Monitoring Engine Active_`;
+    await sendTelegramMessage(msg);
     await markHeartbeatSent();
     console.log("Heartbeat sent.");
   }
@@ -556,6 +570,23 @@ export async function scan({ isDryRun = false, runUrl = null, targetTicker = nul
     });
   } catch (err) {
     console.error("[WARN] Failed to send run summary:", err.message);
+  }
+
+  // ── Market-Hours Midday Valuation Dislocation Watchdog (1:00 PM IST) ─────
+  // Evaluates universe daily at 1:00 PM IST during active market hours
+  try {
+    if (!isDryRun && await isDailyValuationWatchdogNeeded(pool)) {
+      console.log("[SCAN] 🎯 1:00 PM IST Market Hours: Syncing live prices & running Valuation Dislocation Watchdog...");
+      try {
+        await syncAllPortfolioValuations(pool);
+      } catch (syncErr) {
+        console.warn("[SCAN WARN] Midday market price sync before watchdog encountered an issue:", syncErr.message);
+      }
+      await evaluateAndDispatchDislocationAlerts({ pool, isDryRun: false });
+      await markDailyValuationWatchdogExecuted(pool);
+    }
+  } catch (err) {
+    console.error("[SCAN WARN] Market-hours valuation watchdog failed:", err.message);
   }
 
   // ── Nightly quiet-day summary ─────────────────────────────────────────────

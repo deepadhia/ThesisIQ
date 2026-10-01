@@ -14,10 +14,32 @@ import dotenv from 'dotenv';
 dotenv.config({ path: './.env.local' });
 import { pool } from '../db/pool.js';
 import { evaluateAndDispatchDislocationAlerts } from '../services/valuation-dislocation-watchdog.service.js';
+import { isMarketOpenDay, getMarketHolidayDetails } from '../services/market-holidays.service.js';
 
 export async function runDailyValuationWatchdog() {
   const isDryRun = process.argv.includes('--dry-run');
   const forceAlert = process.argv.includes('--force');
+
+  // Market Open Guard: Skips execution on weekends and official NSE/BSE holidays
+  if (!forceAlert && !isMarketOpenDay()) {
+    const { isHoliday, holidayName, dateYmd } = getMarketHolidayDetails();
+    const reason = isHoliday ? `Official Market Holiday: ${holidayName}` : `Weekend`;
+    console.log('========================================================================');
+    console.log(`⏸️  MARKET CLOSED GUARD: ${dateYmd} (${reason})`);
+    console.log('Indian stock exchanges (NSE/BSE) are closed. Watchdog evaluation skipped.');
+    console.log('(Pass --force to override holiday check)');
+    console.log('========================================================================\n');
+    return {
+      evaluatedCount: 0,
+      dislocationsFound: 0,
+      alertsDispatched: 0,
+      alertsSuppressed: 0,
+      dispatchedTickers: [],
+      suppressedTickers: [],
+      marketClosed: true,
+      marketClosedReason: reason
+    };
+  }
 
   console.log('========================================================================');
   console.log('🎯 RUNNING DAILY ASYMMETRIC VALUATION DISLOCATION WATCHDOG');

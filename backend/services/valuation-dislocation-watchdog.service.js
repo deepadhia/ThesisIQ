@@ -18,6 +18,7 @@ import { pool as defaultPool } from '../db/pool.js';
 import { loadAuditedPortfolioFromDatabase } from '../scripts/run-asymmetric-mispricing-ranking.js';
 import { rankUniverseByMispricing, MISPRICING_OPPORTUNITY_TIER } from './asymmetric-mispricing-ranking.service.js';
 import { sendTelegramMessage } from './telegram.service.js';
+import { isMarketOpenDay, getMarketHolidayDetails, getIstDateYmd } from './market-holidays.service.js';
 
 export const COOLDOWN_DAYS = 7;
 
@@ -148,7 +149,16 @@ export async function resolveStateTransitionTrigger(equity, pool = defaultPool) 
         }
       }
 
-      if (triggerReason === 'ASYMMETRIC_UNDERWRITING_QUALIFICATION' && thesisHealth === 'STRENGTHENING') {
+      const mos = equity.hedgeFundScorecard?.marginOfSafetyPct !== undefined
+        ? equity.hedgeFundScorecard.marginOfSafetyPct
+        : (metrics.marginOfSafetyPct || 0);
+
+      if (triggerReason === 'ASYMMETRIC_UNDERWRITING_QUALIFICATION' && mos >= 20.0) {
+        triggerReason = '200_EMA_PULLBACK_HIGH_CONVICTION';
+        triggerMechanics = `Testing structural 200 EMA support floor at a ${mos.toFixed(1)}% discount to DCF Fair Value (₹${equity.hedgeFundScorecard?.fairValuePrice || price}).`;
+        whatChanged = `Price pulled back to major institutional support band while underwritten growth trajectory (${metrics.expectedCagr}% CAGR) and cash flow conversion remain intact.`;
+        actionableJustification = `Offers +${metrics.stressTestedExpectationGap}% stressed expectation cushion and attractive asymmetric compounding entry point.`;
+      } else if (triggerReason === 'ASYMMETRIC_UNDERWRITING_QUALIFICATION' && thesisHealth === 'STRENGTHENING') {
         triggerReason = 'THESIS_STRENGTHENING_CONFIRMED';
         triggerMechanics = `Quarterly audit confirmed STRENGTHENING thesis state; operational growth trajectory of ${metrics.expectedCagr}% CAGR significantly exceeds market-implied ${metrics.impliedGrowth}% growth.`;
         whatChanged = `Institutional audit verified STRENGTHENING operational performance and market share expansion.`;
@@ -201,10 +211,15 @@ export function formatDislocationTelegramMessage(equity, triggerInfo = {}) {
   const hf = equity.hedgeFundScorecard || {};
   const hasHf = Boolean(hf.fairValuePrice);
 
-  let msg = `🎯 *CANDIDATE MEETS ASYMMETRIC-DISLOCATION CRITERIA*\n`;
-  msg += `─────────────────────────\n`;
-  msg += `🏢 *${ticker.toUpperCase()}* | *${companyName}*\n`;
-  msg += `📍 *Sector*: ${sector}\n\n`;
+  const cleanedCompany = (companyName || ticker)
+    .replace(/\s+share\s+price\s*$/i, "")
+    .replace(/\s+ltd\b\.?/i, " Ltd")
+    .trim();
+
+  let msg = `🏢 *${ticker.toUpperCase()}* | ${cleanedCompany}\n`;
+  msg += `🎯 *Event:* Asymmetric Valuation Dislocation • \`TOP_CONVICTION\`\n`;
+  msg += `📍 *Sector:* ${sector}\n`;
+  msg += `──────────────────────────────\n\n`;
 
   msg += `⚡ *STATE TRANSITION & ALERT JUSTIFICATION*\n`;
   msg += `• Trigger Event: \`${triggerReason}\`\n`;
@@ -251,7 +266,7 @@ export function formatDislocationTelegramMessage(equity, triggerInfo = {}) {
   msg += `• Assessment: Underwriting model indicates growth trajectory substantially exceeds market-implied multiple with resilient fundamental cushion.\n\n`;
 
   msg += `⏱️ *Anti-Spam Cooldown*: Next alert for this stock locked until *${nextCooldownDate}*.\n`;
-  msg += `─────────────────────────\n`;
+  msg += `──────────────────────────────\n`;
   msg += `🏛️ *ThesisIQ Institutional Watchdog v3.1*`;
 
   return msg;
@@ -299,6 +314,23 @@ export async function evaluateAndDispatchDislocationAlerts(options = {}) {
     forceAlert = false,
     cooldownDays = COOLDOWN_DAYS
   } = options;
+
+  // Market Open Guard: Skips evaluation on weekends and official NSE/BSE holidays
+  if (!forceAlert && !isMarketOpenDay()) {
+    const { isHoliday, holidayName, dateYmd } = getMarketHolidayDetails();
+    const reason = isHoliday ? `Official Market Holiday: ${holidayName}` : `Weekend`;
+    console.log(`⏸️  [MARKET CLOSED GUARD] Indian stock exchanges (NSE/BSE) are closed on ${dateYmd} (${reason}). Watchdog evaluation skipped.`);
+    return {
+      evaluatedCount: 0,
+      dislocationsFound: 0,
+      alertsDispatched: 0,
+      alertsSuppressed: 0,
+      dispatchedTickers: [],
+      suppressedTickers: [],
+      marketClosed: true,
+      marketClosedReason: reason
+    };
+  }
 
   await ensureValuationAlertsTable(pool);
 
@@ -393,4 +425,42 @@ export async function evaluateAndDispatchDislocationAlerts(options = {}) {
   }
 
   return results;
+}
+
+/**
+ * Checks if the daily market-hours valuation watchdog evaluation is needed:
+ * 1. Market is OPEN (not a weekend and not an official NSE/BSE holiday)
+ * 2. Time is >= 13:00 IST (1:00 PM IST during active market hours)
+ * 3. Has NOT already executed today
+ */
+export async function isDailyValuationWatchdogNeeded(pool = defaultPool) {
+  const now = new Date();
+
+  // 1. Skip weekends & official NSE/BSE market holidays
+  if (!isMarketOpenDay(now)) return false;
+
+  // 2. Trigger during market hours at 1:00 PM IST (>= 13:00 IST)
+  const istHour = parseInt(now.toLocaleString("en-US", { timeZone: "Asia/Kolkata", hour: 'numeric', hour12: false }), 10);
+  if (istHour < 13) return false;
+
+  // 3. Prevent duplicate executions on the same date
+  const todayIst = getIstDateYmd(now);
+  const res = await pool.query("SELECT value FROM system_settings WHERE key = 'last_daily_valuation_watchdog_at'");
+  const lastRun = res.rows[0]?.value ? (typeof res.rows[0].value === 'string' ? res.rows[0].value.replace(/"/g, '') : res.rows[0].value) : null;
+  if (lastRun === todayIst) return false;
+
+  return true;
+}
+
+/**
+ * Marks the daily market-hours valuation watchdog run as completed for today.
+ */
+export async function markDailyValuationWatchdogExecuted(pool = defaultPool) {
+  const todayIst = getIstDateYmd(new Date());
+  await pool.query(
+    `INSERT INTO system_settings (key, value, updated_at) 
+     VALUES ('last_daily_valuation_watchdog_at', $1, NOW()) 
+     ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
+    [JSON.stringify(todayIst)]
+  );
 }
