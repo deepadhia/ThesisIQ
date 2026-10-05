@@ -657,7 +657,38 @@ export function solveTwoStageFcfImpliedGrowth(pe, options = {}) {
 }
 
 /**
+ * Detects whether an equity qualifies for contracted-order bear floor calibration.
+ *
+ * Contracted-order businesses (government-contracted defence, railways, power EPC) have
+ * visible multi-year order books that limit revenue downside relative to discretionary cyclicals.
+ * Applying the same -30% growth stress as a generic cyclical is structurally too punitive for
+ * these businesses. Qualification is determined generically by sector keyword + HIGH iROIC
+ * confidence — zero ticker hardcoding, consistent with the Dynamic Business Logic Rule.
+ *
+ * Contracted bear stress: -15% growth (vs -30%), -20% iROIC (vs -25%),
+ *   +100bps WACC (vs +150bps), 3.0% terminal growth (vs 2.5%),
+ *   15% multiple derate (vs 20%), 30% multiple compression floor (vs 40%, min 14x).
+ */
+export function isContractedOrderBusiness(options = {}) {
+  const sector = (options.sector || '').toLowerCase();
+  const confidence = (options.forwardIroicConfidence || '').toUpperCase();
+
+  if (confidence !== 'HIGH') return false;
+
+  const contractedSectorKeywords = [
+    'defence', 'defense', 'railway', 'rail', 'kavach',
+    'government', 'public sector', 'power transmission', 'power epc',
+    'infrastructure epc', 'metro', 'national highway'
+  ];
+  return contractedSectorKeywords.some(kw => sector.includes(kw));
+}
+
+/**
  * Calculates dual-methodology Bear Floor anchor: min(DCF Bear Floor, Multiple Stress Floor).
+ *
+ * For contracted-order businesses (detected via isContractedOrderBusiness), applies a less
+ * punitive stress calibration that reflects government order visibility reducing tail-risk.
+ * For all other businesses, applies the generic cyclical stress parameters.
  */
 export function calculateDualBearFloor(options = {}) {
   const currentPrice = options.currentPrice || 100.0;
@@ -667,39 +698,65 @@ export function calculateDualBearFloor(options = {}) {
   const gt = options.terminalGrowth || 0.035;
   const netDebtCr = options.netDebtCr || 0.0;
   const marketCapCr = options.marketCapCr || (currentPrice * 10.0);
+  const contracted = isContractedOrderBusiness(options);
 
-  // 1. DCF Bear Floor: Formal DCF with -30% growth cut, stressed iROIC, +150 bps WACC (13.0%), 2.0% terminal growth
-  const dcfBearFloor = calculateInstitutionalFcffDcf({
-    currentPrice,
-    currentPE,
-    underwrittenCagr: expectedCagr * 0.70,
-    effectiveIroic: Math.max(10.0, effectiveIroic * 0.75),
-    wacc: 0.130, // 13.0% stressed WACC
-    terminalGrowth: Math.max(0.02, gt - 0.015),
-    multipleDeratePct: 0.20,
-    netDebtCr,
-    marketCapCr
-  });
+  let dcfBearFloor;
+  let troughMultipleCompression;
+  let minTroughPE;
 
-  // 2. Multiple Stress Floor: Cyclical trough multiple (40% multiple compression, min 12x P/E)
+  if (contracted) {
+    // Contracted-order calibration: government-contracted revenue limits tail-risk
+    // -15% growth cut (vs -30%), -20% iROIC (vs -25%), +100bps WACC, 3.0% terminal
+    dcfBearFloor = calculateInstitutionalFcffDcf({
+      currentPrice,
+      currentPE,
+      underwrittenCagr: expectedCagr * 0.85,
+      effectiveIroic: Math.max(12.0, effectiveIroic * 0.80),
+      wacc: 0.125,
+      terminalGrowth: Math.max(0.025, gt - 0.01),
+      multipleDeratePct: 0.15,
+      netDebtCr,
+      marketCapCr
+    });
+    troughMultipleCompression = 0.70; // 30% multiple compression (vs 40%)
+    minTroughPE = 14.0;               // floor at 14x (vs 12x)
+  } else {
+    // Generic cyclical calibration: -30% growth, -25% iROIC, +150bps WACC, 2.0% terminal
+    dcfBearFloor = calculateInstitutionalFcffDcf({
+      currentPrice,
+      currentPE,
+      underwrittenCagr: expectedCagr * 0.70,
+      effectiveIroic: Math.max(10.0, effectiveIroic * 0.75),
+      wacc: 0.130,
+      terminalGrowth: Math.max(0.02, gt - 0.015),
+      multipleDeratePct: 0.20,
+      netDebtCr,
+      marketCapCr
+    });
+    troughMultipleCompression = 0.60; // 40% multiple compression
+    minTroughPE = 12.0;               // floor at 12x
+  }
+
+  // Multiple Stress Floor: trough multiple applied to trailing EPS
   const baselineEps = currentPE > 0 ? (currentPrice / currentPE) : 1.0;
-  const troughPE = Math.max(12.0, currentPE * 0.60);
+  const troughPE = Math.max(minTroughPE, currentPE * troughMultipleCompression);
   let perShareAdjustment = 0;
   if (marketCapCr > 0 && currentPrice > 0) {
     const sharesCr = marketCapCr / currentPrice;
     if (sharesCr > 0) {
-      perShareAdjustment = - (netDebtCr / sharesCr);
+      perShareAdjustment = -(netDebtCr / sharesCr);
     }
   }
   const multipleStressFloor = parseFloat(Math.max(1.0, (baselineEps * troughPE) + perShareAdjustment).toFixed(2));
 
-  // Anchor is the conservative minimum of both formal methodologies
+  // Anchor is the conservative minimum of both methodologies
   const bearFloorPrice = parseFloat(Math.min(dcfBearFloor, multipleStressFloor).toFixed(2));
 
   return {
     bearFloorPrice,
     dcfBearFloor,
-    multipleStressFloor
+    multipleStressFloor,
+    contractedCalibration: contracted
   };
 }
 
@@ -916,6 +973,8 @@ export function calculateThesisIqScorecard(equity = {}) {
   });
 
   // 8. Dual-Methodology Bear Floor (Layer 7: min(DCF Bear, Multiple Stress))
+  // Pass sector & iROIC confidence so contracted-order businesses receive
+  // the less punitive stress calibration that reflects government order visibility.
   const dualBear = calculateDualBearFloor({
     currentPrice,
     currentPE,
@@ -923,7 +982,9 @@ export function calculateThesisIqScorecard(equity = {}) {
     effectiveIroic,
     terminalGrowth: gt,
     netDebtCr: equity.cashFlowEvidence?.netDebtCr || 0.0,
-    marketCapCr: equity.marketCap || (currentPrice * 10.0)
+    marketCapCr: equity.marketCap || (currentPrice * 10.0),
+    sector,
+    forwardIroicConfidence: confidence
   });
   const bearFloorPrice = dualBear.bearFloorPrice;
 
@@ -1212,7 +1273,10 @@ export function evaluateEquityMispricing(auditedEquity) {
   // - Evidence Recency: Not STALE
   // - Balance Sheet Risk Controls: Clean cash flow & balance sheet (CFO/PAT >= 0.70 or D/E <= 0.60 or Net Cash)
   // - Dislocation Trigger (either Leg A or Leg B):
-  //   Leg A (Institutional MoS & Compounding Hurdle): Margin of Safety >= 20.0% against DCF Fair Value AND 3Y Compounding IRR >= 20.0%
+  //   Leg A (Institutional MoS & Compounding Hurdle): Margin of Safety >= 20.0% AND 3Y Compounding IRR >= 20.0%
+  //     PLUS point-in-time Asymmetry >= 1.0:1 (immediate upside must at least exceed immediate downside).
+  //     Without this floor, stocks trading well above their Buy Below price can pass Leg A purely via
+  //     long-horizon compounding (e.g. HBL at ₹762 with 0.79:1 asymmetry) — which is a false signal.
   //   Leg B (Deep Price Dislocation): Current Price <= buyBelowPrice OR Asymmetry >= 2.0:1 OR 3Y Asymmetry >= 3.0:1
   else if (
     (scorecard.economicEngineState === ECONOMIC_ENGINE_STATE.PROVEN || scorecard.economicEngineState === ECONOMIC_ENGINE_STATE.EMERGING) &&
@@ -1220,8 +1284,13 @@ export function evaluateEquityMispricing(auditedEquity) {
     scorecard.evidenceRecency !== EVIDENCE_RECENCY.STALE &&
     (cashFlowEvidence.cfoPatRatio === undefined || cashFlowEvidence.cfoPatRatio >= 0.70 || cashFlowEvidence.netDebtCr <= 0) &&
     (
-      (scorecard.marginOfSafetyPct >= 20.0 && scorecard.projected3YrIrr >= 20.0) ||
-      (currentPrice <= scorecard.buyBelowPrice || scorecard.asymmetryRatio >= 2.0 || (scorecard.asymmetry3YrRatio && scorecard.asymmetry3YrRatio >= 3.0))
+      // Leg A: MoS + IRR + point-in-time asymmetry >= 1.0 (upside must exceed downside even before compounding)
+      (scorecard.marginOfSafetyPct >= 20.0 && scorecard.projected3YrIrr >= 20.0 && scorecard.asymmetryRatio >= 1.0) ||
+      // Leg B: Deep price dislocation — price is in the Buy Below zone, or immediate asymmetry >= 2:1.
+      //   3Y compounded asymmetry (>= 3.0) is an acceptable Leg B trigger ONLY when the immediate
+      //   point-in-time asymmetry is also positive (>= 1.0), preventing stocks with inverted immediate
+      //   risk/reward (downside > upside) from qualifying solely on long-horizon compounding math.
+      (currentPrice <= scorecard.buyBelowPrice || scorecard.asymmetryRatio >= 2.0 || (scorecard.asymmetry3YrRatio && scorecard.asymmetry3YrRatio >= 3.0 && scorecard.asymmetryRatio >= 1.0))
     )
   ) {
     opportunityTier = MISPRICING_OPPORTUNITY_TIER.TOP_CONVICTION_DISLOCATION;

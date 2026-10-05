@@ -113,7 +113,7 @@ export async function resolveStateTransitionTrigger(equity, pool = defaultPool) 
         triggerReason = 'THESIS_STRENGTHENING_CONFIRMED';
         triggerMechanics = `Quarterly audit verified STRENGTHENING thesis state; operational growth trajectory accelerates to ${metrics.expectedCagr}% CAGR.`;
         whatChanged = `Fundamental thesis upgraded to STRENGTHENING based on verified business execution.`;
-        actionableJustification = `Operating runway outpaces market multiple with a highly resilient +${metrics.stressTestedExpectationGap}% stressed cushion.`;
+        actionableJustification = `Operating runway outpaces market multiple with a ${metrics.thesisRobustness.toLowerCase().replace(/_/g, ' ')} +${metrics.stressTestedExpectationGap}% stressed cushion.`;
       } else {
         triggerReason = 'PERSISTENT_DISLOCATION_RETESTED';
         triggerMechanics = `Dislocation persists post 7-day cooldown: ${pe}x P/E vs ${metrics.impliedGrowth}% implied growth.`;

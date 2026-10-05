@@ -219,8 +219,9 @@ const expectedAsymmetry = parseFloat(((sc.fairValuePrice - 700.0) / Math.max(1.0
 assert(sc.asymmetryRatio === expectedAsymmetry, `[REPORT_ASYMMETRY_RECONCILIATION] Scorecard asymmetry (${sc.asymmetryRatio}) strictly equals (FV - CMP) / (CMP - Bear) = ${expectedAsymmetry}`);
 
 // Invariant B: REPORT_IRR_RECONCILIATION
-const expectedIrr = parseFloat(((Math.pow(sc.fairValuePrice / 700.0, 1.0 / 3.0) - 1.0) * 100.0).toFixed(1));
-assert(sc.projected3YrIrr === expectedIrr, `[REPORT_IRR_RECONCILIATION] Scorecard 3Y IRR (${sc.projected3YrIrr}%) strictly equals (FV / CMP)^(1/3) - 1 = ${expectedIrr}%`);
+// 3Y Compounding IRR = (FairValue3Yr / CMP)^(1/3) - 1, where FairValue3Yr = FV * (1 + NOPAT_CAGR)^3
+const expectedIrr = parseFloat(((Math.pow(sc.fairValue3Yr / 700.0, 1.0 / 3.0) - 1.0) * 100.0).toFixed(1));
+assert(sc.projected3YrIrr === expectedIrr, `[REPORT_IRR_RECONCILIATION] Scorecard 3Y IRR (${sc.projected3YrIrr}%) strictly equals (FairValue3Yr / CMP)^(1/3) - 1 = ${expectedIrr}%`);
 
 // Invariant C: REPORT_BUY_BELOW_RECONCILIATION
 const expectedBuyBelow = parseFloat(Math.min(sc.fairValuePrice * 0.75, (sc.fairValuePrice + 3.0 * sc.bearFloorPrice) / 4.0).toFixed(2));
@@ -358,9 +359,10 @@ assert(valueDestroyerSc.expectationsRegime !== 'POTENTIAL_UNDEREXPECTATION', `Va
 // -------------------------------------------------------------------------
 console.log('\n--- 8. Testing Layer 8: Strict Deterministic Decision Engine ---');
 
-// Case A: HBL at current market price ₹722
-// At CMP ₹722, Asymmetry ~1.00:1, 3Y IRR ~13.0%.
-// RULE: Asymmetry < 3:1 AND IRR < 20% -> MUST NOT BE TOP_CONVICTION_DISLOCATION!
+// Case A: HBL at CMP ₹762 (current live market price - above Buy Below zone)
+// At ₹762: Asymmetry = 0.79:1 (downside > upside), 3Y-Asym = 3.97:1 (via compounding), MoS = 27.1%.
+// RULE: Leg A fails (asymmetry 0.79 < 1.0 floor). Leg B fails (price > BB, asym < 2.0, 3Y-asym >= 3.0 BUT asym < 1.0).
+// MUST be COMPOUNDING_AT_FAIR_PRICE (Core Hold) — NOT accumulate signal.
 const hblEvaluated = evaluateEquityMispricing({
   ticker: 'HBLENGINE',
   companyName: 'HBL Power Systems',
@@ -368,16 +370,16 @@ const hblEvaluated = evaluateEquityMispricing({
   thesisHealth: 'STRENGTHENING',
   currentConviction: 9.6,
   evidenceSufficiency: 'SUFFICIENT',
-  currentPrice: 722.0,
-  currentPE: 25.0,
+  currentPrice: 762.0,
+  currentPE: 26.3,
   expectedGrowthTrajectory: '28% CAGR',
   financialEvidence: { revenueGrowthYoY: 30.5, roce: 24.5, ttmPat: 288.0, currentRevenue: 2000.0 },
-  cashFlowEvidence: { cfoPatRatio: 0.90, receivableDays: 70, debtToEquity: 0.00 },
+  cashFlowEvidence: { cfoPatRatio: 0.85, receivableDays: 70, debtToEquity: 0.05 },
   economicEvidence: { forwardIroic: 32.0, forwardIroicConfidence: 'HIGH', addressableTamCr: 50000.0 }
 });
 
-assert(hblEvaluated.opportunityTier === MISPRICING_OPPORTUNITY_TIER.COMPOUNDING_AT_FAIR_PRICE, 
-  `HBL at CMP ₹722 (Asymmetry +${hblEvaluated.thesisIqScorecard.asymmetryRatio}:1, IRR +${hblEvaluated.thesisIqScorecard.projected3YrIrr}%) is correctly classified as COMPOUNDING_AT_FAIR_PRICE (Core Hold), NOT Buy dislocation!`);
+assert(hblEvaluated.opportunityTier === MISPRICING_OPPORTUNITY_TIER.COMPOUNDING_AT_FAIR_PRICE,
+  `HBL at CMP ₹762 (Asymmetry +${hblEvaluated.thesisIqScorecard.asymmetryRatio}:1 — below 1.0 floor; 3Y-Asym +${hblEvaluated.thesisIqScorecard.asymmetry3YrRatio}:1 gated out as point-in-time asymmetry inverted) is correctly COMPOUNDING_AT_FAIR_PRICE (Core Hold), NOT an accumulate signal.`);
 
 // Case B: Transrail Case: Separates Valuation Conviction (DEEP_DISLOCATION) from Investability (UNDER_REVALIDATION)
 const transrailEvaluated = evaluateEquityMispricing({

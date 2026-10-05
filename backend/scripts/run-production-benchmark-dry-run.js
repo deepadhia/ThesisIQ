@@ -2,7 +2,7 @@
  * Production Benchmark Dry-Run Runner
  * 
  * Verifies the Dual-Lens Valuation Dislocation Watchdog against 5 benchmark cases:
- * 1. HBL Engineering (Top Conviction Dislocation - Alert Emitted)
+ * 1. HBL Engineering @ ₹762 (Above Buy Below zone - Core Hold, NOT accumulate)
  * 2. Time Technoplast (Top Conviction Dislocation - Alert Emitted)
  * 3. CCL Products (Fair Price / Sensitive Cushion - Gated Out)
  * 4. Transrail Lighting (Attractive Multiple, Elongated Working Capital - Gated Out)
@@ -41,7 +41,7 @@ async function runProductionBenchmarkDryRun() {
 
   const benchmarkCases = [
     {
-      name: '1. HBL Engineering Limited',
+      name: '1. HBL Engineering Limited @ ₹762 (Live Market Price — Above Buy Below Zone)',
       input: {
         ticker: 'HBLENGINE',
         companyName: 'HBL Engineering Limited',
@@ -50,14 +50,14 @@ async function runProductionBenchmarkDryRun() {
         currentConviction: 9.6,
         evidenceSufficiency: 'SUFFICIENT',
         valuationBasis: 'TRAILING_TTM',
-        currentPrice: 722.0,
-        currentPE: 25.0,
+        currentPrice: 762.0,
+        currentPE: 26.3,
         expectedGrowthTrajectory: '28% CAGR',
         financialEvidence: { revenueGrowthYoY: 30.5, roce: 59.3 },
-        cashFlowEvidence: { cfoPatRatio: 0.90, receivableDays: 70, debtToEquity: 0.00 }
+        cashFlowEvidence: { cfoPatRatio: 0.85, receivableDays: 70, debtToEquity: 0.05 }
       },
-      expectedTier: MISPRICING_OPPORTUNITY_TIER.TOP_CONVICTION_DISLOCATION,
-      expectedAction: 'ALERT_DISPATCHED'
+      expectedTier: MISPRICING_OPPORTUNITY_TIER.COMPOUNDING_AT_FAIR_PRICE,
+      expectedAction: 'GATED_OUT_FAIR_PRICE'
     },
     {
       name: '2. Time Technoplast Limited',
