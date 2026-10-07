@@ -22,8 +22,8 @@ if ! command -v node &> /dev/null; then
 fi
 
 # 2b. Install project dependencies
-echo "Installing all npm dependencies..."
-npm install
+echo "Installing production npm dependencies..."
+npm install --omit=dev --no-audit --no-fund
 
 echo "Node version: $(node -v)"
 echo "NPM version: $(npm -v)"

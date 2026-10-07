@@ -10,6 +10,55 @@ import { applyInstitutionalGuard } from "./institutional-guard.service.js";
 const NIM_BASE_URL = "https://integrate.api.nvidia.com/v1/chat/completions";
 
 /**
+ * Robust fallback parser when NIM models output markdown key-values instead of strict JSON.
+ */
+function parseMarkdownKvFallback(text) {
+  if (!text || typeof text !== "string") return null;
+  const t = text.trim();
+
+  const takeawayMatch = t.match(/\*\*(?:EXECUTIVE TAKEAWAY|SUMMARY):?\*\*\s*([\s\S]*?)(?=\n\s*\*\*|$)/i);
+  const priorityMatch = t.match(/\b(HIGH|MEDIUM|LOW)\b/i);
+
+  if (!takeawayMatch && !priorityMatch) return null;
+
+  const extractVal = (pattern) => {
+    const m = t.match(pattern);
+    return m ? m[1].trim() : null;
+  };
+
+  const extractBool = (pattern, defaultVal = false) => {
+    const m = t.match(pattern);
+    if (!m) return defaultVal;
+    return m[1].toLowerCase() === "true";
+  };
+
+  const impactMatch = t.match(/\b(POSITIVE|NEGATIVE|NEUTRAL)\b/i);
+  const agmStatusMatch = extractVal(/\*\*AGM STATUS:?\*\*\s*([a-z_]+)/i);
+
+  return {
+    priority: priorityMatch ? priorityMatch[1].toUpperCase() : "MEDIUM",
+    impact: impactMatch ? impactMatch[1].toUpperCase() : "NEUTRAL",
+    confidence: "HIGH",
+    summary: takeawayMatch ? takeawayMatch[1].replace(/\n+/g, " ").trim() : "",
+    forward_catalysts: [],
+    financial_metrics: [],
+    corporate_actions: [],
+    key_data: extractVal(/\*\*KEY DATA:?\*\*\s*([\s\S]*?)(?=\n\s*\*\*|$)/i),
+    key_omissions_or_risks: extractVal(/\*\*KEY OMISSIONS OR RISKS:?\*\*\s*([\s\S]*?)(?=\n\s*\*\*|$)/i),
+    deep_dive_indicator: extractVal(/\*\*DEEP DIVE INDICATOR:?\*\*\s*([\s\S]*?)(?=\n\s*\*\*|$)/i),
+    thesis_strengthened: extractVal(/\*\*THESIS STRENGTHENED:?\*\*\s*([\s\S]*?)(?=\n\s*\*\*|$)/i),
+    is_earnings_release: extractBool(/\*\*IS EARNINGS RELEASE:?\*\*\s*(true|false)/i, false),
+    result_date: extractVal(/\*\*RESULT DATE:?\*\*\s*(\d{4}-\d{2}-\d{2})/i),
+    concall_date: extractVal(/\*\*CONCALL DATE:?\*\*\s*(\d{4}-\d{2}-\d{2})/i),
+    concall_time: extractVal(/\*\*CONCALL TIME:?\*\*\s*([0-9:]+)/i),
+    is_rescheduled: extractBool(/\*\*IS RESCHEDULED:?\*\*\s*(true|false)/i, false),
+    is_agm: extractBool(/\*\*IS AGM:?\*\*\s*(true|false)/i, false),
+    agm_status: agmStatusMatch ? agmStatusMatch.toLowerCase() : null,
+    has_substantive_business_insights: extractBool(/\*\*HAS SUBSTANTIVE BUSINESS INSIGHTS:?\*\*\s*(true|false)/i, false)
+  };
+}
+
+/**
  * Classifies a corporate announcement using NVIDIA NIM.
  * @param {string} ticker
  * @param {string} announcementText
@@ -187,7 +236,13 @@ export async function classifyAnnouncementWithNim(ticker, announcementText, titl
         if (jsonMatch) {
           cleanJson = jsonMatch[0];
         }
-        const parsed = JSON.parse(cleanJson);
+        let parsed;
+        try {
+          parsed = JSON.parse(cleanJson);
+        } catch (jsonErr) {
+          parsed = parseMarkdownKvFallback(content);
+          if (!parsed) throw jsonErr;
+        }
 
         // Apply Deterministic Financial Extractor & Post-Processing Guard Layer
         const finData = extractDeterministicFinancials(announcementText);
