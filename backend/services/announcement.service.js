@@ -642,8 +642,14 @@ export async function isEventAlertRecentlySent({ ticker, title, summary, concall
 
   // 5. Same-Day Event Identity Deduplication (Same ticker + matching subject tokens within 12 hours)
   if (title) {
-    // Extract key identifying words (ignore generic stock/corporate stop words)
-    const stopWords = new Set(["outcome", "board", "meeting", "intimation", "disclosure", "update", "updates", "general", "under", "regulation", "sebi", "lodr", "ltd", "limited", "the", "and", "for", "with", "share", "shares", "company", "announcement"]);
+    // Extract key identifying words (ignore generic stock/corporate stop words & press wrappers)
+    const stopWords = new Set([
+      "outcome", "board", "meeting", "intimation", "disclosure", "update", "updates", 
+      "general", "under", "regulation", "sebi", "lodr", "ltd", "limited", "the", "and", 
+      "for", "with", "share", "shares", "company", "announcement", "press", "release", 
+      "media", "news", "dated", "regarding", "about", "copy", "submission", "schedule",
+      "notice", "circular", "investor", "investors"
+    ]);
     const tokens = title.toLowerCase().replace(/[^a-z0-9\s]/g, " ").split(/\s+/).filter(w => w.length > 3 && !stopWords.has(w));
     
     if (tokens.length > 0) {
@@ -671,25 +677,68 @@ export async function isEventAlertRecentlySent({ ticker, title, summary, concall
     }
   }
 
-  // 6. Summary Entity & Subject Overlap (If summary mentions the exact same subsidiary or transaction within 12 hours)
+  // 6. Cross-Category Summary Entity & Generic Wrapper Overlap (Rolling 12-hour window)
+  // Catches duplicate marketing disclosures (e.g. "Press Release" or "General Updates")
+  // that accompany or follow statutory disclosures (e.g. strategic partnership, subsidiary incorporation, order win)
   if (summary) {
     const { rows: sumRows } = await pool.query(
-      `SELECT id, title, summary, filing_category FROM corporate_announcements 
+      `SELECT id, title, summary, raw_text, filing_category FROM corporate_announcements 
        WHERE ticker = $1 
          AND sent_to_telegram = true 
          AND processed_at > NOW() - interval '12 hours'`,
       [ticker]
     );
 
+    const SUMMARY_STOP_WORDS = new Set([
+      "company", "companies", "limited", "board", "directors", "director", "meeting", 
+      "intimation", "disclosure", "disclosures", "regulation", "regulations", "sebi", 
+      "lodr", "approved", "approval", "approvals", "dated", "hereby", "informs", 
+      "held", "disclosed", "pursuant", "regarding", "information", "exchange", 
+      "exchanges", "stock", "announcement", "announcements", "outcome", "business", 
+      "financial", "financials", "quarter", "quarterly", "ended", "ending", "statement", 
+      "statements", "details", "under", "general", "press", "release", "media", 
+      "update", "updates", "report", "reports", "submission", "letter", "signed", 
+      "enclosed", "herewith", "scheduled", "consider", "committee", "further", "shall", 
+      "their", "about", "which", "would", "there", "these", "other", "after", "first", 
+      "second", "third", "fourth", "annual", "month", "months", "years", "today", 
+      "yesterday", "million", "billion", "crores", "crore", "lakhs", "rupees", 
+      "indian", "india", "private", "public", "proceedings", "transacted", "matters",
+      "noted", "taken", "record", "office", "registered", "place", "copy"
+    ]);
+
+    const sumWords = summary.toLowerCase()
+      .replace(/[^a-z0-9\s]/g, " ")
+      .split(/\s+/)
+      .filter(w => w.length >= 4 && !SUMMARY_STOP_WORDS.has(w));
+
+    const GENERIC_WRAPPER_REGEX = /\b(press release|media release|general update|general updates|corporate announcement|company update|business update|disclosure under regulation 30|intimation under regulation 30|outcome of board meeting|investor update)\b/i;
+    const isCurrentWrapper = GENERIC_WRAPPER_REGEX.test(title || "") || filing_category === "GENERAL" || !filing_category;
+
     for (const prev of sumRows) {
-      if (prev.summary && prev.filing_category === filing_category) {
-        const sumWords = summary.toLowerCase().replace(/[^a-z0-9\s]/g, " ").split(/\s+/).filter(w => w.length >= 4);
-        const prevSumLower = prev.summary.toLowerCase();
-        const commonWords = sumWords.filter(w => prevSumLower.includes(w));
-        // If 4 or more content words match across summaries in the same category
-        if (commonWords.length >= 4) {
-          return true;
-        }
+      if (!prev.summary) continue;
+
+      const prevTitle = prev.title || "";
+      const prevSumLower = prev.summary.toLowerCase();
+      const prevCombined = `${prevTitle.toLowerCase()} ${prevSumLower} ${(prev.raw_text || "").toLowerCase().slice(0, 3000)}`;
+
+      const commonWords = sumWords.filter(w => prevCombined.includes(w));
+      const isPrevWrapper = GENERIC_WRAPPER_REGEX.test(prevTitle) || prev.filing_category === "GENERAL";
+      const isSameCategory = prev.filing_category === filing_category;
+
+      // 6a. If either filing is a generic wrapper (Press Release / Media Release / GENERAL):
+      // 2 or more substantive entity tokens indicate it is marketing/PR duplication of the same event
+      if ((isCurrentWrapper || isPrevWrapper) && commonWords.length >= 2) {
+        return true;
+      }
+
+      // 6b. Same-category filings: 3 or more substantive content words match across summaries
+      if (isSameCategory && commonWords.length >= 3) {
+        return true;
+      }
+
+      // 6c. Cross-category match: 4 or more substantive entity tokens match across summaries
+      if (commonWords.length >= 4) {
+        return true;
       }
     }
   }
@@ -934,6 +983,150 @@ export async function sendNightlyQuietSummary(stocksCount) {
     [JSON.stringify(todayIst)]
   );
   console.log("[SUMMARY] Sent nightly quiet day summary to Telegram.");
+}
+
+/**
+ * Checks if the daily morning heartbeat notification is needed.
+ * Dispatched once per day at >= 09:00 IST.
+ */
+export async function isHeartbeatNeeded() {
+  const now = new Date();
+  const istHour = parseInt(now.toLocaleString("en-US", { timeZone: "Asia/Kolkata", hour: 'numeric', hour12: false }), 10);
+  if (istHour < 9) return false;
+
+  const todayIst = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata" }).format(now);
+  const res = await pool.query("SELECT value FROM system_settings WHERE key = 'last_heartbeat_at'");
+  const lastSent = res.rows[0]?.value ? (typeof res.rows[0].value === 'string' ? res.rows[0].value.replace(/"/g, '') : res.rows[0].value) : null;
+  return lastSent !== todayIst;
+}
+
+/**
+ * Marks daily heartbeat as sent in system_settings.
+ */
+export async function markHeartbeatSent() {
+  const now = new Date();
+  const todayIst = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata" }).format(now);
+  await pool.query(
+    `INSERT INTO system_settings (key, value, updated_at) 
+     VALUES ('last_heartbeat_at', $1, NOW()) 
+     ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
+    [JSON.stringify(todayIst)]
+  );
+}
+
+const FAILURE_THRESHOLD = 3;
+const COOLDOWN_HOURS = 6;
+
+/**
+ * Records a successful scan execution in system_settings.
+ * Resets consecutive failure counter and sends a one-time recovery note if an alert was active.
+ */
+export async function recordScannerSuccess() {
+  try {
+    const now = new Date();
+    const res = await pool.query(
+      "SELECT key, value FROM system_settings WHERE key IN ('scanner_consecutive_failures', 'scanner_failure_alert_active')"
+    );
+    const settings = {};
+    for (const r of res.rows) {
+      settings[r.key] = typeof r.value === 'string' ? JSON.parse(r.value) : r.value;
+    }
+
+    const previousFailures = parseInt(settings.scanner_consecutive_failures || 0, 10);
+    const alertWasActive = Boolean(settings.scanner_failure_alert_active);
+
+    // If an alert was active and system recovered, send exactly one recovery notification
+    if (alertWasActive && previousFailures >= FAILURE_THRESHOLD) {
+      const timeIst = now.toLocaleTimeString("en-IN", { timeZone: "Asia/Kolkata", hour: '2-digit', minute: '2-digit', hour12: true });
+      const recoveryMsg = `🟢 *SCANNER RECOVERED*\n` +
+        `──────────────────────────────\n` +
+        `✅ Corporate filing scanner resumed normal operation.\n` +
+        `🕐 *Time:* ${timeIst} IST\n` +
+        `📡 All feeds operating cleanly.\n` +
+        `──────────────────────────────`;
+      await sendTelegramMessage(recoveryMsg);
+      console.log("[HEALTH] Sent recovery notification to Telegram.");
+    }
+
+    // Reset failure counter and update last_successful_scan_at
+    await pool.query(
+      `INSERT INTO system_settings (key, value, updated_at) 
+       VALUES 
+         ('last_successful_scan_at', $1, NOW()),
+         ('scanner_consecutive_failures', '0', NOW()),
+         ('scanner_failure_alert_active', 'false', NOW())
+       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
+      [JSON.stringify(now.toISOString())]
+    );
+  } catch (err) {
+    console.warn("[HEALTH WARN] Failed to record scanner success:", err.message);
+  }
+}
+
+/**
+ * Records a scanner run failure in system_settings.
+ * Dispatches a Telegram alert ONCE when consecutive failures >= FAILURE_THRESHOLD,
+ * muted for COOLDOWN_HOURS to prevent spam.
+ */
+export async function recordScannerFailure(error, options = {}) {
+  try {
+    const now = new Date();
+    const envLabel = options.environment || (process.env.GITHUB_ACTIONS === 'true' ? 'GitHub Actions Runner' : 'Server PM2 Daemon');
+
+    const res = await pool.query(
+      "SELECT key, value FROM system_settings WHERE key IN ('scanner_consecutive_failures', 'last_scanner_failure_alert_at')"
+    );
+    const settings = {};
+    for (const r of res.rows) {
+      settings[r.key] = typeof r.value === 'string' ? JSON.parse(r.value) : r.value;
+    }
+
+    const currentFailures = (parseInt(settings.scanner_consecutive_failures || 0, 10)) + 1;
+    const lastAlertAt = settings.last_scanner_failure_alert_at ? new Date(settings.last_scanner_failure_alert_at) : null;
+    
+    const hoursSinceLastAlert = lastAlertAt ? (now.getTime() - lastAlertAt.getTime()) / (1000 * 60 * 60) : 999;
+    const canAlert = hoursSinceLastAlert >= COOLDOWN_HOURS;
+
+    // Persist failure count
+    await pool.query(
+      `INSERT INTO system_settings (key, value, updated_at) 
+       VALUES ('scanner_consecutive_failures', $1, NOW())
+       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
+      [JSON.stringify(currentFailures)]
+    );
+
+    console.warn(`[HEALTH] Scanner failure recorded. Consecutive failure count: ${currentFailures}`);
+
+    // If threshold met and outside cooldown, dispatch single Telegram alert
+    if (currentFailures >= FAILURE_THRESHOLD && canAlert) {
+      const timeIst = now.toLocaleTimeString("en-IN", { timeZone: "Asia/Kolkata", hour: '2-digit', minute: '2-digit', hour12: true });
+      const errMsg = (error?.message || String(error)).substring(0, 300);
+      
+      const alertMsg = `🚨 *SCANNER ALERT: REPEATED FAILURES*\n` +
+        `──────────────────────────────\n` +
+        `⚠️ *Consecutive Failures:* ${currentFailures}\n` +
+        `📡 *Environment:* ${envLabel}\n` +
+        `🕐 *Time:* ${timeIst} IST\n` +
+        `❌ *Error:* \`${errMsg}\`\n` +
+        `──────────────────────────────\n` +
+        `🔒 *Anti-Spam:* Alert muted for the next ${COOLDOWN_HOURS} hours unless resolved.\n` +
+        `_ThesisIQ Diagnostics Guard_`;
+
+      await sendTelegramMessage(alertMsg);
+      console.log("[HEALTH] Dispatched single circuit-breaker failure alert to Telegram.");
+
+      await pool.query(
+        `INSERT INTO system_settings (key, value, updated_at) 
+         VALUES 
+           ('last_scanner_failure_alert_at', $1, NOW()),
+           ('scanner_failure_alert_active', 'true', NOW())
+         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
+        [JSON.stringify(now.toISOString())]
+      );
+    }
+  } catch (err) {
+    console.error("[HEALTH ERROR] Failed to record scanner failure:", err.message);
+  }
 }
 
 

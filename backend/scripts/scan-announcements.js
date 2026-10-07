@@ -16,10 +16,12 @@ import {
   isConcallOrTranscript,
   getConcallType,
   isNightlyQuietSummaryNeeded,
-  sendNightlyQuietSummary
+  sendNightlyQuietSummary,
+  recordScannerSuccess,
+  recordScannerFailure
 } from "../services/announcement.service.js";
 import { classifyAnnouncementWithNim } from "../services/nim.service.js";
-import { classifyFilingCategory, extractCorporateActionDetails } from "../services/filing-classifier.service.js";
+import { classifyFilingCategory, extractCorporateActionDetails, isRoutineCreditRatingReaffirmation } from "../services/filing-classifier.service.js";
 import { processPendingDeepDives } from "../workers/quarterly-deepdive-worker.js";
 import { sendAnnouncementAlert, sendRunSummary, sendTelegramMessage, buildBseDocumentUrl } from "../services/telegram.service.js";
 import { 
@@ -77,8 +79,8 @@ async function sendHeartbeat() {
 /**
  * Main Scanning Orchestrator
  */
-export async function scan({ isDryRun = false, runUrl = null, targetTicker = null } = {}) {
-  writeLog("SCANNER", `🟢 Starting Corporate Announcement Scan... ${isDryRun ? "[DRY RUN]" : "[LIVE DAEMON]"}`);
+export async function scan({ isDryRun = false, runUrl = null, targetTicker = null, forceReevaluate = false } = {}) {
+  writeLog("SCANNER", `🟢 Starting Corporate Announcement Scan... ${isDryRun ? "[DRY RUN]" : "[LIVE DAEMON]"}${forceReevaluate ? " [FORCE REEVALUATE]" : ""}`);
   const startTime = Date.now();
 
   // 0. System Cleanup & Heartbeat
@@ -168,28 +170,30 @@ export async function scan({ isDryRun = false, runUrl = null, targetTicker = nul
         }
 
         // 5. Deduplicate against DB
-        const processed = await isAnnouncementProcessed(ticker, sourceId, hash);
-        if (processed) {
-          continue;
-        }
-
-        const GENERIC_TITLES = ["General Updates", "Updates", "Corporate Announcement", "Press Release"];
-        const isGenericTitle = GENERIC_TITLES.includes(title);
-
-        if (!isGenericTitle) {
-          // Use first 3 words for the fuzzy prefix (single-word is too broad for common words like "Award")
-          const prefixWords = title.split(' ').slice(0, 3).join(' ');
-          const fuzzyResult = await pool.query(
-            `SELECT id FROM corporate_announcements 
-             WHERE ticker = $1 
-             AND (title ILIKE $2 OR $3 ILIKE '%' || title || '%')
-             AND status = 'sent' 
-             AND processed_at > NOW() - interval '24 hours'`,
-            [ticker, `%${prefixWords}%`, title]
-          );
-          if (fuzzyResult.rows.length > 0) {
-            console.log(`[SKIP] Fuzzy duplicate detected for ${ticker}: ${title}`);
+        if (!forceReevaluate) {
+          const processed = await isAnnouncementProcessed(ticker, sourceId, hash);
+          if (processed) {
             continue;
+          }
+
+          const GENERIC_TITLES = ["General Updates", "Updates", "Corporate Announcement", "Press Release"];
+          const isGenericTitle = GENERIC_TITLES.includes(title);
+
+          if (!isGenericTitle) {
+            // Use first 3 words for the fuzzy prefix (single-word is too broad for common words like "Award")
+            const prefixWords = title.split(' ').slice(0, 3).join(' ');
+            const fuzzyResult = await pool.query(
+              `SELECT id FROM corporate_announcements 
+               WHERE ticker = $1 
+               AND (title ILIKE $2 OR $3 ILIKE '%' || title || '%')
+               AND status = 'sent' 
+               AND processed_at > NOW() - interval '24 hours'`,
+              [ticker, `%${prefixWords}%`, title]
+            );
+            if (fuzzyResult.rows.length > 0) {
+              console.log(`[SKIP] Fuzzy duplicate detected for ${ticker}: ${title}`);
+              continue;
+            }
           }
         }
 
@@ -371,6 +375,19 @@ export async function scan({ isDryRun = false, runUrl = null, targetTicker = nul
           (aiResult?.agm_highlights && (Array.isArray(aiResult.agm_highlights) ? aiResult.agm_highlights.length > 0 : (aiResult.agm_highlights.trim().length > 20 && !aiResult.agm_highlights.toLowerCase().includes("null"))))
         );
 
+        // Check routine credit rating reaffirmation (annual surveillance reaffirming existing limits with stable outlook has zero price impact)
+        const isRoutineCreditReaffirmation = filingCategory === "CREDIT_EVENT" && isRoutineCreditRatingReaffirmation({
+          title,
+          text: announcementText,
+          summary: aiResult?.summary,
+          extractedData: aiResult?.corporate_actions
+        });
+
+        if (isRoutineCreditReaffirmation) {
+          aiResult.priority = "LOW";
+          console.log(`[CREDIT SURVEILLANCE] Routine credit rating reaffirmation for ${ticker} (no upgrade/downgrade/negative watch). Downgraded priority to LOW.`);
+        }
+
         // Alert only on genuine business/thesis catalysts & material risks (Strict zero-suppression gate for all price-sensitive events)
         const isMajorCorporateAction = [
           "CAPEX_COMMISSIONING",
@@ -382,7 +399,7 @@ export async function scan({ isDryRun = false, runUrl = null, targetTicker = nul
           "GOVERNANCE_RISK",
           "CREDIT_EVENT",
           "ACQUISITION"
-        ].includes(filingCategory);
+        ].includes(filingCategory) && !isRoutineCreditReaffirmation;
 
         const isUnparsedZipFallback = (
           (docUrl && docUrl.endsWith(".zip")) || 
@@ -396,7 +413,7 @@ export async function scan({ isDryRun = false, runUrl = null, targetTicker = nul
         // Procedural AGM voting tallies and scrutinizer reports must NEVER alert
         const isProceduralAgm = isAgmFiling && !hasMaterialAgmHighlights && !aiResult?.has_substantive_business_insights;
 
-        const shouldHaveAlerted = !isQueuedForDeepDive && !isUnparsedZipFallback && !isProceduralAgm && (
+        const shouldHaveAlerted = !isQueuedForDeepDive && !isUnparsedZipFallback && !isProceduralAgm && !isRoutineCreditReaffirmation && (
           (aiResult.priority === "HIGH" && !isAgmFiling) ||
           (isMajorCorporateAction && aiResult.priority !== "LOW") ||
           (isAgmFiling && aiResult.priority !== "LOW" && hasMaterialAgmHighlights) ||
@@ -405,7 +422,7 @@ export async function scan({ isDryRun = false, runUrl = null, targetTicker = nul
 
         // 7a. Event-level Deduplication Guard (Check if alert sent recently for same ticker & event identity)
         let isDuplicateEvent = false;
-        if (shouldHaveAlerted) {
+        if (shouldHaveAlerted && !forceReevaluate) {
           isDuplicateEvent = await isEventAlertRecentlySent({
             ticker,
             title,
@@ -413,7 +430,8 @@ export async function scan({ isDryRun = false, runUrl = null, targetTicker = nul
             concall_type: concallType,
             is_earnings_release: aiResult.is_earnings_release,
             attachment_url: docUrl,
-            filing_category: filingCategory
+            filing_category: filingCategory,
+            raw_text: announcementText
           });
           if (isDuplicateEvent) {
             console.log(`[SKIP DUP] Event alert already sent for ${ticker} ("${title}"). Skipping duplicate Telegram alert.`);
@@ -449,6 +467,7 @@ export async function scan({ isDryRun = false, runUrl = null, targetTicker = nul
                 concall_type: concallType,
                 concall_date: aiResult.concall_date,
                 concall_time: aiResult.concall_time,
+                is_routine_credit_reaffirmation: isRoutineCreditReaffirmation,
                 is_rescheduled: aiResult.is_rescheduled,
                 category: stock.category,
                 filing_category: filingCategory,
@@ -471,7 +490,11 @@ export async function scan({ isDryRun = false, runUrl = null, targetTicker = nul
           }
         }
 
-        // 8. Save to DB
+        // 8. Save to DB (Skipped entirely during dry runs to prevent poisoning deduplication checks)
+        if (isDryRun) {
+          continue;
+        }
+
         const dbStatus = sentToTelegram
           ? "sent"
           : (shouldHaveAlerted && !isDuplicateEvent && alertsSent >= MAX_ALERTS_PER_RUN ? "pending" : "ignored");
@@ -600,6 +623,11 @@ export async function scan({ isDryRun = false, runUrl = null, targetTicker = nul
     console.error("[WARN] Failed to send nightly quiet summary:", err.message);
   }
 
+  // ── Health & Uptime Circuit Breaker ────────────────────────────────────────
+  if (!isDryRun && !targetTicker) {
+    await recordScannerSuccess();
+  }
+
   return { stocksScanned: stocks.length, newAnnouncements, alertsSent, bseErrors, nseErrors, durationMs };
 }
 
@@ -609,8 +637,13 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   scan().then(() => {
     console.log("Process finished.");
     process.exit(0);
-  }).catch(err => {
+  }).catch(async (err) => {
     console.error("Fatal error during scan:", err);
+    try {
+      await recordScannerFailure(err, { environment: "Server PM2 Daemon" });
+    } catch (recErr) {
+      console.error("Failed to record failure in DB:", recErr.message);
+    }
     process.exit(1);
   });
 }

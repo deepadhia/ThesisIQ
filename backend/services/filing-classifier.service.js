@@ -220,6 +220,67 @@ export function classifyFilingCategory(title = "", text = "") {
 }
 
 /**
+ * Evaluates whether a CREDIT_EVENT announcement represents a routine statutory
+ * surveillance reaffirmation (e.g. annual bank line review reaffirming existing ratings
+ * with a Stable outlook) vs an actionable price-sensitive credit catalyst
+ * (rating upgrade, rating downgrade, negative rating watch, or debt default).
+ *
+ * In Indian markets, annual surveillance reviews that reaffirm existing ratings
+ * without changes to outlook or limits are routine compliance disclosures with zero price impact.
+ * Suppressing these prevents portfolio manager alert fatigue while preserving high alerts for
+ * upgrades, downgrades, and defaults.
+ */
+export function isRoutineCreditRatingReaffirmation({ title = "", text = "", summary = "", extractedData = null }) {
+  const tLower = (title || "").toLowerCase();
+  const sumLower = (summary || "").toLowerCase();
+  const txtSnippet = (typeof text === "string" ? text.slice(0, 6000) : "").toLowerCase();
+  const combined = `${tLower} ${sumLower} ${txtSnippet}`;
+
+  // 1. MATERIAL CREDIT EVENTS (Price-Sensitive Catalysts / Severe Risks — MUST ALWAYS ALERT)
+  // 1a. Rating Downgrade
+  const hasDowngrade = /\b(downgrad(ed|e|ing)|revised downwards?|downward revision|rating downgraded|downgrade of)\b/i.test(combined);
+  // 1b. Negative Rating Watch / Outlook Revision
+  const hasNegativeWatch = /\b(negative outlook|rating watch with negative|watch with negative|placed on negative watch|under watch with negative|revised to negative|outlook.*revised.*negative)\b/i.test(combined);
+  // 1c. Debt Default or Non-Payment
+  const hasDefault = /\b(defaulted?|delay(ed)? in (debt|interest|principal) servicing|non-payment of|debt default|credit impaired)\b/i.test(combined);
+  // 1d. Rating Upgrade
+  const hasUpgrade = /\b(upgrad(ed|e|ing)|revised upwards?|upward revision|rating upgraded|outlook revised (from \w+ )?to positive|upgrade of)\b/i.test(combined);
+
+  // If any material credit catalyst is present, this is NOT a routine reaffirmation.
+  if (hasDowngrade || hasNegativeWatch || hasDefault || hasUpgrade) {
+    return false;
+  }
+
+  // Check structured extracted data if provided
+  if (extractedData) {
+    const extStr = JSON.stringify(extractedData).toLowerCase();
+    if (extStr.includes("downgrade") || extStr.includes("upgrade") || extStr.includes("negative")) {
+      return false;
+    }
+    if (extStr.includes("reaffirm") || extStr.includes("stable")) {
+      return true;
+    }
+  }
+
+  // 2. ROUTINE REAFFIRMATION MARKERS
+  const hasReaffirmation = /\b(reaffirm(ed|s|ing|ation)?|re-affirm(ed|s|ing|ation)?|retained|maintains?|maintained|reiterat(ed|es)|unchanged)\b/i.test(combined);
+  const isSurveillanceOrReview = /\b(annual surveillance|periodic review|surveillance review|bank facilities|credit rating|bank lines)\b/i.test(combined);
+  const isStable = /\b(stable\b|reaffirmed\b)/i.test(combined);
+
+  // If explicit reaffirmation is found without upgrade/downgrade/negative watch:
+  if (hasReaffirmation) {
+    return true;
+  }
+
+  // If routine surveillance review of bank facilities with stable outlook:
+  if (isSurveillanceOrReview && isStable) {
+    return true;
+  }
+
+  return false;
+}
+
+/**
  * Detects the multi-stage lifecycle of a filing (Stage 1 Results, Stage 1 PPT, Stage 2 Transcript, Stage 2 Audio, Corporate Action, Routine).
  */
 export function detectFilingLifecycleStage(title = "", text = "", url = "") {

@@ -15,6 +15,7 @@
 
 import { scan } from "./scan-announcements.js";
 import { sendTelegramMessage } from "../services/telegram.service.js";
+import { recordScannerFailure } from "../services/announcement.service.js";
 
 // ─── Read Action Inputs ───────────────────────────────────────────────────────
 const isDryRun      = process.env.DRY_RUN === "true";
@@ -85,7 +86,10 @@ try {
 } catch (err) {
   console.error("\n❌ FATAL: Scanner crashed with an unhandled error:");
   console.error(err);
-  // The workflow YAML has a separate step that sends a failure Telegram message
-  // via curl when this process exits with code 1.
+  try {
+    await recordScannerFailure(err, { environment: "GitHub Actions Runner" });
+  } catch (recErr) {
+    console.error("Failed to record failure in DB:", recErr.message);
+  }
   process.exit(1);
 }

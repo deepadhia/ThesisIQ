@@ -606,7 +606,7 @@ export function formatAnnouncementMessage(params) {
  * Sends a high-impact, professional institutional flash note alert to Telegram.
  */
 export async function sendAnnouncementAlert(params) {
-  const { is_agm, agm_status, has_substantive_business_insights, title = "" } = params || {};
+  const { is_agm, agm_status, has_substantive_business_insights, title = "", is_routine_credit_reaffirmation } = params || {};
   const tLower = (title || "").toLowerCase();
   const isProceduralVoting = 
     (is_agm && agm_status === "completed" && !has_substantive_business_insights) ||
@@ -615,6 +615,11 @@ export async function sendAnnouncementAlert(params) {
 
   if (isProceduralVoting) {
     console.log(`[ALERT SUPPRESSED] Procedural AGM/Voting proceedings suppressed from live Telegram dispatch: ${title}`);
+    return false;
+  }
+
+  if (is_routine_credit_reaffirmation) {
+    console.log(`[ALERT SUPPRESSED] Routine credit rating reaffirmation suppressed from live Telegram dispatch: ${title}`);
     return false;
   }
 

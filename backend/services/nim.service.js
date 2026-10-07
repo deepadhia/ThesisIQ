@@ -65,10 +65,11 @@ export async function classifyAnnouncementWithNim(ticker, announcementText, titl
       • Quarterly / Annual Financial Results and Earnings Releases.
       • M&A, Restructuring, Demergers, Spin-offs, Mergers.
       • Completed AGMs / Annual Reports with substantive Chairman/MD addresses, multi-year forward guidance, or special resolutions (QIP, Preferential Issues).
-      • Material CXO/Auditor exits, Credit Rating Downgrades, Regulatory/IT/ED Actions.
+      • Material CXO/Auditor exits, Credit Rating Downgrades/Upgrades, Negative Rating Watch, Regulatory/IT/ED Actions.
     MEDIUM:
-      • Moderate order wins, Dividends, Credit Rating Upgrades/Affirmations on debt, standard capacity maintenance, Scheduled concalls.
+      • Moderate order wins, Dividends, First-time credit rating assignments on new debt issues, standard capacity maintenance, Scheduled concalls.
     LOW:
+      • Routine credit rating reaffirmations / annual surveillance reviews with stable outlook (no upgrade/downgrade/outlook revision).
       • Routine compliance filings, share certificate loss, routine voting tallies without management speeches, future AGM date notices without special business, window closure notices, newspaper publications.
 
     ── Structured Extraction & Formatting Rules ──

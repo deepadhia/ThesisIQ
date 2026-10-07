@@ -1,9 +1,12 @@
 name: 📢 Corporate Announcement Scanner
 
-# Triggered externally by Cloudflare Dispatcher or manually via GitHub UI
-# Disabled for GitHub Actions — 100% Scanning Handled by Oracle Cloud Server 24/7 PM2 Daemon
+# Primary execution handled 24/7 by Oracle Cloud Server PM2 Daemon.
+# Secondary redundant safety net scheduled via GitHub Actions during market hours.
 on:
-  # Manual trigger only (if needed for testing via GitHub UI)
+  schedule:
+    # Failover cron every 30 mins during Indian market hours (03:30 to 12:30 UTC = 09:00 to 18:00 IST, Mon-Fri)
+    - cron: '*/30 3-12 * * 1-5'
+  # Manual trigger
   workflow_dispatch:
     inputs:
       dry_run:
