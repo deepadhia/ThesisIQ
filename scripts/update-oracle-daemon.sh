@@ -15,7 +15,9 @@ cd "$(dirname "$0")/.."
 
 # 1. Pull latest code from GitHub
 echo "Pulling latest code from origin main..."
+PREV_COMMIT=$(git rev-parse HEAD 2>/dev/null || echo "initial")
 git pull origin main
+NEW_COMMIT=$(git rev-parse HEAD 2>/dev/null || echo "updated")
 
 # 1b. Ensure system dependencies (ffmpeg) are installed automatically
 if ! command -v ffmpeg &> /dev/null; then
@@ -34,9 +36,13 @@ if [ -f .env.local ]; then
   fi
 fi
 
-# 2. Install any new npm packages
-echo "Installing dependencies..."
-npm install
+# 2. Install npm packages ONLY if package.json or package-lock.json changed
+if [ "$PREV_COMMIT" != "$NEW_COMMIT" ] && git diff --name-only "$PREV_COMMIT" "$NEW_COMMIT" | grep -qE '^package(-lock)?\.json$'; then
+  echo "Dependencies changed in package.json. Installing updated packages..."
+  npm install --no-audit --no-fund --prefer-offline
+else
+  echo "No package.json changes detected. Skipping npm install (fast & zero RAM overhead)."
+fi
 
 # 3. Restart PM2 daemon with updated schedule
 echo "Restarting PM2 daemon with 5-minute (8 AM - 11 PM) schedule..."
