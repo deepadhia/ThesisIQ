@@ -32,3 +32,12 @@
 - System prompts **MUST** explicitly enforce that if an event type (e.g., QIP, M&A, Financial Results) is absent from the filing, the LLM must return empty arrays `[]` or `null`.
 - All LLM extractions (financial metrics, corporate actions, catalysts) **MUST** be deterministically verified by a post-processing grounding guard (`sanitizeLlmOutput` in `institutional-guard.service.js`) against the raw filing text. Any number or claim ungrounded in the source document **MUST** be dropped before alerting or saving.
 
+## 7. Strict Verified Live Valuation & Database Freshness Invariant
+- **NEVER** cite, discuss, or evaluate a stock's valuation multiple (P/E, Market Cap, EV/EBITDA, Share Price) based on unverified assumptions, historical memory, or stale approximations.
+- Before generating valuation hurdles, pricing boards, or investment recommendations for the user:
+  1. The agent **MUST** verify that live trailing market data (`market_data_snapshots`) is synchronized and up-to-date in PostgreSQL for all evaluated equities.
+  2. If data is stale or missing, the agent **MUST** execute the audited synchronization runner (`node backend/scripts/sync-portfolio-market-data.js --force`) to programmatically ingest verified consolidated trailing metrics (CMP, Trailing P/E = CMP / TTM EPS, Mcap, ROCE) before emitting analysis.
+  3. All valuation analysis presented to the user **MUST** be explicitly grounded in the freshly verified database snapshot.
+
+
+

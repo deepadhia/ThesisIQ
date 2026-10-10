@@ -516,6 +516,92 @@ export function classifyMarketExpectationsRegime(options = {}) {
 }
 
 // -----------------------------------------------------------------------------
+// Layer 4b: Transparent Dual-Hurdle Pricing Engine (Option B: 5-Year Horizon)
+// -----------------------------------------------------------------------------
+
+export const PRICING_HURDLE_REGIME = {
+  PRICED_FOR_AGGRESSIVE_GROWTH: 'PRICED_FOR_AGGRESSIVE_GROWTH', // Conservative Hurdle > 18.0% CAGR
+  PRICED_FOR_MODEST_GROWTH: 'PRICED_FOR_MODEST_GROWTH',         // Conservative Hurdle between 10.0% and 18.0% CAGR
+  PRICED_FOR_STALLED_EARNINGS: 'PRICED_FOR_STALLED_EARNINGS'    // Conservative Hurdle < 10.0% CAGR
+};
+
+/**
+ * Calculates Transparent Dual-Hurdle Pricing Engine (Option B):
+ * Evaluates what the market is pricing in over a 5-year forecast horizon (N=5).
+ * Answers directly: "What am I paying for right now?"
+ * 
+ * Target Hurdle Rate (r): 12.0% p.a.
+ * Horizon (N): 5 Years
+ * 
+ * Dual Hurdles:
+ * 1. Constant Multiple Hurdle:
+ *    - Assumes valuation multiple at exit equals current multiple (PE_exit = PE_current).
+ *    - Required EPS CAGR = 12.0% CAGR.
+ * 
+ * 2. Conservative Hurdle (Derating to min(Current P/E, 20x)):
+ *    - Assumes valuation multiple derates to conservative baseline PE_exit = max(12.0, min(Current P/E, 20.0)).
+ *    - Compound Factor = (Current P/E * (1 + r)^5) / PE_exit
+ *    - Required EPS CAGR = ((Compound Factor)^(1/5) - 1) * 100.
+ * 
+ * Pricing Regime Classification:
+ * - PRICED_FOR_AGGRESSIVE_GROWTH: Conservative Hurdle > 18.0% CAGR
+ * - PRICED_FOR_MODEST_GROWTH: Conservative Hurdle between 10.0% and 18.0% CAGR
+ * - PRICED_FOR_STALLED_EARNINGS: Conservative Hurdle < 10.0% CAGR
+ * 
+ * Expectation Cushion:
+ * - Trailing / Underwritten CAGR - Conservative Hurdle
+ */
+export function calculate5YearPricingHurdle(options = {}) {
+  const currentPE = Math.max(1.0, parseFloat(options.currentPE) || 20.0);
+  const underwrittenCagr = parseFloat(options.underwrittenCagr !== undefined ? options.underwrittenCagr : (options.expectedCagr || 20.0));
+  const hurdleRate = options.hurdleRate !== undefined ? options.hurdleRate : 0.12; // 12% p.a. hurdle
+  const horizonYears = options.horizonYears || 5;
+
+  // 1. Constant Multiple Hurdle (Exit PE = Current PE)
+  const constantMultipleHurdleCagr = parseFloat((hurdleRate * 100).toFixed(1)); // 12.0%
+
+  // 2. Conservative Exit P/E: derates to min(Current P/E, 20x), clamped to floor of 12x
+  const conservativeExitPE = parseFloat(Math.max(12.0, Math.min(currentPE, 20.0)).toFixed(1));
+
+  // 3. Conservative Required 5-Year CAGR
+  const compoundFactor = (currentPE * Math.pow(1.0 + hurdleRate, horizonYears)) / conservativeExitPE;
+  const conservativeHurdleCagr = parseFloat(((Math.pow(compoundFactor, 1.0 / horizonYears) - 1.0) * 100.0).toFixed(1));
+
+  // 4. Expectation Cushion (% pts) = Underwritten / Trailing Run-Rate - Conservative Hurdle
+  const expectationCushionPct = parseFloat((underwrittenCagr - conservativeHurdleCagr).toFixed(1));
+
+  // 5. Pricing Regime
+  let regime = PRICING_HURDLE_REGIME.PRICED_FOR_MODEST_GROWTH;
+  if (conservativeHurdleCagr > 18.0) {
+    regime = PRICING_HURDLE_REGIME.PRICED_FOR_AGGRESSIVE_GROWTH;
+  } else if (conservativeHurdleCagr < 10.0) {
+    regime = PRICING_HURDLE_REGIME.PRICED_FOR_STALLED_EARNINGS;
+  }
+
+  let narrative = '';
+  if (regime === PRICING_HURDLE_REGIME.PRICED_FOR_AGGRESSIVE_GROWTH) {
+    narrative = `Market multiple (${currentPE}x) derates to ${conservativeExitPE}x exit, demanding ${conservativeHurdleCagr}% CAGR just for 12% returns. Cushion is ${expectationCushionPct > 0 ? '+' : ''}${expectationCushionPct}% pts.`;
+  } else if (regime === PRICING_HURDLE_REGIME.PRICED_FOR_MODEST_GROWTH) {
+    narrative = `Reasonable pricing: Derating to ${conservativeExitPE}x requires modest ${conservativeHurdleCagr}% CAGR. Underwritten growth (${underwrittenCagr}%) offers a comfortable ${expectationCushionPct > 0 ? '+' : ''}${expectationCushionPct}% pts cushion.`;
+  } else {
+    narrative = `Depressed multiple: Requires only ${conservativeHurdleCagr}% CAGR (near stalled earnings) to deliver 12% target return. Cushion is +${expectationCushionPct}% pts.`;
+  }
+
+  return {
+    horizonYears,
+    hurdleRatePct: parseFloat((hurdleRate * 100).toFixed(1)),
+    currentPE,
+    conservativeExitPE,
+    constantMultipleHurdleCagr,
+    conservativeHurdleCagr,
+    expectationCushionPct,
+    regime,
+    underwrittenCagr,
+    narrative
+  };
+}
+
+// -----------------------------------------------------------------------------
 // Layer 6: Institutional DCF (EV -> FCFF -> WACC -> Net Debt Bridge)
 // -----------------------------------------------------------------------------
 
@@ -959,6 +1045,13 @@ export function calculateThesisIqScorecard(equity = {}) {
     thesisHealth: equity.thesisHealth
   });
 
+  const pricingHurdle5Yr = calculate5YearPricingHurdle({
+    currentPE,
+    underwrittenCagr: underwrittenNopatCagr,
+    hurdleRate: 0.12,
+    horizonYears: 5
+  });
+
   // 7. Intrinsic Fair Value (Layer 6 DCF)
   const fairValuePrice = calculateInstitutionalFcffDcf({
     currentPrice,
@@ -1079,6 +1172,7 @@ export function calculateThesisIqScorecard(equity = {}) {
     fcffConversionGapPct: expectationsLayer.fcffConversionGapPct,
     expectationsRegime: expectationsLayer.regime,
     expectationsLayer,
+    pricingHurdle5Yr,
     debtHealth,
     cashDiagnostics,
     pathway5x,
@@ -1319,6 +1413,7 @@ export function evaluateEquityMispricing(auditedEquity) {
     mispricingScore: finalScore,
     metrics: {
       expectationGap,
+      pricingHurdle5Yr: scorecard.pricingHurdle5Yr,
       fcffConversionGap: scorecard.fcffConversionGapPct,
       fcffConversionDrag: scorecard.fcffConversionDragPct,
       underwrittenNopatCagr: scorecard.underwrittenNopatCagr,

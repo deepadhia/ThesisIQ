@@ -274,12 +274,22 @@ export function formatAnnouncementMessage(params) {
   let isMilestoneEvent = false;
 
   const titleLower = (title || "").toLowerCase();
+  const isCreditFiling = 
+    filing_category === "CREDIT_EVENT" ||
+    titleLower.includes("credit rating") ||
+    titleLower.includes("rating update") ||
+    titleLower.includes("update on credit rating") ||
+    titleLower.includes("debt rating") ||
+    titleLower.includes("rating revision");
+
   const isCommissioningFiling = 
-    filing_category === "CAPEX_COMMISSIONING" ||
-    titleLower.includes("commercial production") ||
-    titleLower.includes("commercial operation") ||
-    titleLower.includes("commissioning of plant") ||
-    titleLower.includes("plant commissioning");
+    !isCreditFiling && (
+      filing_category === "CAPEX_COMMISSIONING" ||
+      titleLower.includes("commercial production") ||
+      titleLower.includes("commercial operation") ||
+      titleLower.includes("commissioning of plant") ||
+      titleLower.includes("plant commissioning")
+    );
 
   const hasSubstantiveInsights = Boolean(
     has_substantive_business_insights ||
@@ -606,20 +616,51 @@ export function formatAnnouncementMessage(params) {
  * Sends a high-impact, professional institutional flash note alert to Telegram.
  */
 export async function sendAnnouncementAlert(params) {
-  const { is_agm, agm_status, has_substantive_business_insights, title = "", is_routine_credit_reaffirmation } = params || {};
+  const { 
+    is_agm, 
+    is_egm,
+    agm_status, 
+    has_substantive_business_insights, 
+    title = "", 
+    attachment_url = "", 
+    is_routine_credit_reaffirmation,
+    priority = "",
+    impact = ""
+  } = params || {};
   const tLower = (title || "").toLowerCase();
-  const isProceduralVoting = 
-    (is_agm && agm_status === "completed" && !has_substantive_business_insights) ||
-    tLower.includes("voting result") || 
-    tLower.includes("scrutinizer report");
+  const attLower = (attachment_url || "").toLowerCase();
 
-  if (isProceduralVoting) {
-    console.log(`[ALERT SUPPRESSED] Procedural AGM/Voting proceedings suppressed from live Telegram dispatch: ${title}`);
+  // 1. All AGM, EGM, and Postal Ballot filings are permanently suppressed from live Telegram dispatch per user mandate
+  if (is_agm || is_egm || params.is_postal_ballot) {
+    console.log(`[ALERT SUPPRESSED] Routine AGM/EGM/Postal ballot filing suppressed from Telegram dispatch: ${title}`);
     return false;
   }
 
+  // 2. Corrigendum / Errata to notices or routine clerical disclosures (unless earnings restatement)
+  const isCorrigendum = 
+    tLower.includes("corrigendum") || 
+    tLower.includes("errata") ||
+    attLower.includes("corrigendum") ||
+    attLower.includes("errata");
+
+  const isFinancialResult = 
+    tLower.includes("financial result") || 
+    attLower.includes("financialresult");
+
+  if (isCorrigendum && !isFinancialResult) {
+    console.log(`[ALERT SUPPRESSED] Routine clerical corrigendum/errata suppressed from live Telegram dispatch: ${title}`);
+    return false;
+  }
+
+  // 3. Routine credit rating reaffirmation
   if (is_routine_credit_reaffirmation) {
     console.log(`[ALERT SUPPRESSED] Routine credit rating reaffirmation suppressed from live Telegram dispatch: ${title}`);
+    return false;
+  }
+
+  // 4. Routine / Neutral meeting notices with priority !== "HIGH"
+  if ((is_egm || is_agm) && priority !== "HIGH" && (String(impact).includes("NEUTRAL") || !has_substantive_business_insights)) {
+    console.log(`[ALERT SUPPRESSED] Neutral/Routine meeting notice suppressed from live Telegram dispatch: ${title}`);
     return false;
   }
 

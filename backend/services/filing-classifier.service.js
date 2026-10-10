@@ -11,11 +11,18 @@ const NIM_BASE_URL = "https://integrate.api.nvidia.com/v1/chat/completions";
 /**
  * Deterministic keyword classification into one of 8 filing categories.
  */
-export function classifyFilingCategory(title = "", text = "") {
+export function classifyFilingCategory(title = "", text = "", attachmentUrl = "") {
   const titleLower = (title || "").toLowerCase();
-  const combined = `${title} ${text}`.toLowerCase();
+  const attachLower = (attachmentUrl || "").toLowerCase();
+  const textSnippet = (typeof text === "string" ? text.slice(0, 8000) : "").toLowerCase();
+  const combined = `${titleLower} ${attachLower} ${textSnippet}`;
 
-  // 0. PROCEDURAL_ROUTINE_COMPLIANCE (Trading Window, Loss of Share, Board Meeting Notices, Investor Meet Intimations)
+  // 0. PROCEDURAL_ROUTINE_COMPLIANCE (Trading Window, Loss of Share, Board Meeting Notices, Investor Meet Intimations, Corrigendums, Voting Tallies)
+  const isFinancialResultsRestatement = 
+    combined.includes("financial results") || 
+    combined.includes("un-audited financial") || 
+    combined.includes("audited financial");
+
   const PROCEDURAL_ROUTINE_TITLES = [
     "trading window",
     "closure of trading window",
@@ -34,13 +41,60 @@ export function classifyFilingCategory(title = "", text = "") {
     "newspaper publication",
     "newspaper advertisement",
     "voting results",
-    "scrutinizer report"
+    "scrutinizer report",
+    "corrigendum to notice",
+    "corrigendum to the notice",
+    "errata"
   ];
-  if (PROCEDURAL_ROUTINE_TITLES.some(p => titleLower.includes(p))) {
+  if (PROCEDURAL_ROUTINE_TITLES.some(p => titleLower.includes(p)) && !isFinancialResultsRestatement) {
     return "ROUTINE_COMPLIANCE";
   }
 
-  // 1. RESTRUCTURING (Demerger, Merger, Spin-off, Slump sale)
+  // 0b. Routine Corrigendums & Erratas (Clerical amendments to meeting notices, agendas, or disclosures)
+  const isCorrigendumOrErrata = 
+    titleLower.includes("corrigendum") || 
+    titleLower.includes("errata") || 
+    attachLower.includes("corrigendum") || 
+    attachLower.includes("errata");
+  if (isCorrigendumOrErrata && !isFinancialResultsRestatement) {
+    return "ROUTINE_COMPLIANCE";
+  }
+
+  // 0c. Statutory Voting Results, Scrutinizer Reports & Reg 44 (Routine secretarial proceedings)
+  const isVotingOrScrutinizer = 
+    titleLower.includes("voting result") || 
+    titleLower.includes("scrutinizer") ||
+    titleLower.includes("regulation 44") ||
+    titleLower.includes("reg 44") ||
+    attachLower.includes("votingresult") ||
+    attachLower.includes("voting_result") ||
+    attachLower.includes("scrutinizer") ||
+    attachLower.includes("reg44") ||
+    attachLower.includes("regulation44") ||
+    combined.includes("scrutinizer's report") ||
+    combined.includes("scrutinizer report");
+  const hasStrategicAddress = 
+    combined.includes("chairman's speech") || 
+    combined.includes("chairmans speech") || 
+    combined.includes("chairman's address") || 
+    combined.includes("investor presentation") ||
+    titleLower.includes("speech") || 
+    titleLower.includes("address");
+  if (isVotingOrScrutinizer && !hasStrategicAddress && !isFinancialResultsRestatement) {
+    return "ROUTINE_COMPLIANCE";
+  }
+
+  // 1. CREDIT_EVENT (Rating revision/upgrade/downgrade on debt instruments)
+  // Must precede CAPEX, ORDER_WIN, and CAPITAL_RAISE to prevent rating reports quoting orderbook/capex from being misclassified
+  const isDebtRatingAgency = /\b(crisil|care ratings?|icra|ind-ra|india ratings|brickwork|acuite)\b/i.test(combined);
+  const isCreditAction = /\b(credit rating|debt rating|rating revision|rating upgrade|rating downgrade|bank facilities rating|commercial paper rating|update on credit rating)\b/i.test(combined);
+  const isEsgOnly = /\besg (rating|score|impact)\b/i.test(combined) && !isCreditAction;
+  
+  if ((isDebtRatingAgency || isCreditAction) && !isEsgOnly) {
+    return "CREDIT_EVENT";
+  }
+
+  // 2. RESTRUCTURING (Demerger, Merger, Spin-off, Slump sale)
   if (
     combined.includes("scheme of arrangement") ||
     combined.includes("demerger") ||
@@ -53,7 +107,7 @@ export function classifyFilingCategory(title = "", text = "") {
     return "RESTRUCTURING";
   }
 
-  // 2. CAPITAL_RAISE (QIP, Preferential Issue, Rights Issue, Warrants, FPO)
+  // 3. CAPITAL_RAISE (QIP, Preferential Issue, Rights Issue, Warrants, FPO)
   if (
     combined.includes("qip") ||
     combined.includes("qualified institutions placement") ||
@@ -68,7 +122,7 @@ export function classifyFilingCategory(title = "", text = "") {
     return "CAPITAL_RAISE";
   }
 
-  // 3. CAPITAL_RETURN (Bonus Issue, Stock Split, Buyback, Special Dividend)
+  // 4. CAPITAL_RETURN (Bonus Issue, Stock Split, Buyback, Special Dividend)
   if (
     combined.includes("bonus issue") ||
     combined.includes("issue of bonus") ||
@@ -82,19 +136,22 @@ export function classifyFilingCategory(title = "", text = "") {
     return "CAPITAL_RETURN";
   }
 
-  // 4. CAPEX_COMMISSIONING (Plant commissioning, Capacity Expansion, Brownfield/Greenfield additions)
+  // 5. CAPEX_COMMISSIONING (Plant commissioning, Capacity Expansion, Brownfield/Greenfield additions)
   const isClarificationNotice = titleLower.includes("clarification on") || titleLower.includes("clarification regarding") || titleLower.includes("fire incident");
   if (
     !isClarificationNotice && (
-      combined.includes("brownfield") ||
-      combined.includes("greenfield") ||
+      combined.includes("brownfield expansion") ||
+      combined.includes("greenfield expansion") ||
       combined.includes("capacity expansion") ||
       combined.includes("expansion of capacity") ||
       combined.includes("capacity addition") ||
       combined.includes("commercial production") ||
       combined.includes("commissioning of plant") ||
-      combined.includes("commissioning of") ||
-      combined.includes("commissioned") ||
+      combined.includes("commissioning of facility") ||
+      combined.includes("commissioning of unit") ||
+      combined.includes("commissioning of project") ||
+      combined.includes("commissioning of solar") ||
+      combined.includes("commissioning of wind") ||
       combined.includes("new manufacturing facility") ||
       combined.includes("setting up of manufacturing") ||
       combined.includes("expansion of manufacturing") ||
@@ -108,7 +165,7 @@ export function classifyFilingCategory(title = "", text = "") {
     return "CAPEX_COMMISSIONING";
   }
 
-  // 4b. ORDER_WIN (Bagging of orders, LOA, Contract Win, Tender award)
+  // 5b. ORDER_WIN (Bagging of orders, LOA, Contract Win, Tender award)
   if (
     combined.includes("bagging of order") ||
     combined.includes("order win") ||
@@ -128,15 +185,6 @@ export function classifyFilingCategory(title = "", text = "") {
     combined.includes("l1 bidder")
   ) {
     return "ORDER_WIN";
-  }
-
-  // 5. CREDIT_EVENT (Rating revision/upgrade/downgrade on debt instruments)
-  const isDebtRatingAgency = /\b(crisil|care ratings?|icra|ind-ra|india ratings|brickwork|acuite)\b/i.test(combined);
-  const isCreditAction = /\b(credit rating|debt rating|rating revision|rating upgrade|rating downgrade|bank facilities rating|commercial paper rating)\b/i.test(combined);
-  const isEsgOnly = /\besg (rating|score|impact)\b/i.test(combined) && !isCreditAction;
-  
-  if ((isDebtRatingAgency || isCreditAction) && !isEsgOnly) {
-    return "CREDIT_EVENT";
   }
 
   // 6. REGULATORY_ACTION (Penalties, Litigation, SEBI/MCA orders, Approvals, PESO, FDA)
@@ -303,8 +351,12 @@ export function detectFilingLifecycleStage(title = "", text = "", url = "") {
     tLower.includes("record date") ||
     tLower.includes("appointment of") ||
     tLower.includes("cessation of") ||
+    tLower.includes("corrigendum") ||
+    tLower.includes("errata") ||
     urlLower.includes("votingresult") ||
     urlLower.includes("scrutinizer") ||
+    urlLower.includes("corrigendum") ||
+    urlLower.includes("errata") ||
     urlLower.includes("newspaper");
 
   if (isRoutineSecretarial && !tLower.includes("financial result") && !combined.includes("un-audited financial")) {
@@ -367,7 +419,7 @@ export function detectFilingLifecycleStage(title = "", text = "", url = "") {
   }
 
   // 5. Major Corporate Actions
-  const cat = classifyFilingCategory(title, text);
+  const cat = classifyFilingCategory(title, text, url);
   if (["ORDER_WIN", "CAPEX_COMMISSIONING", "CAPITAL_RAISE", "CAPITAL_RETURN", "RESTRUCTURING", "ACQUISITION", "REGULATORY_ACTION", "CREDIT_EVENT"].includes(cat)) {
     return "MAJOR_CORPORATE_ACTION";
   }

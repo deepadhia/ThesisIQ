@@ -4,7 +4,7 @@
  * 2. AGM Procedural vs Strategic Filtering and Labeling
  */
 
-import { isEventAlertRecentlySent, extractResultDateFromText } from '../services/announcement.service.js';
+import { isEventAlertRecentlySent, extractResultDateFromText, getIstHour, isWeeklyHeartbeatNeeded } from '../services/announcement.service.js';
 import { formatAnnouncementMessage, sendAnnouncementAlert } from '../services/telegram.service.js';
 import { classifyFilingCategory, isRoutineCreditRatingReaffirmation } from '../services/filing-classifier.service.js';
 import { pool } from '../db/pool.js';
@@ -148,6 +148,13 @@ pool.query = async (text, params) => {
         }]
       };
     }
+  }
+
+  if (queryStr.includes("last_weekly_heartbeat_at")) {
+    return { rows: [{ value: JSON.stringify('2026-10-04') }] };
+  }
+  if (queryStr.includes("INTERVAL '7 days'")) {
+    return { rows: [{ count: '0' }] };
   }
 
   return origPoolQuery.apply(pool, [text, params]);
@@ -451,6 +458,142 @@ async function runTests() {
         is_routine_credit_reaffirmation: true
       });
       expectFn(sent).toBe(false);
+    });
+
+  });
+
+  await describeFn('Credit Rating vs Capex Commissioning Invariants (HBLENGINE Case Study)', async () => {
+
+    await testFn('Credit rating upgrade mentioning project commissioning must classify as CREDIT_EVENT (never CAPEX_COMMISSIONING)', () => {
+      const category = classifyFilingCategory(
+        'update on credit rating',
+        'CARE Ratings has upgraded credit rating to CARE AA- from CARE A+. The upgrade factors in commissioning of locomotives under Kavach programme and capacity additions.',
+        'https://nsearchives.nseindia.com/corporate/HBLPOWER_09102026193130_updateoncreditrating0910.pdf'
+      );
+      expectFn(category).toBe('CREDIT_EVENT');
+    });
+
+    await testFn('Credit Rating Alert must NEVER display milestone fulfillment banner', () => {
+      const message = formatAnnouncementMessage({
+        ticker: 'HBLENGINE',
+        companyName: 'HBL Engineering Ltd',
+        title: 'update on credit rating',
+        filing_category: 'CREDIT_EVENT',
+        priority: 'HIGH',
+        impact: 'POSITIVE',
+        summary: 'CARE upgraded credit rating to CARE AA- from CARE A+ citing railway execution.'
+      });
+
+      expectFn(message).toContain('Credit Rating Action');
+      expectFn(message).not.toContain('MILESTONE FULFILLMENT');
+      expectFn(message).not.toContain('Key Thesis Milestone');
+      expectFn(message).not.toContain('Capacity Expansion & Commissioning');
+    });
+
+  });
+
+  await describeFn('Corrigendum & Errata Invariants (QPOWER Case Study)', async () => {
+
+    await testFn('Corrigendum to EGM notice must classify as ROUTINE_COMPLIANCE (never CAPITAL_RAISE)', () => {
+      const category = classifyFilingCategory(
+        'Intimation of Corrigendum to the Notice of Extraordinary General Meeting',
+        'Quality Power Electrical Equipments has issued a corrigendum to its notice of EGM to clarify floor price of preferential issue to Winwin Speciality Insulators.',
+        'https://nsearchives.nseindia.com/corporate/QPOWER1234_09102026211920_IntimationCorrigendumToEGMNotice091026Sign.pdf'
+      );
+      expectFn(category).toBe('ROUTINE_COMPLIANCE');
+    });
+
+    await testFn('sendAnnouncementAlert must suppress routine notice corrigendum', async () => {
+      const sent = await sendAnnouncementAlert({
+        ticker: 'QPOWER',
+        companyName: 'Quality Power Electrical Equipments',
+        title: 'Intimation of Corrigendum to the Notice of Extraordinary General Meeting',
+        attachment_url: 'https://nsearchives.nseindia.com/corporate/QPOWER1234_09102026211920_IntimationCorrigendumToEGMNotice091026Sign.pdf',
+        priority: 'MEDIUM',
+        impact: 'NEUTRAL — No Material Thesis Change',
+        summary: 'Issued corrigendum to EGM notice to clarify floor price for preferential issue.',
+        is_egm: true
+      });
+      expectFn(sent).toBe(false);
+    });
+
+  });
+
+  await describeFn('Procedural Voting Tallies & Scrutinizer Invariants (POLICYBZR Case Study)', async () => {
+
+    await testFn('Shareholders meeting with VotingResults / Scrutinizer PDF must classify as ROUTINE_COMPLIANCE', () => {
+      const category = classifyFilingCategory(
+        'Shareholders meeting',
+        'Scrutinizer report on voting results for 18th Annual General Meeting of PB Fintech Limited passing ordinary resolutions.',
+        'https://nsearchives.nseindia.com/corporate/POLICYBZR_30092026191308_VotingResultsScrutinizerReportAGM2026PBFL.pdf'
+      );
+      expectFn(category).toBe('ROUTINE_COMPLIANCE');
+    });
+
+    await testFn('sendAnnouncementAlert must suppress VotingResults/Scrutinizer PDF even under generic title', async () => {
+      const sent = await sendAnnouncementAlert({
+        ticker: 'POLICYBZR',
+        companyName: 'PB Fintech Ltd',
+        title: 'Shareholders meeting',
+        attachment_url: 'https://nsearchives.nseindia.com/corporate/POLICYBZR_30092026191308_VotingResultsScrutinizerReportAGM2026PBFL.pdf',
+        priority: 'HIGH',
+        impact: 'NEUTRAL — No Material Thesis Change',
+        summary: 'Passed two ordinary resolutions: adoption of accounts and re-appointment of director Ms. Kitty Agarwal.',
+        is_agm: true,
+        has_substantive_business_insights: false
+      });
+      expectFn(sent).toBe(false);
+    });
+
+  });
+
+  await describeFn('IST Bounded Operational Hours Invariants', async () => {
+
+    await testFn('getIstHour at midnight (00:00 IST) must return 0 and NEVER 24', () => {
+      const midnightDate = new Date('2026-10-10T00:00:15+05:30');
+      const hour = getIstHour(midnightDate);
+      expectFn(hour).toBe(0);
+    });
+
+    await testFn('getIstHour at morning (09:30 IST) must return 9', () => {
+      const morningDate = new Date('2026-10-10T09:30:00+05:30');
+      const hour = getIstHour(morningDate);
+      expectFn(hour).toBe(9);
+    });
+
+    await testFn('getIstHour at night (21:45 IST) must return 21', () => {
+      const nightDate = new Date('2026-10-10T21:45:00+05:30');
+      const hour = getIstHour(nightDate);
+      expectFn(hour).toBe(21);
+    });
+
+  });
+
+  await describeFn('Weekly Heartbeat & Total AGM Suppression Invariants', async () => {
+
+    await testFn('All AGM and EGM alerts must be completely suppressed from live Telegram dispatch', async () => {
+      const sent = await sendAnnouncementAlert({
+        ticker: 'POLICYBZR',
+        companyName: 'PB Fintech Ltd',
+        title: 'Notice of 18th Annual General Meeting',
+        priority: 'HIGH',
+        impact: 'POSITIVE',
+        summary: 'Annual General Meeting scheduled.',
+        is_agm: true,
+        has_substantive_business_insights: true
+      });
+      expectFn(sent).toBe(false);
+    });
+
+    await testFn('Weekly heartbeat must return false when not Sunday', async () => {
+      // isWeeklyHeartbeatNeeded evaluates today's real day/time
+      // If run on Saturday/weekday, it must return false
+      const now = new Date();
+      const dayStr = new Intl.DateTimeFormat("en-US", { timeZone: "Asia/Kolkata", weekday: "short" }).format(now);
+      const needed = await isWeeklyHeartbeatNeeded();
+      if (dayStr !== 'Sun') {
+        expectFn(needed).toBe(false);
+      }
     });
 
   });

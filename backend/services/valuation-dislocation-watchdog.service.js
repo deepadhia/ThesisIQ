@@ -19,6 +19,7 @@ import { loadAuditedPortfolioFromDatabase } from '../scripts/run-asymmetric-misp
 import { rankUniverseByMispricing, MISPRICING_OPPORTUNITY_TIER } from './asymmetric-mispricing-ranking.service.js';
 import { sendTelegramMessage } from './telegram.service.js';
 import { isMarketOpenDay, getMarketHolidayDetails, getIstDateYmd } from './market-holidays.service.js';
+import { getIstHour } from './announcement.service.js';
 
 export const COOLDOWN_DAYS = 7;
 
@@ -243,6 +244,23 @@ export function formatDislocationTelegramMessage(equity, triggerInfo = {}) {
   const underwrittenNopat = metrics.underwrittenNopatCagr || metrics.expectedCagr || 20.0;
   const expRegime = metrics.expectationsRegime || 'POTENTIAL_UNDEREXPECTATION';
 
+  const hurdle5Yr = metrics.pricingHurdle5Yr || (hasHf && hf.pricingHurdle5Yr) || {
+    conservativeExitPE: Math.max(12.0, Math.min(pe, 20.0)),
+    constantMultipleHurdleCagr: 12.0,
+    conservativeHurdleCagr: parseFloat(((Math.pow((pe * Math.pow(1.12, 5)) / Math.max(12.0, Math.min(pe, 20.0)), 0.2) - 1.0) * 100).toFixed(1)),
+    regime: pe > 26.5 ? 'PRICED_FOR_AGGRESSIVE_GROWTH' : (pe < 16.0 ? 'PRICED_FOR_STALLED_EARNINGS' : 'PRICED_FOR_MODEST_GROWTH'),
+    expectationCushionPct: parseFloat((underwrittenNopat - (((Math.pow((pe * Math.pow(1.12, 5)) / Math.max(12.0, Math.min(pe, 20.0)), 0.2) - 1.0) * 100))).toFixed(1))
+  };
+  const cushionSign = (hurdle5Yr.expectationCushionPct || 0) > 0 ? '+' : '';
+
+  msg += `🎯 *WHAT ARE YOU PAYING FOR RIGHT NOW? (5-Year Horizon)*\n`;
+  msg += `• Current P/E: *${pe}x* → Conservative Exit P/E: *${hurdle5Yr.conservativeExitPE}x*\n`;
+  msg += `• Constant Multiple Hurdle: *${hurdle5Yr.constantMultipleHurdleCagr}% CAGR* (12% Target Return)\n`;
+  msg += `• Conservative Hurdle: *${hurdle5Yr.conservativeHurdleCagr}% CAGR* (Derating to ${hurdle5Yr.conservativeExitPE}x)\n`;
+  msg += `• Trailing / Underwritten Growth: *${underwrittenNopat}% CAGR*\n`;
+  msg += `• Pricing Regime: \`${hurdle5Yr.regime}\`\n`;
+  msg += `• Expectation Cushion: *${cushionSign}${hurdle5Yr.expectationCushionPct}% pts* (\`${metrics.thesisRobustness}\`)\n\n`;
+
   msg += `📈 *LAYER 4: MARKET EXPECTATIONS GAP*\n`;
   msg += `• Underwritten NOPAT CAGR: *${underwrittenNopat}% CAGR*\n`;
   msg += `• Market-Implied CAGR: *${metrics.impliedGrowth}% CAGR*\n`;
@@ -439,9 +457,9 @@ export async function isDailyValuationWatchdogNeeded(pool = defaultPool) {
   // 1. Skip weekends & official NSE/BSE market holidays
   if (!isMarketOpenDay(now)) return false;
 
-  // 2. Trigger during market hours at 1:00 PM IST (>= 13:00 IST)
-  const istHour = parseInt(now.toLocaleString("en-US", { timeZone: "Asia/Kolkata", hour: 'numeric', hour12: false }), 10);
-  if (istHour < 13) return false;
+  // 2. Trigger during market hours at 1:00 PM IST (strictly 13:00 to 15:30 IST)
+  const istHour = getIstHour(now);
+  if (istHour < 13 || istHour > 15) return false;
 
   // 3. Prevent duplicate executions on the same date
   const todayIst = getIstDateYmd(now);

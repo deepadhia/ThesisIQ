@@ -250,6 +250,61 @@ export async function runAsymmetricRankingReport() {
     );
   }
 
+  console.log('\n=============================================================================================================================');
+  console.log('🎯  5-YEAR DUAL-HURDLE PRICING BOARD (OPTION B: WHAT ARE YOU PAYING FOR RIGHT NOW?)');
+  console.log('=============================================================================================================================\n');
+
+  console.log(
+    'Rank'.padEnd(5) +
+    'Ticker'.padEnd(12) +
+    'CMP(₹)'.padEnd(9) +
+    'PE'.padEnd(7) +
+    'ExitPE'.padEnd(8) +
+    'ConstHurdle'.padEnd(13) +
+    'ConsHurdle'.padEnd(12) +
+    'Underwritten'.padEnd(14) +
+    'Cushion'.padEnd(10) +
+    'PricingRegime'.padEnd(30) +
+    'Addition Verdict'
+  );
+  console.log('-'.repeat(145));
+
+  for (const r of ranked) {
+    const sc = r.thesisIqScorecard || {};
+    const ph = sc.pricingHurdle5Yr || {};
+    const cushionSign = (ph.expectationCushionPct || 0) > 0 ? '+' : '';
+    const cushionStr = `${cushionSign}${ph.expectationCushionPct || 0}%`.padEnd(10);
+
+    let verdict = 'HOLD / FAIR PRICE';
+    if (r.opportunityTier === 'STRUCTURAL_VALUE_TRAP') {
+      verdict = 'AVOID / EXIT';
+    } else if (r.opportunityTier === 'WATCHLIST_FRICTION' || sc.economicEngineState === 'UNDER_REVALIDATION') {
+      verdict = 'WATCH / WC FRICTION';
+    } else if (ph.regime === 'PRICED_FOR_AGGRESSIVE_GROWTH') {
+      verdict = 'EXPENSIVE (HIGH HURDLE)';
+    } else if (r.price <= sc.buyBelowPrice || (sc.asymmetryRatio >= 1.5 && (ph.expectationCushionPct || 0) >= 5.0)) {
+      verdict = '⭐ PRIME ADDITION ZONE';
+    } else if ((ph.expectationCushionPct || 0) >= 5.0 && sc.asymmetryRatio >= 1.0) {
+      verdict = '🟢 ATTRACTIVE ACCUMULATION';
+    } else if (r.price > sc.fairValuePrice * 1.15) {
+      verdict = 'TRIM / PRICED TO PERFECTION';
+    }
+
+    console.log(
+      `#${r.universeRank}`.padEnd(5) +
+      r.ticker.padEnd(12) +
+      `₹${r.price.toFixed(1)}`.padEnd(9) +
+      `${r.pe.toFixed(1)}x`.padEnd(7) +
+      `${ph.conservativeExitPE}x`.padEnd(8) +
+      `${ph.constantMultipleHurdleCagr}%`.padEnd(13) +
+      `${ph.conservativeHurdleCagr}%`.padEnd(12) +
+      `${ph.underwrittenCagr}%`.padEnd(14) +
+      cushionStr +
+      (ph.regime || '').padEnd(30) +
+      verdict
+    );
+  }
+
   // Save detailed Markdown dossier into reports/thesis_board/
   const reportDir = path.join(__dirname, '..', '..', 'reports', 'thesis_board');
   if (!fs.existsSync(reportDir)) {
@@ -320,7 +375,38 @@ ThesisIQ v3.1 evaluates every company through **8 Sequential Reality Layers**:
   md += `
 ---
 
-## 4. 5× Economic Pathway Feasibility & Multibagger Engine Audit (7-Year Horizon @ 25.85% CAGR)
+## 4. 5-Year Dual-Hurdle Pricing Board (Option B: What Are You Paying For Right Now?)
+
+| Ticker | CMP (₹) | Current P/E | Exit P/E (Derated) | Constant Multiple Hurdle | Conservative Hurdle (to Exit P/E) | Underwritten Growth | Expectation Cushion (% pts) | Pricing Regime | Addition Suitability Verdict |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :--- | :--- |
+`;
+
+  for (const r of ranked) {
+    const sc = r.thesisIqScorecard || {};
+    const ph = sc.pricingHurdle5Yr || {};
+    const cushionSign = (ph.expectationCushionPct || 0) > 0 ? '+' : '';
+    let verdict = 'HOLD / FAIR PRICE';
+    if (r.opportunityTier === 'STRUCTURAL_VALUE_TRAP') {
+      verdict = 'AVOID / EXIT';
+    } else if (r.opportunityTier === 'WATCHLIST_FRICTION' || sc.economicEngineState === 'UNDER_REVALIDATION') {
+      verdict = 'WATCH / WC FRICTION';
+    } else if (ph.regime === 'PRICED_FOR_AGGRESSIVE_GROWTH') {
+      verdict = 'EXPENSIVE (HIGH HURDLE)';
+    } else if (r.price <= sc.buyBelowPrice || (sc.asymmetryRatio >= 1.5 && (ph.expectationCushionPct || 0) >= 5.0)) {
+      verdict = '⭐ PRIME ADDITION ZONE';
+    } else if ((ph.expectationCushionPct || 0) >= 5.0 && sc.asymmetryRatio >= 1.0) {
+      verdict = '🟢 ATTRACTIVE ACCUMULATION';
+    } else if (r.price > sc.fairValuePrice * 1.15) {
+      verdict = 'TRIM / PRICED TO PERFECTION';
+    }
+
+    md += `| **${r.ticker}** | ₹${r.price.toFixed(2)} | ${r.pe}x | ${ph.conservativeExitPE}x | ${ph.constantMultipleHurdleCagr}% | **${ph.conservativeHurdleCagr}%** | **${ph.underwrittenCagr}%** | **${cushionSign}${ph.expectationCushionPct}% pts** | \`${ph.regime}\` | **${verdict}** |\n`;
+  }
+
+  md += `
+---
+
+## 5. 5× Economic Pathway Feasibility & Multibagger Engine Audit (7-Year Horizon @ 25.85% CAGR)
 
 | Ticker | Current NOPAT (₹Cr) | Target 5× NOPAT (₹Cr) | Required 7Y CAGR | Required 5× Rev (₹Cr) | Incr Capital (₹Cr) | Addressable TAM (₹Cr) | Current Share (%) | Required Share (%) | Share Expansion Delta (%) | 5× Pathway Status |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :--- |
@@ -347,7 +433,7 @@ ThesisIQ v3.1 evaluates every company through **8 Sequential Reality Layers**:
   md += `
 ---
 
-## 5. State Transition & Version Upgrade Audit (v3.0 → v3.1)
+## 6. State Transition & Version Upgrade Audit (v3.0 → v3.1)
 
 | Ticker | v3.0 Classification | v3.1 Classification | Economic Rationale for Transition (Reconciled from Model Object) |
 | :--- | :--- | :--- | :--- |

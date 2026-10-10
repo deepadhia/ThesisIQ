@@ -9,14 +9,14 @@ import {
   saveAnnouncement,
   updateStockResultDate,
   resetStuckPending,
+  isWeeklyHeartbeatNeeded,
+  sendWeeklyHeartbeat,
   isHeartbeatNeeded,
   markHeartbeatSent,
   extractTextFromPdfUrl,
   extractResultDateFromText,
   isConcallOrTranscript,
   getConcallType,
-  isNightlyQuietSummaryNeeded,
-  sendNightlyQuietSummary,
   recordScannerSuccess,
   recordScannerFailure
 } from "../services/announcement.service.js";
@@ -55,24 +55,13 @@ async function withRetry(fn, label = "Operation", retries = 2) {
 const MAX_ALERTS_PER_RUN = 10;
 
 /**
- * Daily Heartbeat to confirm the system is alive.
- * Sent at ~9:30 AM (handled by cron or manual run check).
+ * Weekly Heartbeat to confirm the system is alive.
+ * Dispatched strictly once per week (Sunday 10-12 IST) ONLY IF 0 alerts fired in the past 7 days.
  */
-async function sendHeartbeat() {
-  const needed = await isHeartbeatNeeded();
+async function sendHeartbeat(stocksCount = 20) {
+  const needed = await isWeeklyHeartbeatNeeded();
   if (needed) {
-    const today = new Date().toLocaleDateString("en-IN", { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', timeZone: 'Asia/Kolkata' });
-    const time = new Date().toLocaleTimeString("en-IN", { hour: '2-digit', minute: '2-digit', hour12: true, timeZone: 'Asia/Kolkata' });
-    const msg = `🟢 *SYSTEM HEARTBEAT ACTIVE*\n` +
-      `──────────────────────────────\n` +
-      `📡 *Status:* 24/7 Corporate Filing Scanner Online\n` +
-      `📅 *Date:* ${today} (${time} IST)\n` +
-      `🎯 *Scope:* BSE & NSE Watchlist Filings\n` +
-      `──────────────────────────────\n` +
-      `_ThesisIQ Monitoring Engine Active_`;
-    await sendTelegramMessage(msg);
-    await markHeartbeatSent();
-    console.log("Heartbeat sent.");
+    await sendWeeklyHeartbeat(stocksCount);
   }
 }
 
@@ -85,10 +74,6 @@ export async function scan({ isDryRun = false, runUrl = null, targetTicker = nul
 
   // 0. System Cleanup & Heartbeat
   await resetStuckPending();
-  if (!targetTicker) {
-    await sendHeartbeat();
-  }
-
   // 1. Get portfolio & watchlist stocks dynamically from DB
   let query = "SELECT id, ticker, company_name, COALESCE(nse_symbol, ticker) AS nse_symbol, bse_scrip_code, investment_thesis, category FROM stocks WHERE (category IN ('Core', 'Watchlist') OR category IS NULL)";
   const params = [];
@@ -99,6 +84,10 @@ export async function scan({ isDryRun = false, runUrl = null, targetTicker = nul
   query += " ORDER BY ticker";
   const { rows: stocks } = await pool.query(query, params);
   writeLog("SCANNER", `🔍 Monitoring ${stocks.length} stock(s) across NSE & BSE${targetTicker ? ` (Filtered: ${targetTicker})` : ''}`);
+
+  if (!targetTicker) {
+    await sendHeartbeat(stocks.length);
+  }
 
   // ── Run-level stats (for end-of-run summary) ──
   let alertsSent        = 0;
@@ -305,7 +294,7 @@ export async function scan({ isDryRun = false, runUrl = null, targetTicker = nul
         }
 
         // 6e. Specialized Filing Category Classification & Detail Extraction
-        const filingCategory = classifyFilingCategory(title, announcementText);
+        const filingCategory = classifyFilingCategory(title, announcementText, ann.attachment || docUrl);
         let eventAnalysis = null;
         if (filingCategory !== "GENERAL" && filingCategory !== "ROUTINE_COMPLIANCE") {
           eventAnalysis = await extractCorporateActionDetails(filingCategory, ticker, announcementText, stock.investment_thesis);
@@ -332,6 +321,36 @@ export async function scan({ isDryRun = false, runUrl = null, targetTicker = nul
         let sentToTelegram = false;
         const isRegulatoryOrCredit = ["REGULATORY_ACTION", "CREDIT_EVENT"].includes(filingCategory);
         
+        // 7a. Clerical Corrigendums & Erratas Gate (Clerical amendments to meeting notices, agendas, disclosures)
+        const isCorrigendumOrErrata = Boolean(
+          titleLower.includes("corrigendum") ||
+          titleLower.includes("errata") ||
+          (ann.attachment && (ann.attachment.toLowerCase().includes("corrigendum") || ann.attachment.toLowerCase().includes("errata")))
+        );
+
+        if (isCorrigendumOrErrata && !titleLower.includes("financial result") && !announcementText.toLowerCase().includes("un-audited financial")) {
+          aiResult.priority = "LOW";
+          console.log(`[CORRIGENDUM/ERRATA] Routine clerical corrigendum/errata for ${ticker}. Downgraded priority to LOW.`);
+        }
+
+        // 7b. Statutory Voting Results & Scrutinizer Reports Gate
+        const isVotingOrScrutinizerFiling = Boolean(
+          titleLower.includes("voting result") ||
+          titleLower.includes("voting results") ||
+          titleLower.includes("scrutinizer") ||
+          titleLower.includes("regulation 44") ||
+          titleLower.includes("reg 44") ||
+          (ann.attachment && (
+            ann.attachment.toLowerCase().includes("votingresult") ||
+            ann.attachment.toLowerCase().includes("voting_result") ||
+            ann.attachment.toLowerCase().includes("scrutinizer") ||
+            ann.attachment.toLowerCase().includes("reg44") ||
+            ann.attachment.toLowerCase().includes("regulation44")
+          )) ||
+          announcementText.toLowerCase().includes("scrutinizer's report") ||
+          announcementText.toLowerCase().includes("scrutinizer report")
+        );
+
         const isEgm = Boolean(
           aiResult?.is_egm ||
           eventAnalysis?.is_egm ||
@@ -361,19 +380,51 @@ export async function scan({ isDryRun = false, runUrl = null, targetTicker = nul
           title.toUpperCase().includes("OUTCOME") || 
           title.toUpperCase().includes("PROCEEDINGS") || 
           title.toUpperCase().includes("VOTING RESULTS") ||
-          (ann.attachment && (ann.attachment.toLowerCase().includes("outcome") || ann.attachment.toLowerCase().includes("proceedings")))
+          isVotingOrScrutinizerFiling ||
+          (ann.attachment && (
+            ann.attachment.toLowerCase().includes("outcome") || 
+            ann.attachment.toLowerCase().includes("proceedings") ||
+            ann.attachment.toLowerCase().includes("votingresult") ||
+            ann.attachment.toLowerCase().includes("scrutinizer")
+          ))
         );
 
         // Defer Stage 1 results, Stage 2 concall, and audio deep dives to quarterly-deepdive-worker.js
         const isQueuedForDeepDive = deepDiveStatus === "pending_stage1" || deepDiveStatus === "pending_stage2" || deepDiveStatus === "pending_audio";
         
         // AGM filings must only alert if they contain genuine substantive business insights (e.g. Chairman speech, capacity roadmap, order pipeline)
-        // Routine procedural voting cover letters (ordinary business, dividend confirmation, director rotation) are LOW priority and must be suppressed.
+        // Routine procedural voting cover letters (ordinary business, dividend confirmation, director rotation, scrutinizer reports) are LOW priority and must be suppressed.
         const isAgmFiling = isAgm || isAgmCompleted;
-        const hasMaterialAgmHighlights = isAgmFiling && Boolean(
-          aiResult?.has_substantive_business_insights ||
-          (aiResult?.agm_highlights && (Array.isArray(aiResult.agm_highlights) ? aiResult.agm_highlights.length > 0 : (aiResult.agm_highlights.trim().length > 20 && !aiResult.agm_highlights.toLowerCase().includes("null"))))
+        const agmHighlightStr = typeof aiResult?.agm_highlights === "string" ? aiResult.agm_highlights.toLowerCase() : JSON.stringify(aiResult?.agm_highlights || "").toLowerCase();
+        const isProceduralResolutionText = 
+          agmHighlightStr.includes("adoption of audited") ||
+          agmHighlightStr.includes("adoption of financial") ||
+          agmHighlightStr.includes("re-appointment of") ||
+          agmHighlightStr.includes("reappointment of") ||
+          agmHighlightStr.includes("appointment of director") ||
+          agmHighlightStr.includes("ordinary resolution") ||
+          agmHighlightStr.includes("ordinary business") ||
+          agmHighlightStr.includes("requisite majority") ||
+          agmHighlightStr.includes("scrutinizer");
+
+        const hasSubstantiveAgmAddress = Boolean(
+          titleLower.includes("speech") ||
+          titleLower.includes("address") ||
+          titleLower.includes("presentation") ||
+          announcementText.toLowerCase().includes("chairman's speech") ||
+          announcementText.toLowerCase().includes("chairmans speech") ||
+          announcementText.toLowerCase().includes("managing director's address")
         );
+
+        const hasMaterialAgmHighlights = isAgmFiling && (
+          hasSubstantiveAgmAddress ||
+          (Boolean(aiResult?.has_substantive_business_insights) && !isProceduralResolutionText && !isVotingOrScrutinizerFiling)
+        );
+
+        if (isVotingOrScrutinizerFiling && !hasSubstantiveAgmAddress) {
+          aiResult.priority = "LOW";
+          console.log(`[VOTING/SCRUTINIZER] Procedural voting results / scrutinizer report for ${ticker}. Downgraded priority to LOW.`);
+        }
 
         // Check routine credit rating reaffirmation (annual surveillance reaffirming existing limits with stable outlook has zero price impact)
         const isRoutineCreditReaffirmation = filingCategory === "CREDIT_EVENT" && isRoutineCreditRatingReaffirmation({
@@ -410,14 +461,24 @@ export async function scan({ isDryRun = false, runUrl = null, targetTicker = nul
           aiResult.confidence === "LOW"
         );
 
-        // Procedural AGM voting tallies and scrutinizer reports must NEVER alert
-        const isProceduralAgm = isAgmFiling && !hasMaterialAgmHighlights && !aiResult?.has_substantive_business_insights;
+        // Meeting filings (AGM, EGM, Postal Ballot) are permanently suppressed from Telegram per user mandate.
+        // They are silently logged and archived into the database without alerting the user.
+        const isMeetingFiling = isAgm || isAgmCompleted || isEgm || isPostalBallot;
 
-        const shouldHaveAlerted = !isQueuedForDeepDive && !isUnparsedZipFallback && !isProceduralAgm && !isRoutineCreditReaffirmation && (
-          (aiResult.priority === "HIGH" && !isAgmFiling) ||
-          (isMajorCorporateAction && aiResult.priority !== "LOW") ||
-          (isAgmFiling && aiResult.priority !== "LOW" && hasMaterialAgmHighlights) ||
-          (aiResult.priority === "MEDIUM" && (aiResult.has_substantive_business_insights || hasMaterialAgmHighlights))
+        const isSuppressedCorrigendum = isCorrigendumOrErrata && (
+          filingCategory === "ROUTINE_COMPLIANCE" || 
+          aiResult.priority === "LOW" || 
+          String(aiResult?.impact || "").includes("NEUTRAL")
+        );
+
+        const shouldHaveAlerted = !isQueuedForDeepDive && 
+          !isUnparsedZipFallback && 
+          !isMeetingFiling && 
+          !isRoutineCreditReaffirmation && 
+          !isSuppressedCorrigendum && (
+          (aiResult.priority === "HIGH") ||
+          (isMajorCorporateAction && aiResult.priority !== "LOW" && !String(aiResult?.impact || "").includes("NEUTRAL")) ||
+          (aiResult.priority === "MEDIUM" && !String(aiResult?.impact || "").includes("NEUTRAL") && aiResult.has_substantive_business_insights)
         );
 
         // 7a. Event-level Deduplication Guard (Check if alert sent recently for same ticker & event identity)
@@ -473,6 +534,7 @@ export async function scan({ isDryRun = false, runUrl = null, targetTicker = nul
                 filing_category: filingCategory,
                 exchangeTimestamp: timestamp,
                 docUrl,
+                attachment_url: docUrl,
                 source: annSource,
                 is_agm: isAgm,
                 is_egm: isEgm,
@@ -612,16 +674,7 @@ export async function scan({ isDryRun = false, runUrl = null, targetTicker = nul
     console.error("[SCAN WARN] Market-hours valuation watchdog failed:", err.message);
   }
 
-  // ── Nightly quiet-day summary ─────────────────────────────────────────────
-  // Sends once per day at >= 21:00 IST, only when zero Telegram alerts fired.
-  try {
-    if (!isDryRun && await isNightlyQuietSummaryNeeded()) {
-      console.log("[SCAN] Sending nightly quiet-day summary...");
-      await sendNightlyQuietSummary(stocks.length);
-    }
-  } catch (err) {
-    console.error("[WARN] Failed to send nightly quiet summary:", err.message);
-  }
+
 
   // ── Health & Uptime Circuit Breaker ────────────────────────────────────────
   if (!isDryRun && !targetTicker) {

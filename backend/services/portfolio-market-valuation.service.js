@@ -24,75 +24,43 @@ function sleep(ms) {
 /**
  * Fetches raw HTML from Screener with consolidated/standalone fallback.
  */
-function fetchScreenerHtml(slugOrScrip) {
-  return new Promise((resolve) => {
+async function fetchScreenerHtml(slugOrScrip) {
+  if (!slugOrScrip) return null;
+
+  const slugsToTry = [slugOrScrip];
+  if (slugOrScrip === 'HBLENGINE') slugsToTry.push('HBLPOWER');
+  if (slugOrScrip === 'ASTRAMICRO') slugsToTry.push('ASTRAMICRO');
+
+  for (const slug of slugsToTry) {
     const urls = [
-      `https://www.screener.in/company/${encodeURIComponent(slugOrScrip)}/consolidated/`,
-      `https://www.screener.in/company/${encodeURIComponent(slugOrScrip)}/`
+      `https://www.screener.in/company/${encodeURIComponent(slug)}/consolidated/`,
+      `https://www.screener.in/company/${encodeURIComponent(slug)}/`
     ];
 
-    function tryFetch(idx) {
-      if (idx >= urls.length) {
-        return resolve(null);
-      }
-
-      const url = urls[idx];
-      const req = https.get(
-        url,
-        {
+    for (const url of urls) {
+      try {
+        const res = await fetch(url, {
           headers: {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.9'
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Cache-Control': 'no-cache'
           },
-          timeout: 10000
-        },
-        (res) => {
-          // Follow redirect if 301/302
-          if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-            let redirectUrl = res.headers.location;
-            if (redirectUrl.startsWith('/')) {
-              redirectUrl = `https://www.screener.in${redirectUrl}`;
-            }
-            https.get(redirectUrl, { headers: { 'User-Agent': 'Mozilla/5.0' }, timeout: 10000 }, (res2) => {
-              let data2 = '';
-              res2.on('data', c => data2 += c);
-              res2.on('end', () => {
-                if (res2.statusCode === 200 && data2.includes('top-ratios')) {
-                  resolve(data2);
-                } else {
-                  tryFetch(idx + 1);
-                }
-              });
-            }).on('error', () => tryFetch(idx + 1));
-            return;
-          }
+          redirect: 'follow',
+          signal: AbortSignal.timeout(12000)
+        });
 
-          if (res.statusCode !== 200) {
-            return tryFetch(idx + 1);
+        if (res.ok) {
+          const text = await res.text();
+          if (text.includes('top-ratios')) {
+            return text;
           }
-
-          let data = '';
-          res.on('data', chunk => data += chunk);
-          res.on('end', () => {
-            if (data.includes('top-ratios')) {
-              resolve(data);
-            } else {
-              tryFetch(idx + 1);
-            }
-          });
         }
-      );
-
-      req.on('error', () => tryFetch(idx + 1));
-      req.on('timeout', () => {
-        req.destroy();
-        tryFetch(idx + 1);
-      });
+      } catch (_) {}
     }
+  }
 
-    tryFetch(0);
-  });
+  return null;
 }
 
 /**
@@ -322,8 +290,8 @@ export async function syncAllPortfolioValuations(pool, options = {}) {
   for (const stock of sRes.rows) {
     const res = await syncStockMarketValuation(stock, pool, options);
     results.push(res);
-    // 250ms delay between fetches to respect exchange/Screener servers
-    await sleep(250);
+    // 600ms delay between fetches to respect exchange/Screener servers
+    await sleep(600);
   }
 
   return results;

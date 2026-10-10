@@ -33,7 +33,9 @@ import {
   EXPECTATIONS_REGIME,
   FCFF_CONVERSION_STATUS,
   FCFF_CONVERSION_THRESHOLDS,
-  MISPRICING_OPPORTUNITY_TIER
+  MISPRICING_OPPORTUNITY_TIER,
+  calculate5YearPricingHurdle,
+  PRICING_HURDLE_REGIME
 } from '../services/asymmetric-mispricing-ranking.service.js';
 
 let totalTests = 0;
@@ -468,6 +470,36 @@ const ranked = rankUniverseByMispricing(testUniverse);
 assert(ranked[0].ticker === 'HBLENGINE', 'Rank #1 is HBLENGINE (COMPOUNDING_AT_FAIR_PRICE)');
 assert(ranked[1].ticker === 'INOXINDIA', 'Rank #2 is INOXINDIA (OVERVALUED_COMPOUNDER)');
 assert(ranked[2].ticker === 'SHAKTIPUMP', 'Rank #3 is SHAKTIPUMP (STRUCTURAL_VALUE_TRAP)');
+
+// -------------------------------------------------------------------------
+// Test 9: Option B 5-Year Dual-Hurdle Pricing Engine Invariants
+// -------------------------------------------------------------------------
+console.log('\n--- 9. Testing Option B: 5-Year Dual-Hurdle Pricing Engine Invariants ---');
+
+// Case 1: Multiple at 20x (Exit at 20x)
+const hurdle20x = calculate5YearPricingHurdle({ currentPE: 20.0, underwrittenCagr: 25.0 });
+assert(hurdle20x.conservativeExitPE === 20.0, 'P/E 20x exit is clamped at 20.0x');
+assert(hurdle20x.constantMultipleHurdleCagr === 12.0, 'Constant multiple hurdle is strictly 12.0% CAGR');
+assert(hurdle20x.conservativeHurdleCagr === 12.0, 'P/E 20x conservative hurdle is strictly 12.0% CAGR');
+assert(hurdle20x.expectationCushionPct === 13.0, 'Expectation cushion is 25.0% - 12.0% = +13.0% pts');
+assert(hurdle20x.regime === PRICING_HURDLE_REGIME.PRICED_FOR_MODEST_GROWTH, 'P/E 20x is classified as PRICED_FOR_MODEST_GROWTH');
+
+// Case 2: Multiple at 40x (Exit derates from 40x to 20x)
+const hurdle40x = calculate5YearPricingHurdle({ currentPE: 40.0, underwrittenCagr: 25.0 });
+assert(hurdle40x.conservativeExitPE === 20.0, 'P/E 40x exit derates to 20.0x');
+assert(hurdle40x.conservativeHurdleCagr === 28.7, 'P/E 40x conservative hurdle is 28.7% CAGR (Actual: ' + hurdle40x.conservativeHurdleCagr + '%)');
+assert(hurdle40x.expectationCushionPct === -3.7, 'P/E 40x expectation cushion is 25.0% - 28.7% = -3.7% pts');
+assert(hurdle40x.regime === PRICING_HURDLE_REGIME.PRICED_FOR_AGGRESSIVE_GROWTH, 'P/E 40x is classified as PRICED_FOR_AGGRESSIVE_GROWTH');
+
+// Case 3: Sub-20x Multiple (e.g. 15.6x)
+const hurdle15x = calculate5YearPricingHurdle({ currentPE: 15.6, underwrittenCagr: 28.0 });
+assert(hurdle15x.conservativeExitPE === 15.6, 'P/E 15.6x exit remains at 15.6x');
+assert(hurdle15x.conservativeHurdleCagr === 12.0, 'P/E 15.6x conservative hurdle is 12.0% CAGR');
+assert(hurdle15x.expectationCushionPct === 16.0, 'Expectation cushion is 28.0% - 12.0% = +16.0% pts');
+
+// Case 4: Scorecard & Evaluated equity integration
+assert(hblEvaluated.metrics.pricingHurdle5Yr !== undefined, 'Evaluated equity metrics attaches pricingHurdle5Yr');
+assert(hblEvaluated.thesisIqScorecard.pricingHurdle5Yr !== undefined, 'Scorecard attaches pricingHurdle5Yr');
 
 console.log('\n================================================================================================');
 console.log(`🎉 ALL ${passedTests}/${totalTests} THESISIQ v3.1 INVARIANT TESTS PASSED CLEANLY!`);
