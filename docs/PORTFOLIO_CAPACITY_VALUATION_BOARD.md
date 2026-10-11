@@ -1,6 +1,6 @@
 # Portfolio Capacity-Normalized Valuation & P/E Compression Board
 
-**Generated**: 2026-10-10T18:27:25.230Z  
+**Generated**: 2026-10-11T08:45:39.913Z  
 **Methodology**: Dynamic Asset-Turnover Capacity Normalization & ROCE-Tethered Terminal Compression Stress Testing
 
 | Ticker | CMP | Trailing P/E | ROCE | Primary Growth Engine | Full-Capacity PAT | Capacity Fwd P/E | Exit P/E | Compression Buffer % | Verdict | Tranche Allocation |
