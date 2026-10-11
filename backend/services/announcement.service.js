@@ -1155,6 +1155,64 @@ export async function recordScannerFailure(error, options = {}) {
 
 
 /**
+ * Multimodal Gemini Vision OCR fallback for scanned zero-text PDFs.
+ */
+async function ocrPdfWithGemini(uint8Buffer, apiKey) {
+  if (!apiKey || !uint8Buffer || uint8Buffer.length === 0) return null;
+  // Guard: max 20MB inline base64
+  if (uint8Buffer.length > 20 * 1024 * 1024) {
+    console.warn("[PDF OCR WARN] PDF exceeds 20MB inline limit for Gemini OCR.");
+    return null;
+  }
+
+  const base64Data = Buffer.from(uint8Buffer).toString("base64");
+  const models = ["gemini-flash-latest", "gemini-2.5-flash", "gemini-1.5-flash", "gemini-flash-lite-latest"];
+
+  for (const model of models) {
+    try {
+      const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents: [{
+            parts: [
+              {
+                inlineData: {
+                  mimeType: "application/pdf",
+                  data: base64Data
+                }
+              },
+              {
+                text: "Extract and transcribe all text from this corporate filing document verbatim. Pay particular attention to all financial results tables, row labels (Revenue from operations, Total Income, PBT, Profit for the Period / PAT), and column figures (Quarter Ended, Half Year Ended, Year Ended). Preserve exact numbers."
+              }
+            ]
+          }],
+          generationConfig: {
+            temperature: 0.1,
+            maxOutputTokens: 8192
+          }
+        })
+      });
+
+      if (!res.ok) {
+        const errText = await res.text();
+        console.warn(`[GEMINI OCR] Model ${model} returned ${res.status}: ${errText.substring(0, 100)}`);
+        continue;
+      }
+
+      const data = await res.json();
+      const extractedText = data.candidates?.[0]?.content?.parts?.[0]?.text;
+      if (extractedText && extractedText.length > 50) {
+        return extractedText.replace(/\s+/g, ' ').trim().substring(0, 60000);
+      }
+    } catch (err) {
+      console.warn(`[GEMINI OCR] Attempt with ${model} failed: ${err.message}`);
+    }
+  }
+  return null;
+}
+
+/**
  * Downloads a PDF from a URL and extracts its text content.
  * Limited to first ~10,000 characters to prevent AI context overflow.
  * 
@@ -1223,10 +1281,24 @@ export async function extractTextFromPdfUrl(url) {
       }
       
       // Clean up text: remove extra whitespace and truncate
-      const cleanText = data.text
+      let cleanText = data.text
         .replace(/\s+/g, ' ')
         .trim()
         .substring(0, 60000);
+
+      // OCR Fallback: If pdf-parse extracted < 100 characters (scanned image PDF), fallback to Gemini Vision
+      if (cleanText.length < 100 && process.env.GEMINI_API_KEY) {
+        try {
+          console.log(`[PDF OCR] Minimal text extracted (${cleanText.length} chars). Invoking Gemini Multimodal Document OCR...`);
+          const ocrText = await ocrPdfWithGemini(uint8, process.env.GEMINI_API_KEY);
+          if (ocrText && ocrText.length > 50) {
+            cleanText = ocrText;
+            console.log(`[PDF OCR SUCCESS] Extracted ${cleanText.length} characters via Gemini Vision OCR.`);
+          }
+        } catch (ocrErr) {
+          console.warn(`[PDF OCR WARN] Gemini vision fallback encountered an issue: ${ocrErr.message}`);
+        }
+      }
 
       console.log(`[PDF] Extracted ${cleanText.length} characters.`);
       return cleanText;

@@ -7,9 +7,14 @@
   - Replaced static exit multiple assumption with dynamic ROCE tethering: $\ge 30\% \to 32\text{x}$, $\ge 22\% \to 26\text{x}$, $\ge 16\% \to 20\text{x}$, $< 16\% \to 15\text{x}$.
   - Expanded pricing hurdle regimes from 3 tiers to 5 distinct tiers: `DEEP_VALUE_DISLOCATION`, `PRICED_FOR_MODEST_GROWTH`, `FAIR_PRICE_COMPOUNDER`, `AGGRESSIVE_GROWTH_PREMIUM`, `HYPER_VALUATION_MOMENTUM`.
   - Updated Addition Verdict resolution in `run-asymmetric-mispricing-ranking.js` to reward high-ROCE compounders trading at fair valuation without applying false de-rating penalties.
-- **Season 2 Invariant Regression Test Suite (`backend/tests/regression/season2-earnings-invariants.test.js`)**:
-  - 15 dedicated invariant tests verifying ROCE-tethered exit multiple bounds, 5-tier regime classifications, canonical fiscal quarter parsing, procedural notice filtering, and fail-closed thesis gating.
-  - Full Vitest suite passing with 100% success rate (**89 / 89 tests passing across 9 test suites**).
+- **Consolidated-First Financial Statement Slicer (`financial-validator.service.js`)**:
+  - Automatically isolates the Consolidated Financial Results table in multi-section filings, eliminating the bug where Standalone numbers were parsed first for companies with major subsidiaries.
+  - Broadened Ind-AS regex to capture all standard P&L line item variations (`Profit for the period`, `Net profit after tax`) and cleanly populates both `patStandalone` and `patConsolidated`.
+- **Multimodal Gemini Vision OCR Fallback (`announcement.service.js`)**:
+  - Automatically invokes Gemini Document Vision when `pdf-parse` extracts $< 100$ characters due to scanned paper image filings, ensuring zero silent data drops.
+- **Season 2 & Financial Validator Regression Suites (`season2-earnings-invariants.test.js`, `financial-validator-consolidated.test.js`)**:
+  - 21 dedicated invariant tests verifying ROCE-tethered exit multiple bounds, 5-tier regime classifications, canonical fiscal quarter parsing, procedural notice filtering, consolidated table isolation, unit scale normalization, and fail-closed thesis gating.
+  - Full Vitest suite passing with 100% success rate (**95 / 95 tests passing across 10 test suites**).
 
 ### Fixed & Enhanced
 - **Earnings Announcement Filtering & False-Positive Guard (`scan-announcements.js`, `filing-classifier.service.js`)**:

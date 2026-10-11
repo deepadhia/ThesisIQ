@@ -47,18 +47,47 @@ export function extractDeterministicFinancials(pdfText = "") {
     segmentRedFlags: []
   };
 
-  const tableLines = lines;
-  const incomeStatementLines = lines;
-
   // Helper to parse numbers and detect unit scale (Millions vs Lakhs vs Crores)
   const isMillions = fullTextLower.includes("in million") || fullTextLower.includes("rs. millions") || fullTextLower.includes("in mn") || fullTextLower.includes("in rs. millions");
   const isLakhs = !isMillions && (fullTextLower.includes("lakh") || fullTextLower.includes("lacs") || fullTextLower.includes("in lac"));
 
-  const parseRowNumbers = (linePattern) => {
-    for (let i = 0; i < incomeStatementLines.length; i++) {
-      if (linePattern.test(incomeStatementLines[i])) {
+  // Consolidated Statement Slicer: Prioritize Consolidated Financial Results Table if present
+  let incomeStatementLines = lines;
+  const isConsolidatedMentioned = 
+    fullTextLower.includes("consolidated") && 
+    (fullTextLower.includes("statement of consolidated") || 
+     fullTextLower.includes("consolidated financial results") || 
+     fullTextLower.includes("consolidated unaudited") || 
+     fullTextLower.includes("consolidated audited") ||
+     fullTextLower.includes("consolidated statement of profit and loss"));
+
+  if (isConsolidatedMentioned) {
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      // Heading must specify consolidated results/P&L and NOT be a cover letter, notice, or audit report
+      const isConsolidatedHeading = 
+        /(?:statement\s+of\s+consolidated\s+(?:un-?audited|audited)?\s*financial\s+results|consolidated\s+(?:un-?audited|audited)?\s*financial\s+results|consolidated\s+statement\s+of\s+profit\s+and\s+loss|statement\s+of\s+profit\s+and\s+loss\s+\(consolidated\))/i.test(line) &&
+        !/(?:report|auditor|independent\s+auditor|limited\s+review|notice|outcome|covering|board\s+meeting|agenda|submission\s+of)/i.test(line);
+
+      if (isConsolidatedHeading) {
+        // Lookahead up to 35 lines for core income statement line items
+        const hasIncomeRows = lines.slice(i + 1, i + 35).some(subLine => 
+          /(?:revenue\s+from\s+operations|income\s+from\s+operations|total\s+income|cost\s+of\s+materials|expenses)/i.test(subLine)
+        );
+
+        if (hasIncomeRows) {
+          incomeStatementLines = lines.slice(i);
+          break;
+        }
+      }
+    }
+  }
+
+  const parseRowNumbers = (linePattern, sourceLines = incomeStatementLines) => {
+    for (let i = 0; i < sourceLines.length; i++) {
+      if (linePattern.test(sourceLines[i])) {
         // Search current line and next 2 lines for column numbers
-        const textToSearch = `${incomeStatementLines[i]} ${incomeStatementLines[i + 1] || ""} ${incomeStatementLines[i + 2] || ""}`;
+        const textToSearch = `${sourceLines[i]} ${sourceLines[i + 1] || ""} ${sourceLines[i + 2] || ""}`;
         
         // Remove CIN numbers, BSE codes, dates, 4-digit years, and PIN codes before regex extraction
         const sanitized = textToSearch
@@ -95,7 +124,11 @@ export function extractDeterministicFinancials(pdfText = "") {
   };
 
   // 1. Revenue / Sales from Operations (YoY & QoQ Engine)
-  const revNumbers = parseRowNumbers(/(?:sales\/income\s+from\s+operations|revenue\s+from\s+operations|total\s+income|income\s+from\s+operations|^I\.\s*[\d,])/i);
+  let revNumbers = parseRowNumbers(/(?:sales\/income\s+from\s+operations|revenue\s+from\s+operations|total\s+income|income\s+from\s+operations|^I\.\s*[\d,])/i);
+  // Fail-safe: If consolidated slice failed to locate revenue, fallback to entire document
+  if (!revNumbers && incomeStatementLines !== lines) {
+    revNumbers = parseRowNumbers(/(?:sales\/income\s+from\s+operations|revenue\s+from\s+operations|total\s+income|income\s+from\s+operations|^I\.\s*[\d,])/i, lines);
+  }
   if (revNumbers && revNumbers.length >= 1) {
     result.revenue = revNumbers[0];
     
@@ -120,7 +153,8 @@ export function extractDeterministicFinancials(pdfText = "") {
       const matches = line.match(/(industrial\s+batteries|defence\s*&\s*aviation|electronics|batteries|defence)/i);
       if (matches) {
         const segName = matches[1].toUpperCase();
-        const nums = line.match(/-?\d+(?:,\d+)*(?:\.\d+)?/g);
+        const sanitizedLine = line.replace(/^\s*\d+[\.\)]\s*/, "");
+        const nums = sanitizedLine.match(/-?\d+(?:,\d+)*(?:\.\d+)?/g);
         if (nums && nums.length >= 3) {
           const curVal = parseFloat(nums[0].replace(/,/g, ""));
           const prevYrVal = parseFloat(nums[2].replace(/,/g, ""));
@@ -195,7 +229,12 @@ export function extractDeterministicFinancials(pdfText = "") {
   }
 
   // 4. Consolidated PAT & Exceptional Items Engine (YoY & QoQ)
-  const patNumbers = parseRowNumbers(/(?:net\s+profit\s+for\s+the\s+period|profit\s+attributable\s+to\s+owners|profit\s+after\s+tax)/i);
+  let patNumbers = parseRowNumbers(/(?:(?:net\s+)?profit\s+(?:\(loss\)\s+)?for\s+the\s+period|profit\s+attributable\s+to\s+owners|profit\s+after\s+tax|net\s+profit\s+after\s+tax)/i);
+  // Fail-safe: If consolidated slice didn't find PAT line, fallback to document
+  if (!patNumbers && incomeStatementLines !== lines) {
+    patNumbers = parseRowNumbers(/(?:(?:net\s+)?profit\s+(?:\(loss\)\s+)?for\s+the\s+period|profit\s+attributable\s+to\s+owners|profit\s+after\s+tax|net\s+profit\s+after\s+tax)/i, lines);
+  }
+
   if (patNumbers && patNumbers.length >= 1) {
     const isPatCol1HalfYear = patNumbers.length >= 4 && patNumbers[1] > 1.7 * patNumbers[0];
     result.patAttributable = patNumbers[0];
@@ -222,14 +261,31 @@ export function extractDeterministicFinancials(pdfText = "") {
     }
   }
 
+  // Populate patStandalone if standalone section exists earlier in document
+  if (incomeStatementLines !== lines) {
+    const standalonePat = parseRowNumbers(/(?:(?:net\s+)?profit\s+(?:\(loss\)\s+)?for\s+the\s+period|profit\s+after\s+tax|net\s+profit\s+after\s+tax)/i, lines);
+    if (standalonePat && standalonePat.length >= 1) {
+      result.patStandalone = standalonePat[0];
+    }
+  } else {
+    result.patStandalone = result.patConsolidated;
+  }
+
+  // Pure standalone fallback: If patConsolidated is null but patStandalone exists
+  if (result.patConsolidated === null && result.patStandalone !== null) {
+    result.patConsolidated = result.patStandalone;
+    result.patAttributable = result.patStandalone;
+  }
+
   // Exceptional Items & Normalised PAT Computation (Fully Dynamic)
   let exceptionalDescription = null;
-  const excNumbers = parseRowNumbers(/(?:exceptional\s+item|exceptional\s+gain|profit\s+on\s+sale\s+of\s+asset|non-recurring\s+gain)/i);
+  // Match explicit exceptional item line and prevent false match on "profit before exceptional item"
+  const excNumbers = parseRowNumbers(/^(?!.*(?:profit|loss)\s+before).*?(?:exceptional\s+(?:item|gain|loss)|profit\s+on\s+sale\s+of\s+asset|non-recurring\s+gain)/i);
   if (excNumbers && excNumbers.length >= 1) {
     result.exceptionalGain = excNumbers[0];
   }
 
-  const excLineMatch = pdfText.match(/(?:exceptional\s+(?:item|gain)|profit\s+on\s+sale\s+of\s+[^\n.,]+)/i);
+  const excLineMatch = pdfText.match(/(?:(?<!(?:profit|loss)\s+before\s+)exceptional\s+(?:item|gain)|profit\s+on\s+sale\s+of\s+[^\n.,]+)/i);
   if (excLineMatch) {
     exceptionalDescription = excLineMatch[0].trim();
   }
@@ -252,20 +308,25 @@ export function extractDeterministicFinancials(pdfText = "") {
       if (match) {
         // Match segment lines for YoY contraction
         const segLineIdx = lines.findIndex(l => l.toLowerCase().includes(kw));
-        if (segLineIdx !== -1 && segLineIdx + 1 < lines.length) {
-          const numbers = lines[segLineIdx].match(/-?\d+(?:,\d+)*(?:\.\d+)?/g) || lines[segLineIdx + 1].match(/-?\d+(?:,\d+)*(?:\.\d+)?/g);
+        if (segLineIdx !== -1 && segLineIdx < lines.length) {
+          const rawLine1 = (lines[segLineIdx] || "").replace(/^\s*\d+[\.\)]\s*/, "");
+          const rawLine2 = (lines[segLineIdx + 1] || "").replace(/^\s*\d+[\.\)]\s*/, "");
+          const numbers = rawLine1.match(/-?\d+(?:,\d+)*(?:\.\d+)?/g) || rawLine2.match(/-?\d+(?:,\d+)*(?:\.\d+)?/g);
           if (numbers && numbers.length >= 3) {
             const currentSeg = parseFloat(numbers[0].replace(/,/g, ""));
             const prevSeg = parseFloat(numbers[2].replace(/,/g, ""));
             if (!isNaN(currentSeg) && !isNaN(prevSeg) && prevSeg > 0) {
               const segYoY = ((currentSeg - prevSeg) / prevSeg) * 100;
               if (segYoY < -20) {
-                result.segmentRedFlags.push({
-                  segment: kw.toUpperCase(),
-                  currentValue: currentSeg,
-                  prevValue: prevSeg,
-                  yoyDeclinePct: parseFloat(segYoY.toFixed(1))
-                });
+                // Avoid duplicate segment flags
+                if (!result.segmentRedFlags.some(f => f.segment.includes(kw.toUpperCase()))) {
+                  result.segmentRedFlags.push({
+                    segment: kw.toUpperCase(),
+                    currentValue: currentSeg,
+                    prevValue: prevSeg,
+                    yoyDeclinePct: parseFloat(segYoY.toFixed(1))
+                  });
+                }
               }
             }
           }

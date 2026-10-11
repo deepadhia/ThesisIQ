@@ -206,6 +206,7 @@ ThesisIQ enforces strict mathematical and procedural invariant test suites with 
 
 | Test Suite | File | Tests Passed | Key Invariants Verified |
 | :--- | :--- | :---: | :--- |
+| **v4.3 Financial Validator Invariants** | `backend/tests/regression/financial-validator-consolidated.test.js` | **6 / 6 PASS** | Consolidated-First Slicer, Standalone vs Consolidated Disambiguation, Unit Scale Normalization, Segment Red Flags |
 | **v4.3 Season 2 Earnings Invariants** | `backend/tests/regression/season2-earnings-invariants.test.js` | **15 / 15 PASS** | Dynamic ROCE Exit P/E, 5-Tier Pricing Regimes, Canonical Q[1-4]_FY[YY] Parsing, Procedural Notice Sanitization |
 | **v4.2 Valuation Dislocation Watchdog** | `backend/scripts/test-valuation-dislocation-watchdog.js` | **29 / 29 PASS** | Gate 6 Dual-Trigger, 3Y Compounding IRR, 7-Day Cooldown, Market Closed Guard |
 | **NSE/BSE Market Holiday Calendar** | `backend/tests/market-holidays.test.js` | **7 / 7 PASS** | Dynamic NSE Ingestion, DB Upsert/Load, Weekend Check, UTC-to-IST Mapping |
@@ -214,7 +215,7 @@ ThesisIQ enforces strict mathematical and procedural invariant test suites with 
 | **v3.1.1 Reverse DCF & FCFF Integrity** | `backend/scripts/test-reverse-dcf-v3-integrity.js` | **63 / 63 PASS** | FCFF Accounting Identity, Forward iROIC, Dual Bear Floors, Asymmetry Ratios |
 | **v3.2 Fundamental Trajectory & Ledger** | `backend/scripts/test-fundamental-trajectory-engine.js` | **279 / 279 PASS** | Promise Ledger Schema, Dynamic Credibility Derivation, Database Adapter, Multi-Engine Vectors |
 | **v3.3.1 Market-Thesis Reconciliation** | `backend/scripts/test-market-thesis-reconciliation.js` | **210 / 210 PASS** | 9-State Taxonomy, Sequential Scenario Bridge, 7-Gap Deconstruction |
-| **TOTAL VERIFIED COVERAGE** | | **629 / 629 PASS** | **100% Mathematical & Invariant Safety** |
+| **TOTAL VERIFIED COVERAGE** | | **635 / 635 PASS** | **100% Mathematical & Invariant Safety** |
 
 ---
 
