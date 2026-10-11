@@ -251,10 +251,13 @@ async function checkResultsPublished(stockId, expectedDateStr) {
       SELECT 1 FROM corporate_announcements
       WHERE stock_id = $1
         AND is_earnings_release = true
+        AND (title ILIKE '%financial result%' OR title ILIKE '%outcome of board meeting%')
+        AND title NOT ILIKE '%analyst%'
+        AND title NOT ILIKE '%con%call%'
         AND (
-          (filing_date IS NOT NULL AND filing_date >= $2::date - interval '7 days')
+          (filing_date IS NOT NULL AND filing_date::date >= ($2::date - interval '1 day') AND filing_date::date <= ($2::date + interval '2 days'))
           OR 
-          (processed_at >= $2::date - interval '7 days')
+          (processed_at::date >= ($2::date - interval '1 day') AND processed_at::date <= ($2::date + interval '2 days'))
         )
     ) as published
   `;

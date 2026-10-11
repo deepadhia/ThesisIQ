@@ -285,6 +285,8 @@ export async function scan({ isDryRun = false, runUrl = null, targetTicker = nul
           "prior intimation", "closure of trading window",
           "trading window", "trading window closure",
           "schedule of analyst", "schedule of institutional",
+          "analysts/institutional", "investor meet", "con. call updates",
+          "conference call", "earnings call intimation",
           "xbrl"
         ];
         const titleLower = title.toLowerCase();

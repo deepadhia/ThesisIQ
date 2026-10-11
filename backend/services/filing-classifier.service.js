@@ -18,12 +18,7 @@ export function classifyFilingCategory(title = "", text = "", attachmentUrl = ""
   const combined = `${titleLower} ${attachLower} ${textSnippet}`;
 
   // 0. PROCEDURAL_ROUTINE_COMPLIANCE (Trading Window, Loss of Share, Board Meeting Notices, Investor Meet Intimations, Corrigendums, Voting Tallies)
-  const isFinancialResultsRestatement = 
-    combined.includes("financial results") || 
-    combined.includes("un-audited financial") || 
-    combined.includes("audited financial");
-
-  const PROCEDURAL_ROUTINE_TITLES = [
+  const STRICT_PROCEDURAL_TITLES = [
     "trading window",
     "closure of trading window",
     "closure of trading",
@@ -34,19 +29,32 @@ export function classifyFilingCategory(title = "", text = "", attachmentUrl = ""
     "certificate under reg",
     "certificate under regulation",
     "board meeting intimation",
-    "prior intimation of board meeting",
+    "prior intimation",
     "notice of board meeting",
     "schedule of analyst",
     "schedule of institutional",
-    "newspaper publication",
-    "newspaper advertisement",
+    "analysts/institutional",
+    "con. call updates",
+    "conference call updates",
+    "intimation of conference call",
+    "earnings call intimation",
     "voting results",
     "scrutinizer report",
     "corrigendum to notice",
     "corrigendum to the notice",
     "errata"
   ];
-  if (PROCEDURAL_ROUTINE_TITLES.some(p => titleLower.includes(p)) && !isFinancialResultsRestatement) {
+  if (STRICT_PROCEDURAL_TITLES.some(p => titleLower.includes(p))) {
+    return "ROUTINE_COMPLIANCE";
+  }
+
+  // Newspaper publications of routine compliance (unless publishing actual financial results tables)
+  const isFinancialResultsRestatement = 
+    titleLower.includes("financial results") || 
+    titleLower.includes("un-audited financial") || 
+    titleLower.includes("audited financial");
+
+  if ((titleLower.includes("newspaper publication") || titleLower.includes("newspaper advertisement")) && !isFinancialResultsRestatement) {
     return "ROUTINE_COMPLIANCE";
   }
 
@@ -405,14 +413,28 @@ export function detectFilingLifecycleStage(title = "", text = "", url = "") {
   }
 
   // 4. Financial Results Release (Stage 1 Results)
+  const isIntimationOrNotice =
+    tLower.includes("schedule of") ||
+    tLower.includes("intimation of") ||
+    tLower.includes("prior intimation") ||
+    tLower.includes("board meeting intimation") ||
+    tLower.includes("notice of board meeting") ||
+    tLower.includes("analysts/institutional") ||
+    tLower.includes("investor meet") ||
+    tLower.includes("con. call updates") ||
+    tLower.includes("conference call updates") ||
+    tLower.includes("earnings call intimation");
+
   const isFinancialResultDoc =
-    tLower.includes("financial result") ||
-    tLower.includes("un-audited financial") ||
-    tLower.includes("unaudited financial") ||
-    tLower.includes("audited financial") ||
-    tLower.includes("financial results for the quarter") ||
-    (tLower.includes("outcome of board meeting") && (combined.includes("financial result") || combined.includes("un-audited") || combined.includes("unaudited") || combined.includes("standalone and consolidated results"))) ||
-    (urlLower.includes("financial_result") || urlLower.includes("resultrelease") || urlLower.includes("financialresults"));
+    !isIntimationOrNotice && (
+      tLower.includes("financial result") ||
+      tLower.includes("un-audited financial") ||
+      tLower.includes("unaudited financial") ||
+      tLower.includes("audited financial") ||
+      tLower.includes("financial results for the quarter") ||
+      (tLower.includes("outcome of board meeting") && (combined.includes("financial result") || combined.includes("un-audited") || combined.includes("unaudited") || combined.includes("standalone and consolidated results"))) ||
+      (urlLower.includes("financial_result") || urlLower.includes("resultrelease") || urlLower.includes("financialresults"))
+    );
 
   if (isFinancialResultDoc && !isRoutineSecretarial) {
     return "STAGE_1_RESULTS";

@@ -55,7 +55,13 @@ export async function loadAuditedPortfolioFromDatabase(dbPool = pool) {
              qs.thesis_status, qs.confidence_score, qs.conviction_score, qs.final_action, qs.metrics as q_metrics,
              md.share_price, md.pe_ratio, md.market_cap, md.ttm_eps, md.ttm_pat, md.roce_pct
       FROM stocks s
-      LEFT JOIN quarterly_snapshots qs ON qs.stock_id = s.id AND qs.quarter = 'Q1_FY27'
+      LEFT JOIN (
+        SELECT DISTINCT ON (stock_id) stock_id, quarter, thesis_status, confidence_score, conviction_score, final_action, metrics
+        FROM quarterly_snapshots
+        ORDER BY stock_id, 
+                 COALESCE((substring(quarter from 'FY([0-9]{2})')::integer * 100 + substring(quarter from 'Q([1-4])')::integer), 0) DESC,
+                 created_at DESC
+      ) qs ON qs.stock_id = s.id
       LEFT JOIN (
         SELECT DISTINCT ON (ticker) ticker, share_price, pe_ratio, market_cap, ttm_eps, ttm_pat, roce_pct
         FROM market_data_snapshots
@@ -63,7 +69,8 @@ export async function loadAuditedPortfolioFromDatabase(dbPool = pool) {
       ) md ON md.ticker = s.ticker
       WHERE s.ticker IN (
         'HBLENGINE', 'SKIPPER', 'TIMETECHNO', 'ANANTRAJ', 'HSCL', 'GRAVITA', 'CCL', 'SBCL',
-        'TRANSRAILL', 'LUMAXTECH', 'SJS', 'INOXINDIA', 'POLICYBZR', 'JSLL', 'QPOWER', 'ELECON', 'JYOTICNC', 'SHAKTIPUMP'
+        'TRANSRAILL', 'LUMAXTECH', 'SJS', 'INOXINDIA', 'POLICYBZR', 'JSLL', 'QPOWER', 'ELECON',
+        'JYOTICNC', 'SHAKTIPUMP', 'ASTRAMICRO', 'MOREPENLAB'
       )
       ORDER BY s.ticker;
     `);
@@ -280,14 +287,18 @@ export async function runAsymmetricRankingReport() {
       verdict = 'AVOID / EXIT';
     } else if (r.opportunityTier === 'WATCHLIST_FRICTION' || sc.economicEngineState === 'UNDER_REVALIDATION') {
       verdict = 'WATCH / WC FRICTION';
-    } else if (ph.regime === 'PRICED_FOR_AGGRESSIVE_GROWTH') {
-      verdict = 'EXPENSIVE (HIGH HURDLE)';
+    } else if (ph.regime === 'HYPER_VALUATION_MOMENTUM') {
+      verdict = 'PRICED FOR PERFECTION / TRIM';
+    } else if (ph.regime === 'AGGRESSIVE_GROWTH_PREMIUM') {
+      verdict = 'HIGH GROWTH BURDEN (MONITOR)';
+    } else if (ph.regime === 'FAIR_PRICE_COMPOUNDER') {
+      verdict = (ph.expectationCushionPct || 0) >= 0 ? 'CORE COMPOUNDER (HOLD/ADD)' : 'FAIR PRICE (HOLD)';
     } else if (r.price <= sc.buyBelowPrice || (sc.asymmetryRatio >= 1.5 && (ph.expectationCushionPct || 0) >= 5.0)) {
       verdict = '⭐ PRIME ADDITION ZONE';
     } else if ((ph.expectationCushionPct || 0) >= 5.0 && sc.asymmetryRatio >= 1.0) {
       verdict = '🟢 ATTRACTIVE ACCUMULATION';
-    } else if (r.price > sc.fairValuePrice * 1.15) {
-      verdict = 'TRIM / PRICED TO PERFECTION';
+    } else if (ph.regime === 'DEEP_VALUE_DISLOCATION') {
+      verdict = 'DEEP VALUE / CUSHIONED';
     }
 
     console.log(

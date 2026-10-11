@@ -171,12 +171,42 @@ Candidates must qualify under rigorous institutional criteria:
 
 ---
 
+## 📈 ROCE-Tethered Dynamic Exit Multiples & 5-Tier Pricing Hurdle (v4.3)
+
+ThesisIQ links terminal valuation to underlying capital efficiency rather than enforcing a flat, arbitrary 20x exit multiple across distinct business qualities:
+
+### 1. Dynamic Terminal Multiple Resolution
+$$\text{Exit P/E} = \begin{cases} 
+32\text{x} & \text{if ROCE} \ge 30\% \quad (\text{High-return compounders: ASTRAMICRO, JYOTICNC, GRAVITA}) \\
+26\text{x} & \text{if } 22\% \le \text{ROCE} < 30\% \quad (\text{Quality compounders: SJS, QPOWER, POLICYBZR}) \\
+20\text{x} & \text{if } 16\% \le \text{ROCE} < 22\% \quad (\text{Standard industrial businesses: TIMETECHNO, ELECON, CCL, LUMAXTECH}) \\
+15\text{x} & \text{if ROCE} < 16\% \quad (\text{Capital-intensive or commodity businesses: SHAKTIPUMP, SKIPPER})
+\end{cases}$$
+
+### 2. 5 Distinct Valuation Regimes
+* **`DEEP_VALUE_DISLOCATION` ($\text{P/E} < 20\text{x}$):** Minimal growth burden; exit multiple expansion provides structural downside cushion.
+* **`PRICED_FOR_MODEST_GROWTH` ($20\text{x} \le \text{P/E} < 30\text{x}$):** Modest required growth hurdle (12%–18% PAT CAGR); downside is cushioned if earnings compound.
+* **`FAIR_PRICE_COMPOUNDER` ($30\text{x} \le \text{P/E} < 42\text{x}$):** High-return businesses compounding at fair valuation. With ROCE-tethered exit multiples ($\ge 26\text{x}$–$32\text{x}$), 5Y required CAGR is sustainable (14%–22%) rather than triggering artificial de-rating panic.
+* **`AGGRESSIVE_GROWTH_PREMIUM` ($42\text{x} \le \text{P/E} \le 65\text{x}$):** Demanding growth burden (22%–32% PAT CAGR); multiple compression drag requires exceptional volume delivery.
+* **`HYPER_VALUATION_MOMENTUM` ($\text{P/E} > 65\text{x}$):** Priced for perfection ($>35\%$ PAT CAGR); severe de-rating risk on any execution slip.
+
+---
+
+## 🎙️ Two-Stage Earnings Season Pipeline (Stage 1 Flash & Stage 2 Concall Audit)
+
+ThesisIQ manages quarterly reporting through a strict two-stage automated lifecycle:
+* **Stage 1 (Earnings Release Flash):** Within minutes of the SEBI LODR filing reaching NSE/BSE, the engine deterministically extracts Revenue, EBITDA, margins (bps YoY delta), and PAT, applies the **Dual-Layer Fail-Closed Thesis Gate**, and immediately alerts Telegram with initial signal, margin trends, what went well vs drags, and **Open Queries for Concall Audit**.
+* **Stage 2 (Concall & Transcript Verification):** When the audio or official exchange transcript is published on NSE, the engine ingests full text, reconciles forward guidance against past commitments in PostgreSQL, executes an **Audio-vs-Transcript Cross-Audit** to detect sanitized statements, and publishes the forensic concall deep-dive.
+
+---
+
 ## 🧪 Invariant Test Coverage
 
-ThesisIQ enforces strict mathematical invariant test suites with **100% pass rate (614 / 614 tests passing)**:
+ThesisIQ enforces strict mathematical and procedural invariant test suites with **100% pass rate (629 / 629 tests passing)**:
 
 | Test Suite | File | Tests Passed | Key Invariants Verified |
 | :--- | :--- | :---: | :--- |
+| **v4.3 Season 2 Earnings Invariants** | `backend/tests/regression/season2-earnings-invariants.test.js` | **15 / 15 PASS** | Dynamic ROCE Exit P/E, 5-Tier Pricing Regimes, Canonical Q[1-4]_FY[YY] Parsing, Procedural Notice Sanitization |
 | **v4.2 Valuation Dislocation Watchdog** | `backend/scripts/test-valuation-dislocation-watchdog.js` | **29 / 29 PASS** | Gate 6 Dual-Trigger, 3Y Compounding IRR, 7-Day Cooldown, Market Closed Guard |
 | **NSE/BSE Market Holiday Calendar** | `backend/tests/market-holidays.test.js` | **7 / 7 PASS** | Dynamic NSE Ingestion, DB Upsert/Load, Weekend Check, UTC-to-IST Mapping |
 | **Institutional Alert Formatting** | `backend/tests/alert-formatting.test.js` | **4 / 4 PASS** | Standard Headers, 30-Char Dividers, Zero Invalid Markdown, Entity Parsing Fallback |
@@ -184,7 +214,7 @@ ThesisIQ enforces strict mathematical invariant test suites with **100% pass rat
 | **v3.1.1 Reverse DCF & FCFF Integrity** | `backend/scripts/test-reverse-dcf-v3-integrity.js` | **63 / 63 PASS** | FCFF Accounting Identity, Forward iROIC, Dual Bear Floors, Asymmetry Ratios |
 | **v3.2 Fundamental Trajectory & Ledger** | `backend/scripts/test-fundamental-trajectory-engine.js` | **279 / 279 PASS** | Promise Ledger Schema, Dynamic Credibility Derivation, Database Adapter, Multi-Engine Vectors |
 | **v3.3.1 Market-Thesis Reconciliation** | `backend/scripts/test-market-thesis-reconciliation.js` | **210 / 210 PASS** | 9-State Taxonomy, Sequential Scenario Bridge, 7-Gap Deconstruction |
-| **TOTAL VERIFIED COVERAGE** | | **614 / 614 PASS** | **100% Mathematical & Invariant Safety** |
+| **TOTAL VERIFIED COVERAGE** | | **629 / 629 PASS** | **100% Mathematical & Invariant Safety** |
 
 ---
 

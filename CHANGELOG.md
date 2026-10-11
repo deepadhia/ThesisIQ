@@ -1,5 +1,24 @@
 # Changelog
 
+## [v4.3.0] - 2026-10-11 (Season 2 Earnings Engine Hardening, ROCE-Tethered Dynamic Pricing Hurdle & Dual-Layer Thesis Gating)
+
+### Added
+- **ROCE-Tethered Dynamic Exit Multiple & 5-Tier Pricing Hurdle (`asymmetric-mispricing-ranking.service.js`)**:
+  - Replaced static exit multiple assumption with dynamic ROCE tethering: $\ge 30\% \to 32\text{x}$, $\ge 22\% \to 26\text{x}$, $\ge 16\% \to 20\text{x}$, $< 16\% \to 15\text{x}$.
+  - Expanded pricing hurdle regimes from 3 tiers to 5 distinct tiers: `DEEP_VALUE_DISLOCATION`, `PRICED_FOR_MODEST_GROWTH`, `FAIR_PRICE_COMPOUNDER`, `AGGRESSIVE_GROWTH_PREMIUM`, `HYPER_VALUATION_MOMENTUM`.
+  - Updated Addition Verdict resolution in `run-asymmetric-mispricing-ranking.js` to reward high-ROCE compounders trading at fair valuation without applying false de-rating penalties.
+- **Season 2 Invariant Regression Test Suite (`backend/tests/regression/season2-earnings-invariants.test.js`)**:
+  - 15 dedicated invariant tests verifying ROCE-tethered exit multiple bounds, 5-tier regime classifications, canonical fiscal quarter parsing, procedural notice filtering, and fail-closed thesis gating.
+  - Full Vitest suite passing with 100% success rate (**89 / 89 tests passing across 9 test suites**).
+
+### Fixed & Enhanced
+- **Earnings Announcement Filtering & False-Positive Guard (`scan-announcements.js`, `filing-classifier.service.js`)**:
+  - Added procedural concall notices (e.g. "intimation of concall", "audio recording", "schedule of earnings conference call") to `NEVER_EARNINGS_TITLES` so they are routed to audio/transcript workers rather than triggering incomplete results alerts.
+  - Fixed `remind-results.js` to check actual announcement title validity (`checkResultsPublished`) preventing false positives when results notices are published.
+- **Canonical Quarter Key Ordering & Historical Snapshot Integrity (`run-asymmetric-mispricing-ranking.js`, `quarterly-deepdive-worker.js`)**:
+  - Enforced canonical Indian fiscal quarter formatting (`Q[1-4]_FY[YY]`, e.g. `Q2_FY27`, `Q3_FY27`, `Q4_FY27`, etc.).
+  - Added chronological quarter sorting key (`substring(quarter from 'FY([0-9]{2})')...`) ensuring any future quarter automatically sorts as the latest snapshot without hardcoding.
+
 ## [v4.2.0] - 2026-10-01 (Asymmetric Valuation Dislocation Watchdog, Midday Market-Hours Engine & Dynamic NSE Holiday Ingestion)
 
 ### Added

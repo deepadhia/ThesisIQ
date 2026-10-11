@@ -520,10 +520,37 @@ export function classifyMarketExpectationsRegime(options = {}) {
 // -----------------------------------------------------------------------------
 
 export const PRICING_HURDLE_REGIME = {
-  PRICED_FOR_AGGRESSIVE_GROWTH: 'PRICED_FOR_AGGRESSIVE_GROWTH', // Conservative Hurdle > 18.0% CAGR
-  PRICED_FOR_MODEST_GROWTH: 'PRICED_FOR_MODEST_GROWTH',         // Conservative Hurdle between 10.0% and 18.0% CAGR
-  PRICED_FOR_STALLED_EARNINGS: 'PRICED_FOR_STALLED_EARNINGS'    // Conservative Hurdle < 10.0% CAGR
+  HYPER_VALUATION_MOMENTUM: 'HYPER_VALUATION_MOMENTUM',       // Conservative Hurdle > 32.0% CAGR
+  AGGRESSIVE_GROWTH_PREMIUM: 'AGGRESSIVE_GROWTH_PREMIUM',     // Conservative Hurdle between 24.0% and 32.0% CAGR
+  FAIR_PRICE_COMPOUNDER: 'FAIR_PRICE_COMPOUNDER',             // Conservative Hurdle between 17.0% and 24.0% CAGR
+  PRICED_FOR_MODEST_GROWTH: 'PRICED_FOR_MODEST_GROWTH',       // Conservative Hurdle between 12.0% and 17.0% CAGR
+  DEEP_VALUE_DISLOCATION: 'DEEP_VALUE_DISLOCATION',           // Conservative Hurdle < 12.0% CAGR
+  // Backward-compatibility aliases
+  PRICED_FOR_AGGRESSIVE_GROWTH: 'AGGRESSIVE_GROWTH_PREMIUM',
+  PRICED_FOR_STALLED_EARNINGS: 'DEEP_VALUE_DISLOCATION'
 };
+
+/**
+ * Resolves terminal exit multiple tethered to economic return on capital (ROCE).
+ * High return-on-capital businesses convert significantly more earnings into free cash flow
+ * without heavy dilutive reinvestment, commanding higher structural exit multiples.
+ *
+ * Tiers:
+ * - ROCE >= 30.0%: 32.0x (High-moat, high-efficiency compounders e.g. INOXINDIA, QPOWER, HBLENGINE)
+ * - ROCE >= 22.0%: 26.0x (Superior return compounders e.g. SJS, HSCL, SKIPPER, SBCL)
+ * - ROCE >= 16.0%: 20.0x (Market average industrial compounders e.g. ELECON, TIMETECHNO, JSLL)
+ * - ROCE < 16.0%:  15.0x (Capital-intensive / cyclical / low return e.g. TRANSRAILL, ANANTRAJ, CCL)
+ * 
+ * @param {number} rocePct 
+ * @returns {number} Exit P/E
+ */
+export function resolveRoceTetheredExitPe(rocePct) {
+  const roce = parseFloat(rocePct) || 15.0;
+  if (roce >= 30.0) return 32.0;
+  if (roce >= 22.0) return 26.0;
+  if (roce >= 16.0) return 20.0;
+  return 15.0;
+}
 
 /**
  * Calculates Transparent Dual-Hurdle Pricing Engine (Option B):
@@ -538,15 +565,17 @@ export const PRICING_HURDLE_REGIME = {
  *    - Assumes valuation multiple at exit equals current multiple (PE_exit = PE_current).
  *    - Required EPS CAGR = 12.0% CAGR.
  * 
- * 2. Conservative Hurdle (Derating to min(Current P/E, 20x)):
- *    - Assumes valuation multiple derates to conservative baseline PE_exit = max(12.0, min(Current P/E, 20.0)).
+ * 2. Conservative Hurdle (Derating to min(Current P/E, ROCE-tethered Exit PE)):
+ *    - Assumes valuation multiple derates to conservative baseline PE_exit.
  *    - Compound Factor = (Current P/E * (1 + r)^5) / PE_exit
  *    - Required EPS CAGR = ((Compound Factor)^(1/5) - 1) * 100.
  * 
- * Pricing Regime Classification:
- * - PRICED_FOR_AGGRESSIVE_GROWTH: Conservative Hurdle > 18.0% CAGR
- * - PRICED_FOR_MODEST_GROWTH: Conservative Hurdle between 10.0% and 18.0% CAGR
- * - PRICED_FOR_STALLED_EARNINGS: Conservative Hurdle < 10.0% CAGR
+ * 5-Tier Pricing Regime Classification:
+ * - HYPER_VALUATION_MOMENTUM: Conservative Hurdle > 32.0% CAGR
+ * - AGGRESSIVE_GROWTH_PREMIUM: Conservative Hurdle between 24.0% and 32.0% CAGR
+ * - FAIR_PRICE_COMPOUNDER: Conservative Hurdle between 17.0% and 24.0% CAGR
+ * - PRICED_FOR_MODEST_GROWTH: Conservative Hurdle between 12.0% and 17.0% CAGR
+ * - DEEP_VALUE_DISLOCATION: Conservative Hurdle < 12.0% CAGR
  * 
  * Expectation Cushion:
  * - Trailing / Underwritten CAGR - Conservative Hurdle
@@ -560,8 +589,11 @@ export function calculate5YearPricingHurdle(options = {}) {
   // 1. Constant Multiple Hurdle (Exit PE = Current PE)
   const constantMultipleHurdleCagr = parseFloat((hurdleRate * 100).toFixed(1)); // 12.0%
 
-  // 2. Conservative Exit P/E: derates to min(Current P/E, 20x), clamped to floor of 12x
-  const conservativeExitPE = parseFloat(Math.max(12.0, Math.min(currentPE, 20.0)).toFixed(1));
+  // 2. Conservative Exit P/E: derates to min(Current P/E, ROCE-tethered Exit PE), clamped to floor of 12x
+  const targetExitPe = options.conservativeExitPE !== undefined
+    ? parseFloat(options.conservativeExitPE)
+    : (options.rocePct !== undefined ? resolveRoceTetheredExitPe(options.rocePct) : 20.0);
+  const conservativeExitPE = parseFloat(Math.max(12.0, Math.min(currentPE, targetExitPe)).toFixed(1));
 
   // 3. Conservative Required 5-Year CAGR
   const compoundFactor = (currentPE * Math.pow(1.0 + hurdleRate, horizonYears)) / conservativeExitPE;
@@ -570,21 +602,31 @@ export function calculate5YearPricingHurdle(options = {}) {
   // 4. Expectation Cushion (% pts) = Underwritten / Trailing Run-Rate - Conservative Hurdle
   const expectationCushionPct = parseFloat((underwrittenCagr - conservativeHurdleCagr).toFixed(1));
 
-  // 5. Pricing Regime
-  let regime = PRICING_HURDLE_REGIME.PRICED_FOR_MODEST_GROWTH;
-  if (conservativeHurdleCagr > 18.0) {
-    regime = PRICING_HURDLE_REGIME.PRICED_FOR_AGGRESSIVE_GROWTH;
-  } else if (conservativeHurdleCagr < 10.0) {
-    regime = PRICING_HURDLE_REGIME.PRICED_FOR_STALLED_EARNINGS;
+  // 5. 5-Tier Pricing Regime Classification
+  let regime = PRICING_HURDLE_REGIME.FAIR_PRICE_COMPOUNDER;
+  if (conservativeHurdleCagr > 32.0) {
+    regime = PRICING_HURDLE_REGIME.HYPER_VALUATION_MOMENTUM;
+  } else if (conservativeHurdleCagr > 24.0) {
+    regime = PRICING_HURDLE_REGIME.AGGRESSIVE_GROWTH_PREMIUM;
+  } else if (conservativeHurdleCagr >= 17.0) {
+    regime = PRICING_HURDLE_REGIME.FAIR_PRICE_COMPOUNDER;
+  } else if (conservativeHurdleCagr >= 12.0) {
+    regime = PRICING_HURDLE_REGIME.PRICED_FOR_MODEST_GROWTH;
+  } else {
+    regime = PRICING_HURDLE_REGIME.DEEP_VALUE_DISLOCATION;
   }
 
   let narrative = '';
-  if (regime === PRICING_HURDLE_REGIME.PRICED_FOR_AGGRESSIVE_GROWTH) {
-    narrative = `Market multiple (${currentPE}x) derates to ${conservativeExitPE}x exit, demanding ${conservativeHurdleCagr}% CAGR just for 12% returns. Cushion is ${expectationCushionPct > 0 ? '+' : ''}${expectationCushionPct}% pts.`;
+  if (regime === PRICING_HURDLE_REGIME.HYPER_VALUATION_MOMENTUM) {
+    narrative = `Hyper-valuation momentum: Current multiple (${currentPE}x) derates to ${conservativeExitPE}x, demanding an extreme ${conservativeHurdleCagr}% CAGR just for 12% target returns. Cushion is ${expectationCushionPct > 0 ? '+' : ''}${expectationCushionPct}% pts (High Derating Risk).`;
+  } else if (regime === PRICING_HURDLE_REGIME.AGGRESSIVE_GROWTH_PREMIUM) {
+    narrative = `Aggressive growth premium: Derating from ${currentPE}x to ${conservativeExitPE}x demands elevated ${conservativeHurdleCagr}% CAGR. Cushion is ${expectationCushionPct > 0 ? '+' : ''}${expectationCushionPct}% pts.`;
+  } else if (regime === PRICING_HURDLE_REGIME.FAIR_PRICE_COMPOUNDER) {
+    narrative = `Quality compounder at fair multiple: Derating from ${currentPE}x to ${conservativeExitPE}x requires healthy ${conservativeHurdleCagr}% CAGR. Cushion is ${expectationCushionPct > 0 ? '+' : ''}${expectationCushionPct}% pts.`;
   } else if (regime === PRICING_HURDLE_REGIME.PRICED_FOR_MODEST_GROWTH) {
-    narrative = `Reasonable pricing: Derating to ${conservativeExitPE}x requires modest ${conservativeHurdleCagr}% CAGR. Underwritten growth (${underwrittenCagr}%) offers a comfortable ${expectationCushionPct > 0 ? '+' : ''}${expectationCushionPct}% pts cushion.`;
+    narrative = `Priced for modest growth: Multiple (${currentPE}x) requires only ${conservativeHurdleCagr}% CAGR to deliver 12% return. Underwritten growth (${underwrittenCagr}%) offers a comfortable ${expectationCushionPct > 0 ? '+' : ''}${expectationCushionPct}% pts cushion.`;
   } else {
-    narrative = `Depressed multiple: Requires only ${conservativeHurdleCagr}% CAGR (near stalled earnings) to deliver 12% target return. Cushion is +${expectationCushionPct}% pts.`;
+    narrative = `Deep value dislocation: Depressed multiple (${currentPE}x) requires only ${conservativeHurdleCagr}% CAGR. Cushion is +${expectationCushionPct}% pts.`;
   }
 
   return {
@@ -1049,7 +1091,8 @@ export function calculateThesisIqScorecard(equity = {}) {
     currentPE,
     underwrittenCagr: underwrittenNopatCagr,
     hurdleRate: 0.12,
-    horizonYears: 5
+    horizonYears: 5,
+    rocePct: equity.financialEvidence?.roce || equity.roce || equity.rocePct || 15.0
   });
 
   // 7. Intrinsic Fair Value (Layer 6 DCF)

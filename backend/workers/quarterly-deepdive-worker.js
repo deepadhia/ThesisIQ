@@ -8,7 +8,7 @@
 import fs from "fs";
 import path from "path";
 import { pool } from "../db/pool.js";
-import { compareFiscalQuartersDesc } from "../utils/fiscal-quarter.js";
+import { compareFiscalQuartersDesc, parseFiscalQuarter } from "../utils/fiscal-quarter.js";
 import { reconcileGuidanceVsActual, classifyGuidanceScope } from "../utils/guidance-scope.js";
 import { extractTextFromPdfUrl } from "../services/announcement.service.js";
 import { sendTelegramMessage, sendAnnouncementAlert, sendConcallDiscrepancyAlert } from "../services/telegram.service.js";
@@ -850,7 +850,9 @@ export async function processPendingDeepDives(options = {}) {
       );
 
       // Automatically persist evaluated quarter to quarterly_snapshots
-      const quarter = getIndianFiscalQuarter(item.filing_date);
+      const rawQuarter = getIndianFiscalQuarter(item.filing_date);
+      const parsedQuarter = parseFiscalQuarter(rawQuarter);
+      const quarter = (parsedQuarter && parsedQuarter.label !== 'UNKNOWN') ? parsedQuarter.label : rawQuarter;
       if (item.stock_id && quarter && (item.is_earnings_release || verdict.financial_highlights)) {
         const metricsObj = {
           revenue_growth: {
