@@ -2,6 +2,7 @@ import crypto from "crypto";
 import { pool } from "../db/pool.js";
 import { PDFParse } from "pdf-parse";
 import { sendTelegramMessage } from "./telegram.service.js";
+import { GEMINI_API_KEY } from "../config/env.js";
 
 const HIGH_KEYWORDS = [
   "order", "contract", "work order", "order win", "loa", "letter of award",
@@ -297,6 +298,13 @@ export async function resetStuckPending(timeoutMs = 15 * 60 * 1000) {
      WHERE status = 'pending' 
      AND processed_at < NOW() - interval '${timeoutSec} seconds'`
   );
+  // Auto-archive ancient un-executed deep-dive tasks older than 60 days so they don't block fresh queues
+  await pool.query(
+    `UPDATE corporate_announcements 
+     SET deep_dive_status = 'archived'
+     WHERE deep_dive_status IN ('pending_stage1', 'pending_stage2', 'pending_audio')
+     AND created_at < NOW() - interval '60 days'`
+  ).catch(err => console.warn('[RESET] Ancient deep dive archive error:', err.message));
 }
 
 /**
@@ -1166,7 +1174,7 @@ async function ocrPdfWithGemini(uint8Buffer, apiKey) {
   }
 
   const base64Data = Buffer.from(uint8Buffer).toString("base64");
-  const models = ["gemini-flash-latest", "gemini-2.5-flash", "gemini-1.5-flash", "gemini-flash-lite-latest"];
+  const models = ["gemini-3.5-flash", "gemini-3.6-flash", "gemini-flash-latest"];
 
   for (const model of models) {
     try {
@@ -1177,8 +1185,8 @@ async function ocrPdfWithGemini(uint8Buffer, apiKey) {
           contents: [{
             parts: [
               {
-                inlineData: {
-                  mimeType: "application/pdf",
+                inline_data: {
+                  mime_type: "application/pdf",
                   data: base64Data
                 }
               },
@@ -1203,7 +1211,12 @@ async function ocrPdfWithGemini(uint8Buffer, apiKey) {
       const data = await res.json();
       const extractedText = data.candidates?.[0]?.content?.parts?.[0]?.text;
       if (extractedText && extractedText.length > 50) {
-        return extractedText.replace(/\s+/g, ' ').trim().substring(0, 60000);
+        return extractedText
+          .replace(/[^\S\r\n]+/g, ' ')
+          .replace(/\r\n/g, '\n')
+          .replace(/\n{3,}/g, '\n\n')
+          .trim()
+          .substring(0, 60000);
       }
     } catch (err) {
       console.warn(`[GEMINI OCR] Attempt with ${model} failed: ${err.message}`);
@@ -1272,27 +1285,37 @@ export async function extractTextFromPdfUrl(url) {
         origWarn(...args);
       };
 
-      let data;
+      let cleanText = "";
       try {
         const parser = new PDFParse(uint8);
-        data = await parser.getText();
+        const data = await parser.getText();
+        if (data && data.text) {
+          cleanText = data.text
+            .replace(/[^\S\r\n]+/g, ' ')
+            .replace(/\r\n/g, '\n')
+            .replace(/\n{3,}/g, '\n\n')
+            .trim()
+            .substring(0, 60000);
+        }
+      } catch (parseErr) {
+        console.warn(`[PDF PARSE WARN] Native pdf-parse failed (${parseErr.message}). Falling back to Vision OCR.`);
       } finally {
         console.warn = origWarn;
       }
-      
-      // Clean up text: remove extra whitespace and truncate
-      let cleanText = data.text
-        .replace(/\s+/g, ' ')
-        .trim()
-        .substring(0, 60000);
 
-      // OCR Fallback: If pdf-parse extracted < 100 characters (scanned image PDF), fallback to Gemini Vision
-      if (cleanText.length < 100 && process.env.GEMINI_API_KEY) {
+      // OCR Fallback: If native parse threw or extracted < 100 characters (scanned image or compressed xref), fallback to Gemini Vision
+      const activeGeminiKey = GEMINI_API_KEY || process.env.GEMINI_API_KEY;
+      if (cleanText.length < 100 && activeGeminiKey) {
         try {
-          console.log(`[PDF OCR] Minimal text extracted (${cleanText.length} chars). Invoking Gemini Multimodal Document OCR...`);
-          const ocrText = await ocrPdfWithGemini(uint8, process.env.GEMINI_API_KEY);
+          console.log(`[PDF OCR] Native parse yielded ${cleanText.length} chars. Invoking Gemini Multimodal Document OCR...`);
+          const ocrText = await ocrPdfWithGemini(uint8, activeGeminiKey);
           if (ocrText && ocrText.length > 50) {
-            cleanText = ocrText;
+            cleanText = ocrText
+              .replace(/[^\S\r\n]+/g, ' ')
+              .replace(/\r\n/g, '\n')
+              .replace(/\n{3,}/g, '\n\n')
+              .trim()
+              .substring(0, 60000);
             console.log(`[PDF OCR SUCCESS] Extracted ${cleanText.length} characters via Gemini Vision OCR.`);
           }
         } catch (ocrErr) {
@@ -1300,8 +1323,11 @@ export async function extractTextFromPdfUrl(url) {
         }
       }
 
-      console.log(`[PDF] Extracted ${cleanText.length} characters.`);
-      return cleanText;
+      if (cleanText.length > 0) {
+        console.log(`[PDF] Extracted ${cleanText.length} characters.`);
+        return cleanText;
+      }
+      throw new Error("Unable to extract readable text from PDF via native parser or OCR");
     } catch (err) {
       clearTimeout(timeoutId);
       lastErr = err;

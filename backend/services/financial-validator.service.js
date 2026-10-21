@@ -64,10 +64,12 @@ export function extractDeterministicFinancials(pdfText = "") {
   if (isConsolidatedMentioned) {
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i];
-      // Heading must specify consolidated results/P&L and NOT be a cover letter, notice, or audit report
+      const isNumberedList = /^\s*\d+[\.\)]/i.test(line);
+      // Heading must specify consolidated results/P&L and NOT be a cover letter, notice, resolution, or audit report
       const isConsolidatedHeading = 
+        !isNumberedList &&
         /(?:statement\s+of\s+consolidated\s+(?:un-?audited|audited)?\s*financial\s+results|consolidated\s+(?:un-?audited|audited)?\s*financial\s+results|consolidated\s+statement\s+of\s+profit\s+and\s+loss|statement\s+of\s+profit\s+and\s+loss\s+\(consolidated\))/i.test(line) &&
-        !/(?:report|auditor|independent\s+auditor|limited\s+review|notice|outcome|covering|board\s+meeting|agenda|submission\s+of)/i.test(line);
+        !/(?:report|auditor|independent\s+auditor|limited\s+review|notice|outcome|covering|board\s+meeting|agenda|submission\s+of|approved\s+the|taken\s+on\s+record|resolution|pursuant\s+to|we\s+have\s+reviewed|item\s+no)/i.test(line);
 
       if (isConsolidatedHeading) {
         // Lookahead up to 35 lines for core income statement line items
@@ -85,15 +87,22 @@ export function extractDeterministicFinancials(pdfText = "") {
 
   const parseRowNumbers = (linePattern, sourceLines = incomeStatementLines) => {
     for (let i = 0; i < sourceLines.length; i++) {
+      // Guard against matching giant multi-line narrative paragraphs (> 400 chars)
+      if (sourceLines[i].length > 400) continue;
+
       if (linePattern.test(sourceLines[i])) {
         // Search current line and next 2 lines for column numbers
         const textToSearch = `${sourceLines[i]} ${sourceLines[i + 1] || ""} ${sourceLines[i + 2] || ""}`;
         
-        // Remove CIN numbers, BSE codes, dates, 4-digit years, and PIN codes before regex extraction
+        // Remove CIN numbers, BSE codes, phone numbers, dates, 4-digit years, PIN codes, item numbers, and arithmetic references (e.g. "(3-4)")
         const sanitized = textToSearch
+          .replace(/^\s*\d+[\s\|\.\)]\s*/, "") // Leading item number (e.g. "5|", "3|", "1. ")
+          .replace(/\(\s*\d+\s*[-–+]\s*\d+\s*\)/g, "") // Arithmetic column formula references like (3-4) or (1-2)
           .replace(/\bL\d{5}[A-Z0-9]+\b/gi, "") // Any CIN number (e.g. L40109TG1986PLC006745)
           .replace(/\b5\d{5}\b/g, "") // 6-digit BSE code
           .replace(/\b400\s*\d{3}\b/g, "") // Pin code
+          .replace(/\b(?:\+?91[\-\s]?)?[6-9]\d{9}\b/g, "") // 10-digit mobile numbers
+          .replace(/\b\d{3,5}[\-\s]\d{6,8}\b/g, "") // Landline/STD numbers
           .replace(/\b(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},?\s+\d{4}\b/gi, "") // Full Date (e.g. August 08, 2026)
           .replace(/\b\d{2}[\/\.-]\d{2}[\/\.-]\d{4}\b/g, "") // Date dd/mm/yyyy
           .replace(/\b20\d{2}\b/g, ""); // 4-digit years (e.g. 2026)
@@ -102,7 +111,7 @@ export function extractDeterministicFinancials(pdfText = "") {
         if (matches) {
           let numbers = matches
             .map(m => parseFloat(m.replace(/,/g, "")))
-            .filter(n => !isNaN(n) && Math.abs(n) > 0.05 && Math.abs(n) < 100000 && n !== 517271);
+            .filter(n => !isNaN(n) && Math.abs(n) > 0.05 && Math.abs(n) < 50000000 && n !== 517271);
           
           // Drop single-digit note reference numbers (e.g. Note 9, 1, 2) when followed by financial numbers
           if (numbers.length >= 2 && numbers[0] < 15 && Number.isInteger(numbers[0]) && numbers[1] > 15) {
@@ -112,8 +121,15 @@ export function extractDeterministicFinancials(pdfText = "") {
           if (numbers.length >= 1) {
             // Convert Millions or Lakhs to Crores
             return numbers.map(n => {
-              if (isMillions) return parseFloat((n / 10).toFixed(2));
-              if (isLakhs) return parseFloat((n / 100).toFixed(2));
+              if (isMillions) {
+                if (n > 1000000) return parseFloat((n / 1000).toFixed(2));
+                return parseFloat((n / 10).toFixed(2));
+              }
+              if (isLakhs) {
+                // If 2 decimal places were stripped by PDF font encoding (e.g. 12107624 instead of 121076.24)
+                if (n > 1000000) return parseFloat((n / 10000).toFixed(2));
+                return parseFloat((n / 100).toFixed(2));
+              }
               return n;
             });
           }
@@ -335,14 +351,22 @@ export function extractDeterministicFinancials(pdfText = "") {
     }
   }
 
-  // 5. Sanity Check Filter: Reject garbled/corrupted extractions (e.g. from scanned image PDFs)
+  // 5. Sanity Check Filter: Reject garbled/corrupted extractions (e.g. from scanned image PDFs or column misalignments)
   if (result.revenue !== null) {
+    if (result.revenue > 30000 || result.revenue < 1) {
+      console.warn(`[FINANCIAL VALIDATOR] Rejected out-of-bounds revenue (₹${result.revenue} Cr). Falling back to LLM.`);
+      return null;
+    }
     if (result.revenueYoYGrowthPct !== null && (result.revenueYoYGrowthPct > 500 || result.revenueYoYGrowthPct < -95)) {
       console.warn(`[FINANCIAL VALIDATOR] Rejected garbled YoY revenue growth (${result.revenueYoYGrowthPct}%). Falling back to LLM.`);
       return null;
     }
-    if (result.ebitdaMarginPct !== null && (result.ebitdaMarginPct > 95 || result.ebitdaMarginPct < -50)) {
+    if (result.ebitdaMarginPct !== null && (result.ebitdaMarginPct > 95 || result.ebitdaMarginPct < 1.0)) {
       console.warn(`[FINANCIAL VALIDATOR] Rejected garbled EBITDA margin (${result.ebitdaMarginPct}%). Falling back to LLM.`);
+      return null;
+    }
+    if (result.patConsolidated !== null && (result.patConsolidated > result.revenue || result.patConsolidated < -10000)) {
+      console.warn(`[FINANCIAL VALIDATOR] Rejected garbled PAT (₹${result.patConsolidated} Cr vs Revenue ₹${result.revenue} Cr). Falling back to LLM.`);
       return null;
     }
   }

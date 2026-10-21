@@ -23,6 +23,9 @@ export const NVIDIA_API_KEY = process.env.NVIDIA_API_KEY || "";
 export const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || "";
 export const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || "";
 
+/** Google Gemini API Key for Multimodal OCR and Concall Audio Processing */
+export const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
+
 /** Supabase project URL and anon key for proxying Edge Functions (fetch-price, fetch-financials). */
 export const SUPABASE_URL = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || "";
 export const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || process.env.VITE_SUPABASE_PUBLISHABLE_KEY || "";

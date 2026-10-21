@@ -306,17 +306,17 @@ export async function scan({ isDryRun = false, runUrl = null, targetTicker = nul
         let deepDiveStatus = "not_required";
         const concallType = getConcallType(title, announcementText);
         const isExcludedFromEarnings = NEVER_EARNINGS_TITLES.some(p => titleLower.includes(p)) || filingCategory === "ROUTINE_COMPLIANCE";
-        if ((aiResult.is_earnings_release || filingCategory === "QUARTERLY_EARNINGS") && !isExcludedFromEarnings) {
-          deepDiveStatus = "pending_stage1";
-        } else if (concallType === "audio" && !isExcludedFromEarnings) {
+        if (concallType === "audio") {
           deepDiveStatus = "pending_audio";
-        } else if (concallType === "transcript" && !isExcludedFromEarnings) {
+        } else if (concallType === "transcript") {
           // If transcript arrives, check if Stage 1 already ran for this stock
           const prevCompleted = await pool.query(
             "SELECT id FROM corporate_announcements WHERE ticker = $1 AND deep_dive_status = 'completed' LIMIT 1",
             [ticker]
           );
           deepDiveStatus = prevCompleted.rows.length > 0 ? "pending_stage2" : "pending_stage1";
+        } else if ((aiResult.is_earnings_release || filingCategory === "QUARTERLY_EARNINGS") && !isExcludedFromEarnings) {
+          deepDiveStatus = "pending_stage1";
         }
 
         // 7. Alert ONLY if non-earnings routine/regulatory event (Earnings Results & Concalls/Audio are deferred to Quarterly Deep-Dive Worker for verified full-page/audio audit)

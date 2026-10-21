@@ -365,6 +365,40 @@ function sanitizeLlmOutput(guarded, title = "", ticker = "") {
     guarded.thesis_operational_kpis = sanitizeArray(guarded.thesis_operational_kpis, true);
   }
 
+  // Sanitize and ground management commitments against raw filing text
+  if (guarded.commitments && Array.isArray(guarded.commitments)) {
+    guarded.commitments = guarded.commitments.filter(comm => {
+      if (!comm || typeof comm !== "object") return false;
+      const stmtLower = (comm.statement || "").toLowerCase().trim();
+      const summaryLower = (comm.evidence_summary || "").toLowerCase().trim();
+      if (stmtLower.length < 5) return false;
+
+      // Filter out prompt template leaks & hallucination keywords
+      if (PROMPT_LEAK_PHRASES.some(phrase => stmtLower.includes(phrase) || summaryLower.includes(phrase))) {
+        return false;
+      }
+      if (stmtLower.includes("covid-19") || summaryLower.includes("covid-19") || stmtLower.includes("pandemic")) {
+        return false;
+      }
+
+      // Grounding check: verify that specific large numbers (>50) in statement or target appear in docText
+      if (rawDocText && rawDocText.length > 50) {
+        const textToCheck = `${comm.statement} ${comm.target_value || ''}`;
+        const numbers = textToCheck.match(/\b\d{2,}(?:[.,]\d+)?\b/g) || [];
+        for (const num of numbers) {
+          const cleanNum = num.replace(/,/g, "");
+          if (["2024", "2025", "2026", "2027", "2028", "2029", "2030"].includes(cleanNum)) continue;
+          if (["10", "12", "15", "18", "20", "22", "25", "30", "35", "40", "50"].includes(cleanNum)) continue;
+          if (!rawDocText.includes(cleanNum) && !rawDocText.includes(num)) {
+            console.warn(`[GROUNDING GUARD] Suppressed ungrounded commitment token ${num} for ${ticker}: "${comm.statement}"`);
+            return false;
+          }
+        }
+      }
+      return true;
+    });
+  }
+
   // Cross-section deduplication (e.g. don't repeat dividend in both key_data and corporate_actions)
   if (guarded.key_data && guarded.corporate_actions && guarded.corporate_actions.length > 0) {
     const keyDataLower = String(guarded.key_data).toLowerCase();

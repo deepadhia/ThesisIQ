@@ -127,10 +127,11 @@ async function runNimPrompt(systemPrompt, userPrompt, temperature = 0.05) {
   const MAX_RETRIES = 5;
   const BASE_DELAY_MS = 3000;
   const MODELS = [
-    "nvidia/nemotron-3-ultra-550b-a55b",
     "meta/llama-3.2-11b-vision-instruct",
+    "nvidia/nemotron-3-super-120b-a12b",
+    "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning",
     "openai/gpt-oss-20b",
-    "nvidia/nemotron-3-super-120b-a12b"
+    "nvidia/nemotron-3-ultra-550b-a55b"
   ];
   let lastErr;
 
@@ -499,6 +500,7 @@ Return ONLY a valid JSON object:
   }
 
   const finData = extractDeterministicFinancials(text);
+  mergedVerdict._raw_text = text;
   return applyInstitutionalGuard(mergedVerdict, finData, title, ticker);
 }
 
@@ -545,26 +547,42 @@ export async function reconcilePriorGuidanceVsActual(ticker, currentQuarter, cur
  * @param {boolean} [options.suppressTelegram=false] - Whether to skip Telegram alerts (useful during bulk backfills)
  */
 export async function processPendingDeepDives(options = {}) {
-  const { suppressTelegram = false, tickers = null, batchSize = 4, allowHistorical = false } = options;
+  const { suppressTelegram = false, tickers = null, batchSize = 4, allowHistorical = false, announcementIds = null, retryFailed = false } = options;
   console.log(`[WORKER] Polling for pending quarterly deep-dives (parallel batch size: ${batchSize})...`);
   
-  let queryText = `SELECT ca.id, ca.stock_id, ca.ticker, ca.title, ca.attachment_url, ca.filing_date, ca.deep_dive_status,
-            s.investment_thesis, s.company_name
-     FROM corporate_announcements ca
-     JOIN stocks s ON s.id = ca.stock_id
-      WHERE ca.deep_dive_status IN ('pending_stage1', 'pending_stage2', 'pending_audio')
-        AND (s.category IN ('Core', 'Watchlist') OR s.category IS NULL)`;
+  let queryText;
+  let queryParams = [];
 
-  if (!allowHistorical && !suppressTelegram) {
-    queryText += ` AND ca.created_at >= NOW() - INTERVAL '30 days'`;
+  if (announcementIds && announcementIds.length > 0) {
+    queryText = `SELECT ca.id, ca.stock_id, ca.ticker, ca.title, ca.attachment_url, ca.filing_date, ca.deep_dive_status,
+             s.investment_thesis, s.company_name
+      FROM corporate_announcements ca
+      JOIN stocks s ON s.id = ca.stock_id
+      WHERE ca.id = ANY($1)`;
+    queryParams = [announcementIds];
+  } else {
+    const statuses = retryFailed 
+      ? ['pending_stage1', 'pending_stage2', 'pending_audio', 'failed']
+      : ['pending_stage1', 'pending_stage2', 'pending_audio'];
+    
+    queryText = `SELECT ca.id, ca.stock_id, ca.ticker, ca.title, ca.attachment_url, ca.filing_date, ca.deep_dive_status,
+             s.investment_thesis, s.company_name
+      FROM corporate_announcements ca
+      JOIN stocks s ON s.id = ca.stock_id
+      WHERE ca.deep_dive_status = ANY($1)
+        AND (s.category IN ('Core', 'Watchlist') OR s.category IS NULL)`;
+    queryParams = [statuses];
+
+    if (!allowHistorical && !suppressTelegram) {
+      queryText += ` AND ca.created_at >= NOW() - INTERVAL '30 days'`;
+    }
+    
+    if (tickers && tickers.length > 0) {
+      queryParams.push(tickers);
+      queryText += ` AND ca.ticker = ANY($${queryParams.length})`;
+    }
+    queryText += ` ORDER BY ca.filing_date DESC, ca.created_at DESC LIMIT ${batchSize}`;
   }
-  
-  const queryParams = [];
-  if (tickers && tickers.length > 0) {
-    queryParams.push(tickers);
-    queryText += ` AND ca.ticker = ANY($1)`;
-  }
-  queryText += ` ORDER BY ca.filing_date ASC, ca.created_at ASC LIMIT ${batchSize}`;
 
   const { rows: pendingList } = await pool.query(queryText, queryParams);
 
@@ -590,7 +608,16 @@ export async function processPendingDeepDives(options = {}) {
       }
 
       // ── STAGE AUDIO: Concall / AGM Media Processing ──
-      if (item.deep_dive_status === "pending_audio") {
+      const titleLowerForAudio = (item.title || "").toLowerCase();
+      const textLowerForAudio = (docText || "").toLowerCase();
+      const isConcallAudioFiling = 
+        item.deep_dive_status === "pending_audio" || 
+        titleLowerForAudio.includes("audio recording") || 
+        textLowerForAudio.includes("audio recording of the") || 
+        textLowerForAudio.includes("link of audio recording") || 
+        (titleLowerForAudio.includes("con. call") && textLowerForAudio.includes("audio recording"));
+
+      if (isConcallAudioFiling) {
         console.log(`[WORKER AUDIO] Ingesting concall audio for ${item.ticker}...`);
         const audioUrl = extractAudioUrlFromFiling(docText, item.attachment_url);
         if (!audioUrl) {
@@ -705,12 +732,26 @@ export async function processPendingDeepDives(options = {}) {
         textLower.includes("investor meet");
 
       const isCoreEarningsDoc =
+        titleLower.includes("transcript") ||
+        titleLower.includes("concall") ||
+        titleLower.includes("con. call") ||
+        titleLower.includes("conference call") ||
+        titleLower.includes("earnings call") ||
+        titleLower.includes("investor presentation") ||
+        titleLower.includes("financial result") ||
+        titleLower.includes("outcome of board meeting") ||
+        titleLower.includes("outcome of the board meeting") ||
+        titleLower.includes("press release") ||
         textLower.includes("transcript") ||
         textLower.includes("concall") ||
+        textLower.includes("con. call") ||
+        textLower.includes("conference call") ||
+        textLower.includes("earnings call") ||
         textLower.includes("investor presentation") ||
         textLower.includes("financial result") ||
         textLower.includes("un-audited financial") ||
         textLower.includes("audited financial") ||
+        textLower.includes("press release") ||
         (textLower.includes("outcome of board meeting") && (textLower.includes("financial") || textLower.includes("result")));
 
       const isHighValueOperationalDoc =
@@ -772,14 +813,50 @@ export async function processPendingDeepDives(options = {}) {
             : extractedFin);
 
       // 2. Apply Post-Processing Institutional Guard Layer (Deterministic Rules & YoY Precedence)
+      rawVerdict._raw_text = docText;
       const verdict = applyInstitutionalGuard(rawVerdict, deterministicFin, item.title, item.ticker);
+
+      // Construct robust active financials: Prefer deterministic parser; fallback to LLM extracted figures if deterministic table extraction is null
+      let activeFin = deterministicFin;
+      if ((!activeFin || !activeFin.revenue) && (verdict.financial_highlights || rawVerdict.financial_highlights)) {
+        const fh = verdict.financial_highlights || rawVerdict.financial_highlights || {};
+        const parseNum = (val) => {
+          if (!val || typeof val !== 'string') return null;
+          const m = val.replace(/,/g, '').match(/-?\d+(?:\.\d+)?/);
+          return m ? parseFloat(m[0]) : null;
+        };
+        const revGrowth = parseNum(fh.revenue_yoy);
+        const patGrowth = parseNum(fh.pat_yoy);
+        const ebitdaMargin = parseNum(fh.ebitda_margin);
+        const ebitdaBps = parseNum(fh.ebitda_margin_delta);
+        const revCr = parseNum(fh.revenue);
+        const patCr = parseNum(fh.pat_consolidated);
+        const ebitdaCr = parseNum(fh.ebitda);
+
+        if (revGrowth !== null || patGrowth !== null || ebitdaMargin !== null || revCr !== null) {
+          activeFin = {
+            isFinancialResult: true,
+            revenue: revCr,
+            revenueYoYGrowthPct: revGrowth,
+            patConsolidated: patCr,
+            patAttributable: patCr,
+            patYoYGrowthPct: patGrowth,
+            ebitda: ebitdaCr,
+            ebitdaMarginPct: ebitdaMargin,
+            ebitdaMarginBpsDelta: ebitdaBps,
+            isYoYDecline: (patGrowth !== null && patGrowth < 0) || (revGrowth !== null && revGrowth < 0),
+            isMarginErosion: (ebitdaBps !== null && ebitdaBps < -150)
+          };
+          console.log(`[WORKER] Structured verified financials from LLM highlights for ${item.ticker}: Rev YoY ${revGrowth}%, PAT YoY ${patGrowth}%, EBITDA Margin ${ebitdaMargin}%`);
+        }
+      }
 
       // 3. DUAL-LAYER QUANTITATIVE & THESIS GATE EVALUATION
       // Layer 1: Universal Financial Health (Revenue > 0, PAT > 0, no margin collapse)
       // Layer 2: Company-Specific Thesis Hurdle Rates (e.g. TIMETECHNO margin >= 14.5%, PAT >= 130 Cr, EBITDA >= 246 Cr)
       const gateResult = evaluateDualLayerActionGate({
         ticker: item.ticker,
-        financialData: deterministicFin,
+        financialData: activeFin,
         proposedAction: verdict.action_signal || verdict.final_action,
         llmConviction: verdict.conviction_score
       });
@@ -919,7 +996,7 @@ export async function processPendingDeepDives(options = {}) {
       );
       const isConcall = Boolean(verdict.concall_highlights) || item.title.toLowerCase().includes("transcript") || item.title.toLowerCase().includes("concall");
       
-      const isMaterialAlert = hasRealFinancials || isActionableSignal || isHighConviction || hasMaterialCommitments || isConcall;
+      const isMaterialAlert = isCoreEarningsDoc || hasRealFinancials || isActionableSignal || isHighConviction || hasMaterialCommitments || isConcall;
 
       if (!suppressTelegram && !isGenericFallback && isMaterialAlert) {
         const gateInfo = verdict.thesis_gate_result || {};

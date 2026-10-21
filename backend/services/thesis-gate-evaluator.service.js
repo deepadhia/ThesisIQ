@@ -14,6 +14,10 @@
 
 import fs from 'fs';
 import path from 'path';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 // Cached driver-level thesis contracts
 let cachedContracts = null;
@@ -21,8 +25,13 @@ let cachedContracts = null;
 function loadThesisContracts() {
   if (cachedContracts) return cachedContracts;
   try {
-    const contractsPath = path.resolve('reports/thesis_board/driver-level-thesis-contracts.json');
-    if (fs.existsSync(contractsPath)) {
+    const candidatePaths = [
+      path.resolve(process.cwd(), 'reports/thesis_board/driver-level-thesis-contracts.json'),
+      path.resolve(process.cwd(), '../reports/thesis_board/driver-level-thesis-contracts.json'),
+      path.resolve(__dirname, '../../reports/thesis_board/driver-level-thesis-contracts.json')
+    ];
+    const contractsPath = candidatePaths.find(p => fs.existsSync(p));
+    if (contractsPath) {
       const raw = fs.readFileSync(contractsPath, 'utf8');
       const parsed = JSON.parse(raw);
       const map = new Map();
@@ -210,6 +219,63 @@ const SPECIFIC_THESIS_HURDLES = {
       targetRenewalSharePct: 40.0
     },
     description: "Primary: Revenue growth ≥25.0% YoY | Structural: Renewal premium share ≥40%"
+  },
+  ELECON: {
+    primary: {
+      minEbitdaMarginPct: 20.0
+    },
+    structural: {
+      targetExportMixPct: 25.0
+    },
+    description: "Primary: EBITDA margin ≥20.0% | Structural: European subsidiary demand & export mix ≥25%"
+  },
+  LUMAXTECH: {
+    primary: {
+      minEbitdaMarginPct: 11.0
+    },
+    description: "Primary: EBITDA margin ≥11.0% | Structural: IAC India integration & order book expansion"
+  },
+  SJS: {
+    primary: {
+      minEbitdaMarginPct: 22.0
+    },
+    description: "Primary: EBITDA margin ≥22.0% | Structural: Walter Pack integration & export share scaling"
+  },
+  TRANSRAILL: {
+    primary: {
+      minEbitdaMarginPct: 11.5
+    },
+    description: "Primary: EBITDA margin ≥11.5% | Structural: Substation & T&D international execution"
+  },
+  QPOWER: {
+    primary: {
+      minEbitdaMarginPct: 12.0
+    },
+    description: "Primary: EBITDA margin ≥12.0% | Structural: Power transmission & distribution order execution"
+  },
+  SHAKTIPUMP: {
+    primary: {
+      minEbitdaMarginPct: 15.0
+    },
+    description: "Primary: EBITDA margin ≥15.0% | Structural: KUSUM-3 solar pump dispatch throughput"
+  },
+  JYOTICNC: {
+    primary: {
+      minEbitdaMarginPct: 14.0
+    },
+    description: "Primary: EBITDA margin ≥14.0% | Structural: Aerospace & defense CNC order backlog scaling"
+  },
+  SBCL: {
+    primary: {
+      minEbitdaMarginPct: 16.0
+    },
+    description: "Primary: EBITDA margin ≥16.0% | Structural: Specialty chemical capacity ramp"
+  },
+  MOREPENLAB: {
+    primary: {
+      minEbitdaMarginPct: 10.0
+    },
+    description: "Primary: EBITDA margin ≥10.0% | Structural: Medical devices & API formulation growth"
   }
 };
 
@@ -217,6 +283,8 @@ const SPECIFIC_THESIS_HURDLES = {
  * Evaluates Layer 2: Company-Specific Thesis Hurdle Gate (Fail-Closed)
  */
 export function evaluateThesisSpecificHurdle(ticker, fin = {}, operational = {}) {
+  const safeFin = fin || {};
+  const safeOperational = operational || {};
   const symbol = (ticker || '').toUpperCase().trim();
   const hurdles = SPECIFIC_THESIS_HURDLES[symbol];
 
@@ -262,34 +330,34 @@ export function evaluateThesisSpecificHurdle(ticker, fin = {}, operational = {})
 
   // 1. Primary EBITDA Margin Gate (Fail-Closed on missing KPI)
   if (primary.minEbitdaMarginPct !== undefined) {
-    if (fin.ebitdaMarginPct === null || fin.ebitdaMarginPct === undefined || isNaN(fin.ebitdaMarginPct)) {
+    if (safeFin.ebitdaMarginPct === null || safeFin.ebitdaMarginPct === undefined || isNaN(safeFin.ebitdaMarginPct)) {
       unavailable.push(`Required KPI EBITDA Margin unavailable in verified data`);
-    } else if (Number(fin.ebitdaMarginPct) < primary.minEbitdaMarginPct) {
-      failures.push(`EBITDA Margin ${fin.ebitdaMarginPct}% < target ${primary.minEbitdaMarginPct}%`);
+    } else if (Number(safeFin.ebitdaMarginPct) < primary.minEbitdaMarginPct) {
+      failures.push(`EBITDA Margin ${safeFin.ebitdaMarginPct}% < target ${primary.minEbitdaMarginPct}%`);
     }
   }
 
   // 2. Primary PAT Gate (Fail-Closed on missing KPI)
   if (primary.minPatCr !== undefined) {
-    if (fin.patConsolidated === null || fin.patConsolidated === undefined || isNaN(fin.patConsolidated)) {
+    if (safeFin.patConsolidated === null || safeFin.patConsolidated === undefined || isNaN(safeFin.patConsolidated)) {
       unavailable.push(`Required KPI Consolidated PAT unavailable in verified data`);
-    } else if (Number(fin.patConsolidated) < primary.minPatCr) {
-      failures.push(`PAT ₹${fin.patConsolidated} Cr < target ₹${primary.minPatCr} Cr`);
+    } else if (Number(safeFin.patConsolidated) < primary.minPatCr) {
+      failures.push(`PAT ₹${safeFin.patConsolidated} Cr < target ₹${primary.minPatCr} Cr`);
     }
   }
 
   // 3. Primary EBITDA Gate (Fail-Closed on missing KPI)
   if (primary.minEbitdaCr !== undefined) {
-    if (fin.ebitda === null || fin.ebitda === undefined || isNaN(fin.ebitda)) {
+    if (safeFin.ebitda === null || safeFin.ebitda === undefined || isNaN(safeFin.ebitda)) {
       unavailable.push(`Required KPI EBITDA unavailable in verified data`);
-    } else if (Number(fin.ebitda) < primary.minEbitdaCr) {
-      failures.push(`EBITDA ₹${fin.ebitda} Cr < target ₹${primary.minEbitdaCr} Cr`);
+    } else if (Number(safeFin.ebitda) < primary.minEbitdaCr) {
+      failures.push(`EBITDA ₹${safeFin.ebitda} Cr < target ₹${primary.minEbitdaCr} Cr`);
     }
   }
 
   // 4. Primary Revenue Gate (Fail-Closed on missing KPI)
   if (primary.minRevenueCr !== undefined) {
-    const revVal = (fin.revenue !== null && fin.revenue !== undefined) ? fin.revenue : fin.revenueCr;
+    const revVal = (safeFin.revenue !== null && safeFin.revenue !== undefined) ? safeFin.revenue : safeFin.revenueCr;
     if (revVal === null || revVal === undefined || isNaN(revVal)) {
       unavailable.push(`Required KPI Total Revenue unavailable in verified data`);
     } else if (Number(revVal) < primary.minRevenueCr) {
@@ -301,10 +369,10 @@ export function evaluateThesisSpecificHurdle(ticker, fin = {}, operational = {})
   let structuralConfirmed = true;
   const structural = hurdles.structural || {};
   if (structural.targetVapSharePct !== undefined) {
-    if (operational.vapSharePct !== undefined && operational.vapSharePct !== null) {
-      structuralConfirmed = Number(operational.vapSharePct) >= structural.targetVapSharePct;
-    } else if (fin.vapSharePct !== undefined && fin.vapSharePct !== null) {
-      structuralConfirmed = Number(fin.vapSharePct) >= structural.targetVapSharePct;
+    if (safeOperational.vapSharePct !== undefined && safeOperational.vapSharePct !== null) {
+      structuralConfirmed = Number(safeOperational.vapSharePct) >= structural.targetVapSharePct;
+    } else if (safeFin.vapSharePct !== undefined && safeFin.vapSharePct !== null) {
+      structuralConfirmed = Number(safeFin.vapSharePct) >= structural.targetVapSharePct;
     } else {
       structuralConfirmed = false; // Pending structural data
     }
@@ -343,9 +411,11 @@ export function evaluateThesisSpecificHurdle(ticker, fin = {}, operational = {})
  * Main Dual-Layer Gating Function
  * Returns actionable verdict, granular categorization, and decision text.
  */
-export function evaluateDualLayerActionGate({ ticker, financialData, operationalMetrics = {}, proposedAction = 'HOLD', llmConviction = 5 }) {
-  const universal = evaluateUniversalFinancialHealth(financialData);
-  const thesis = evaluateThesisSpecificHurdle(ticker, financialData, operationalMetrics);
+export function evaluateDualLayerActionGate({ ticker, financialData = {}, operationalMetrics = {}, proposedAction = 'HOLD', llmConviction = 5 }) {
+  const safeFin = financialData || {};
+  const safeOperational = operationalMetrics || {};
+  const universal = evaluateUniversalFinancialHealth(safeFin);
+  const thesis = evaluateThesisSpecificHurdle(ticker, safeFin, safeOperational);
 
   const actionAuthorized = universal.status === 'PASS' && thesis.status === 'PASS';
 

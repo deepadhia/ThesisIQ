@@ -24,7 +24,17 @@ function getFfmpegPath() {
  * Extracts candidate media or webcast URLs from filing PDF text or attachment URL.
  */
 export function extractAudioUrlFromFiling(pdfText = "", attachmentUrl = "") {
-  const combined = `${attachmentUrl}\n${pdfText}`;
+  // Reconnect URLs wrapped across line breaks in PDF layout (e.g. "https://example.com/path-\nsubpath" or "https://example.com/path/\nsubpath")
+  const unwrappedText = (pdfText || "")
+    .replace(/(https?:\/\/[^\s"'<>]+)-\r?\n([a-zA-Z0-9_\-\.\/?&=%#]+)/gi, "$1-$2")
+    .replace(/(https?:\/\/[^\s"'<>\-]+)\r?\n([a-zA-Z0-9_\-\.\/?&=%#]+)/gi, (match, p1, p2) => {
+      if (/^[a-zA-Z0-9_\-\.\/?&=%#]+$/.test(p2) && !/^(To|From|Dear|Date|Subject|The|Ref|Yours|For|National|BSE|NSE)\b/i.test(p2)) {
+        return `${p1}${p2}`;
+      }
+      return match;
+    });
+
+  const combined = `${attachmentUrl}\n${unwrappedText}`;
   
   // Look for direct audio/video links
   const directMatch = combined.match(/https?:\/\/[^\s"'<>]+\.(?:mp3|mp4|m4a|wav|aac|ogg)(?:\?[^\s"'<>]*)?/i);
@@ -56,6 +66,20 @@ export async function downloadAndExtractMp3(url, outputMp3Path) {
 
   if (!response.ok) {
     throw new Error(`Failed to download audio stream: ${response.status} ${response.statusText}`);
+  }
+
+  // Handle HTML landing pages (e.g. company IR pages hosting the audio file)
+  const contentType = (response.headers.get("content-type") || "").toLowerCase();
+  if (contentType.includes("text/html")) {
+    console.log(`[AUDIO ANALYZER] Detected HTML landing page for media URL. Resolving direct audio stream link...`);
+    const htmlText = await response.text();
+    const hrefMatches = [...htmlText.matchAll(/href=["']([^"']+\.(?:mp3|mp4|m4a|wav|aac)(?:\?[^"']*)?)["']/gi)].map(m => m[1]);
+    if (hrefMatches.length > 0) {
+      const resolvedDirectUrl = new URL(hrefMatches[0], url).href;
+      console.log(`[AUDIO ANALYZER] Successfully resolved direct audio stream: ${resolvedDirectUrl}`);
+      return downloadAndExtractMp3(resolvedDirectUrl, outputMp3Path);
+    }
+    throw new Error(`Landing page did not contain direct audio link (.mp3/.m4a): ${url}`);
   }
 
   const arrayBuffer = await response.arrayBuffer();
