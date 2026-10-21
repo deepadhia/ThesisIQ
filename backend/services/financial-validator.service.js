@@ -49,7 +49,15 @@ export function extractDeterministicFinancials(pdfText = "") {
 
   // Helper to parse numbers and detect unit scale (Millions vs Lakhs vs Crores)
   const isMillions = fullTextLower.includes("in million") || fullTextLower.includes("rs. millions") || fullTextLower.includes("in mn") || fullTextLower.includes("in rs. millions");
-  const isLakhs = !isMillions && (fullTextLower.includes("lakh") || fullTextLower.includes("lacs") || fullTextLower.includes("in lac"));
+  const isLakhs = !isMillions && (
+    fullTextLower.includes("lakh") || 
+    fullTextLower.includes("lacs") || 
+    fullTextLower.includes("in lac") ||
+    fullTextLower.includes("in ₹ lakhs") ||
+    fullTextLower.includes("rs. in lakhs") ||
+    fullTextLower.includes("₹ in lakhs") ||
+    /\(\s*(?:rs\.?|₹)?\s*in\s+lakhs?\s*\)/i.test(fullTextLower)
+  );
 
   // Consolidated Statement Slicer: Prioritize Consolidated Financial Results Table if present
   let incomeStatementLines = lines;
@@ -351,18 +359,40 @@ export function extractDeterministicFinancials(pdfText = "") {
     }
   }
 
-  // 5. Sanity Check Filter: Reject garbled/corrupted extractions (e.g. from scanned image PDFs or column misalignments)
+  // 5. Sanity Check & Unit Normalization Filter
   if (result.revenue !== null) {
-    if (result.revenue > 30000 || result.revenue < 1) {
+    // If revenue is reported in Lakhs (e.g. 121,076.24 Lakhs = 1,210.76 Cr)
+    if (result.revenue > 10000 && !fullTextLower.includes("in crore") && !fullTextLower.includes("rs. in crore")) {
+      console.log(`[FINANCIAL VALIDATOR] Detected Lakhs scaling for revenue ₹${result.revenue}. Normalizing by / 100 to Crores...`);
+      result.revenue = parseFloat((result.revenue / 100).toFixed(2));
+      if (result.ebitda !== null && result.ebitda > 2000) {
+        result.ebitda = parseFloat((result.ebitda / 100).toFixed(2));
+      }
+      if (result.patConsolidated !== null && result.patConsolidated > 1000) {
+        result.patConsolidated = parseFloat((result.patConsolidated / 100).toFixed(2));
+      }
+      if (result.patAttributable !== null && result.patAttributable > 1000) {
+        result.patAttributable = parseFloat((result.patAttributable / 100).toFixed(2));
+      }
+      if (result.patStandalone !== null && result.patStandalone > 1000) {
+        result.patStandalone = parseFloat((result.patStandalone / 100).toFixed(2));
+      }
+    }
+
+    // Recalculate EBITDA margin if ebitda and revenue exist but margin is missing or distorted
+    if (result.ebitda !== null && result.revenue > 0 && (result.ebitdaMarginPct === null || result.ebitdaMarginPct < 0.5 || result.ebitdaMarginPct > 95)) {
+      const calcMargin = parseFloat(((result.ebitda / result.revenue) * 100).toFixed(2));
+      if (calcMargin >= 1.0 && calcMargin <= 90.0) {
+        result.ebitdaMarginPct = calcMargin;
+      }
+    }
+
+    if (result.revenue > 50000 || result.revenue < 1) {
       console.warn(`[FINANCIAL VALIDATOR] Rejected out-of-bounds revenue (₹${result.revenue} Cr). Falling back to LLM.`);
       return null;
     }
     if (result.revenueYoYGrowthPct !== null && (result.revenueYoYGrowthPct > 500 || result.revenueYoYGrowthPct < -95)) {
       console.warn(`[FINANCIAL VALIDATOR] Rejected garbled YoY revenue growth (${result.revenueYoYGrowthPct}%). Falling back to LLM.`);
-      return null;
-    }
-    if (result.ebitdaMarginPct !== null && (result.ebitdaMarginPct > 95 || result.ebitdaMarginPct < 1.0)) {
-      console.warn(`[FINANCIAL VALIDATOR] Rejected garbled EBITDA margin (${result.ebitdaMarginPct}%). Falling back to LLM.`);
       return null;
     }
     if (result.patConsolidated !== null && (result.patConsolidated > result.revenue || result.patConsolidated < -10000)) {

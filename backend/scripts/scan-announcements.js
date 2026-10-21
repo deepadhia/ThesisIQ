@@ -215,12 +215,27 @@ export async function scan({ isDryRun = false, runUrl = null, targetTicker = nul
           title.toLowerCase().includes("merger") ||
           title.toLowerCase().includes("demerger") ||
           title.toLowerCase().includes("amalgamation") ||
+          title.toLowerCase().includes("transcript") ||
+          title.toLowerCase().includes("concall") ||
+          title.toLowerCase().includes("audio recording") ||
+          title.toLowerCase().includes("financial result") ||
+          (ann.attachment && (
+            ann.attachment.toLowerCase().includes("rights issue") ||
+            ann.attachment.toLowerCase().includes("preferential") ||
+            ann.attachment.toLowerCase().includes("qip") ||
+            ann.attachment.toLowerCase().includes("acquisition") ||
+            ann.attachment.toLowerCase().includes("transcript") ||
+            ann.attachment.toLowerCase().includes("audio") ||
+            ann.attachment.toLowerCase().includes("result") ||
+            ann.attachment.toLowerCase().includes("financial")
+          )) ||
           (ann.attachment_text && (
             ann.attachment_text.toLowerCase().includes("rights issue") ||
             ann.attachment_text.toLowerCase().includes("preferential") ||
             ann.attachment_text.toLowerCase().includes("qip") ||
             ann.attachment_text.toLowerCase().includes("acquisition") ||
-            ann.attachment_text.toLowerCase().includes("subsidiary")
+            ann.attachment_text.toLowerCase().includes("subsidiary") ||
+            ann.attachment_text.toLowerCase().includes("transcript")
           ));
 
         if (extractedText && extractedText.trim().length > 50) {
@@ -304,7 +319,7 @@ export async function scan({ isDryRun = false, runUrl = null, targetTicker = nul
 
         // Determine deep_dive_status queue state for Quarterly Engine
         let deepDiveStatus = "not_required";
-        const concallType = getConcallType(title, announcementText);
+        const concallType = getConcallType(title, announcementText, ann.attachment || docUrl);
         const isExcludedFromEarnings = NEVER_EARNINGS_TITLES.some(p => titleLower.includes(p)) || filingCategory === "ROUTINE_COMPLIANCE";
         if (concallType === "audio") {
           deepDiveStatus = "pending_audio";
@@ -689,7 +704,13 @@ export async function scan({ isDryRun = false, runUrl = null, targetTicker = nul
 // Check if run directly
 import { fileURLToPath } from 'url';
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
-  scan().then(() => {
+  const args = process.argv.slice(2);
+  const isDryRun = args.includes("--dry-run");
+  const forceReevaluate = args.includes("--force-reevaluate");
+  const tickerIdx = args.indexOf("--ticker");
+  const targetTicker = tickerIdx !== -1 && args[tickerIdx + 1] ? args[tickerIdx + 1] : null;
+
+  scan({ isDryRun, forceReevaluate, targetTicker }).then(() => {
     console.log("Process finished.");
     process.exit(0);
   }).catch(async (err) => {

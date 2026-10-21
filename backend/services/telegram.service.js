@@ -671,8 +671,8 @@ export async function sendAnnouncementAlert(params) {
 // ─── Run Summary ──────────────────────────────────────────────────────────────
 
 /**
- * Sends a post-scan run summary to Telegram.
- * In live daemon mode, this is SILENT unless alerts were sent.
+ * Sends a post-scan run summary.
+ * In live operations, cron heartbeat summaries are logged to stdout only to prevent Telegram noise.
  */
 export async function sendRunSummary({
   stocksScanned, newAnnouncements, alertsSent,
@@ -680,92 +680,9 @@ export async function sendRunSummary({
   runUrl, isDryRun = false
 }) {
   const durationSec = (durationMs / 1000).toFixed(1);
-  const timestamp = new Date().toLocaleString("en-IN", { timeZone: "Asia/Kolkata" });
-
-  // In 24/7 daemon mode, NEVER send summary if 0 alerts were sent (prevents 5-minute spam)
-  if (alertsSent === 0 && !isDryRun) {
-    console.log(`[SUMMARY] 0 alerts sent. Quiet daemon run — skipping Telegram summary.`);
-    return;
-  }
-
-  // Fetch commitments fulfilled (Achieved) or broken (Missed) in the last 24 hours only if there are live events
-  let fulfilledPromises = [];
-  let brokenPromises = [];
-  try {
-    const { rows: fulfilled } = await pool.query(
-      `SELECT ticker, metric, statement, evidence_summary 
-       FROM management_commitments 
-       WHERE status = 'Achieved' 
-         AND created_at > NOW() - INTERVAL '24 hours' 
-       ORDER BY created_at DESC LIMIT 5`
-    );
-    fulfilledPromises = fulfilled;
-
-    const { rows: missed } = await pool.query(
-      `SELECT ticker, metric, statement, evidence_summary 
-       FROM management_commitments 
-       WHERE status = 'Missed' 
-         AND created_at > NOW() - INTERVAL '24 hours' 
-       ORDER BY created_at DESC LIMIT 5`
-    );
-    brokenPromises = missed;
-  } catch (err) {
-    console.warn("[SUMMARY] Failed to query recent commitment reconciliations:", err.message);
-  }
-
-  // Group commitments by stock ticker
-  const stockMap = {};
-
-  for (const f of fulfilledPromises) {
-    const t = f.ticker.toUpperCase();
-    if (!stockMap[t]) stockMap[t] = { fulfilled: [], missed: [] };
-    stockMap[t].fulfilled.push(f);
-  }
-
-  for (const m of brokenPromises) {
-    const t = m.ticker.toUpperCase();
-    if (!stockMap[t]) stockMap[t] = { fulfilled: [], missed: [] };
-    stockMap[t].missed.push(m);
-  }
-
-  let status;
-  if (alertsSent > 0)          status = `🟢 ${alertsSent} alert${alertsSent > 1 ? "s" : ""} sent`;
-  else if (newAnnouncements > 0) status = "🟡 New filings found (below threshold)";
-  else                           status = "🔵 Clean run — no new announcements";
-
-  let message = `📊 *DAILY PROCESSOR SCAN SUMMARY* ${isDryRun ? "_(DRY RUN)_" : ""}\n`;
-  message    += `──────────────────────────────\n`;
-  message    += `🏢 *Stocks Scanned:* ${stocksScanned}\n`;
-  message    += `📋 *New Filings Found:* ${newAnnouncements}\n`;
-  message    += `📣 *Alerts Dispatched:* ${alertsSent}\n`;
-  message    += `⏱️ *Duration:* ${durationSec}s | *Status:* ${status}\n`;
-
-  // ── Stock-Wise Promises & Guidance Audit Section ──────────────────────────
-  if (Object.keys(stockMap).length > 0) {
-    message += `\n📌 *GUIDANCE & PROMISE RECONCILIATIONS*\n`;
-    for (const [ticker, data] of Object.entries(stockMap)) {
-      message += `\n🏢 *${ticker}*\n`;
-      for (const f of data.fulfilled) {
-        message += `  • 🟢 *Fulfilled (${f.metric}):* ${(f.evidence_summary || f.statement).substring(0, 110)}\n`;
-      }
-      for (const m of data.missed) {
-        message += `  • 🔴 *Broken/Missed (${m.metric}):* ${(m.evidence_summary || m.statement).substring(0, 110)}\n`;
-      }
-    }
-  }
-
-  if (bseErrors > 0 || nseErrors > 0) {
-    message += `\n⚠️ *Fetch Errors:* BSE ${bseErrors} | NSE ${nseErrors}\n`;
-  }
-
-  if (runUrl) {
-    message += `\n📄 [View Workflow Run →](${runUrl})\n`;
-  }
-
-  message += `──────────────────────────────\n`;
-  message += `_🕐 ${timestamp}_`;
-
-  return sendTelegramMessage(message);
+  console.log(`[SCAN SUMMARY] Stocks Scanned: ${stocksScanned} | New: ${newAnnouncements} | Alerts: ${alertsSent} | Time: ${durationSec}s`);
+  // Always suppress sending scan summary heartbeats to Telegram to keep the channel clean and high-signal
+  return false;
 }
 
 /**

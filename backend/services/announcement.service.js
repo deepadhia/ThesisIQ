@@ -90,10 +90,11 @@ export function shouldProcessAnnouncement(title) {
  * Classifies an announcement title and optional raw text into concall categories: "transcript", "audio", "scheduled", or "done".
  * Returns null if the announcement is not a genuine public earnings concall.
  */
-export function getConcallType(title, rawText = "") {
+export function getConcallType(title, rawText = "", attachmentUrl = "") {
   const t = String(title || "").toLowerCase();
   const body = String(rawText || "").toLowerCase();
-  const combined = `${t} ${body}`;
+  const attach = String(attachmentUrl || "").toLowerCase();
+  const combined = `${t} ${body} ${attach}`;
 
   // 0. AGM / EGM / Postal Ballot guard — must come first.
   // Procedural notices/ballots are not concalls, BUT AGM audio recordings,
@@ -120,8 +121,9 @@ export function getConcallType(title, rawText = "") {
   }
 
   // 1. Check for Transcript (most specific)
-  if (t.includes("transcript") || body.includes("transcript")) {
-    const isGenericMeet =
+  if (t.includes("transcript") || body.includes("transcript") || attach.includes("transcript")) {
+    const isConcallFiling = t.includes("con. call") || t.includes("conference call") || t.includes("earnings call") || attach.includes("transcript");
+    const isGenericMeet = !isConcallFiling && (
       combined.includes("investor meet") ||
       combined.includes("analyst meet") ||
       combined.includes("investor meeting") ||
@@ -135,7 +137,8 @@ export function getConcallType(title, rawText = "") {
       combined.includes("group meeting") ||
       combined.includes("group meet") ||
       combined.includes("fund meeting") ||
-      combined.includes("roadshow");
+      combined.includes("roadshow")
+    );
 
     const hasEarningsOrAgmKeywords =
       combined.includes("earnings") ||

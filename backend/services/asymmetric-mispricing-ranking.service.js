@@ -1421,13 +1421,13 @@ export function evaluateEquityMispricing(auditedEquity) {
     scorecard.evidenceRecency !== EVIDENCE_RECENCY.STALE &&
     (cashFlowEvidence.cfoPatRatio === undefined || cashFlowEvidence.cfoPatRatio >= 0.70 || cashFlowEvidence.netDebtCr <= 0) &&
     (
-      // Leg A: MoS + IRR + point-in-time asymmetry >= 1.0 (upside must exceed downside even before compounding)
-      (scorecard.marginOfSafetyPct >= 20.0 && scorecard.projected3YrIrr >= 20.0 && scorecard.asymmetryRatio >= 1.0) ||
-      // Leg B: Deep price dislocation — price is in the Buy Below zone, or immediate asymmetry >= 2:1.
-      //   3Y compounded asymmetry (>= 3.0) is an acceptable Leg B trigger ONLY when the immediate
-      //   point-in-time asymmetry is also positive (>= 1.0), preventing stocks with inverted immediate
-      //   risk/reward (downside > upside) from qualifying solely on long-horizon compounding math.
-      (currentPrice <= scorecard.buyBelowPrice || scorecard.asymmetryRatio >= 2.0 || (scorecard.asymmetry3YrRatio && scorecard.asymmetry3YrRatio >= 3.0 && scorecard.asymmetryRatio >= 1.0))
+      // Top Conviction Dislocation Gate:
+      // Option 1: Price is strictly in the Buy Below zone with favorable asymmetry (>= 1.5:1 point-in-time)
+      (currentPrice <= scorecard.buyBelowPrice && scorecard.asymmetryRatio >= 1.5) ||
+      // Option 2: Deep asymmetry hurdle (>= 2.5:1 immediate point-in-time asymmetry AND MoS >= 25%)
+      (scorecard.asymmetryRatio >= 2.5 && scorecard.marginOfSafetyPct >= 25.0) ||
+      // Option 3: Compounded 3Y asymmetry >= 3.0:1 ONLY when immediate point-in-time asymmetry is >= 1.75:1 and price <= buyBelowPrice * 1.03
+      (scorecard.asymmetry3YrRatio >= 3.0 && scorecard.asymmetryRatio >= 1.75 && currentPrice <= scorecard.buyBelowPrice * 1.03)
     )
   ) {
     opportunityTier = MISPRICING_OPPORTUNITY_TIER.TOP_CONVICTION_DISLOCATION;

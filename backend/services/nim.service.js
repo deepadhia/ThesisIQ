@@ -86,10 +86,10 @@ export async function classifyAnnouncementWithNim(ticker, announcementText, titl
     ? `── Investment Thesis (Context) ──\n${displayThesis}\n`
     : "";
 
-  // Cap text to 32,000 chars for comprehensive full-document NIM processing
+  // Cap text to 16,000 chars for fast, responsive NIM processing without gateway timeouts
   let cappedText = announcementText || "";
-  if (cappedText.length > 32000) {
-    const half = 15000;
+  if (cappedText.length > 16000) {
+    const half = 8000;
     cappedText = `${cappedText.substring(0, half)}\n\n[... TRUNCATED MIDDLE CONTENT FOR FAST NIM LATENCY ...]\n\n${cappedText.substring(cappedText.length - half)}`;
   }
 
@@ -170,8 +170,7 @@ export async function classifyAnnouncementWithNim(ticker, announcementText, titl
 
   const ACTIVE_MODELS = [
     "meta/llama-3.2-11b-vision-instruct",
-    "openai/gpt-oss-20b",
-    "nvidia/nemotron-3-super-120b-a12b"
+    "meta/llama-3.2-90b-vision-instruct"
   ];
   const MAX_RETRIES = 4;
   const BASE_DELAY_MS = 2000;

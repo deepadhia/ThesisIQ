@@ -128,10 +128,7 @@ async function runNimPrompt(systemPrompt, userPrompt, temperature = 0.05) {
   const BASE_DELAY_MS = 3000;
   const MODELS = [
     "meta/llama-3.2-11b-vision-instruct",
-    "nvidia/nemotron-3-super-120b-a12b",
-    "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning",
-    "openai/gpt-oss-20b",
-    "nvidia/nemotron-3-ultra-550b-a55b"
+    "meta/llama-3.2-90b-vision-instruct"
   ];
   let lastErr;
 
@@ -825,13 +822,29 @@ export async function processPendingDeepDives(options = {}) {
           const m = val.replace(/,/g, '').match(/-?\d+(?:\.\d+)?/);
           return m ? parseFloat(m[0]) : null;
         };
-        const revGrowth = parseNum(fh.revenue_yoy);
-        const patGrowth = parseNum(fh.pat_yoy);
-        const ebitdaMargin = parseNum(fh.ebitda_margin);
-        const ebitdaBps = parseNum(fh.ebitda_margin_delta);
-        const revCr = parseNum(fh.revenue);
-        const patCr = parseNum(fh.pat_consolidated);
-        const ebitdaCr = parseNum(fh.ebitda);
+        let revGrowth = parseNum(fh.revenue_yoy);
+        let patGrowth = parseNum(fh.pat_yoy);
+        let ebitdaMargin = parseNum(fh.ebitda_margin);
+        let ebitdaBps = parseNum(fh.ebitda_margin_delta);
+        let revCr = parseNum(fh.revenue);
+        let patCr = parseNum(fh.pat_consolidated);
+        let ebitdaCr = parseNum(fh.ebitda);
+
+        // Normalize if LLM text reported raw Lakhs as Crores (e.g. ₹121,076 Cr -> ₹1,210.76 Cr)
+        if (revCr !== null && revCr > 10000) {
+          revCr = parseFloat((revCr / 100).toFixed(2));
+        }
+        if (ebitdaCr !== null && ebitdaCr > 5000) {
+          ebitdaCr = parseFloat((ebitdaCr / 100).toFixed(2));
+        }
+        if (patCr !== null && patCr > 2000) {
+          patCr = parseFloat((patCr / 100).toFixed(2));
+        }
+
+        // Recalculate EBITDA margin if distorted
+        if (ebitdaCr !== null && revCr !== null && revCr > 0 && (ebitdaMargin === null || ebitdaMargin < 0.5 || ebitdaMargin > 90)) {
+          ebitdaMargin = parseFloat(((ebitdaCr / revCr) * 100).toFixed(2));
+        }
 
         if (revGrowth !== null || patGrowth !== null || ebitdaMargin !== null || revCr !== null) {
           activeFin = {
@@ -847,7 +860,7 @@ export async function processPendingDeepDives(options = {}) {
             isYoYDecline: (patGrowth !== null && patGrowth < 0) || (revGrowth !== null && revGrowth < 0),
             isMarginErosion: (ebitdaBps !== null && ebitdaBps < -150)
           };
-          console.log(`[WORKER] Structured verified financials from LLM highlights for ${item.ticker}: Rev YoY ${revGrowth}%, PAT YoY ${patGrowth}%, EBITDA Margin ${ebitdaMargin}%`);
+          console.log(`[WORKER] Structured verified financials from LLM highlights for ${item.ticker}: Rev ₹${revCr} Cr (${revGrowth}% YoY), PAT ₹${patCr} Cr, EBITDA Margin ${ebitdaMargin}%`);
         }
       }
 

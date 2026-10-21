@@ -17,6 +17,28 @@ export function classifyFilingCategory(title = "", text = "", attachmentUrl = ""
   const textSnippet = (typeof text === "string" ? text.slice(0, 8000) : "").toLowerCase();
   const combined = `${titleLower} ${attachLower} ${textSnippet}`;
 
+  // 0a. Earnings Concall Transcripts, Audio Recordings & Investor Decks (Must ALWAYS route to QUARTERLY_EARNINGS; never suppress under procedural rules)
+  const isConcallTranscriptOrAudio = 
+    titleLower.includes("transcript") || 
+    attachLower.includes("transcript") || 
+    titleLower.includes("audio recording") ||
+    attachLower.includes("audio") ||
+    attachLower.endsWith(".mp3") ||
+    combined.includes("transcript of the conference call") || 
+    combined.includes("transcript of the earnings call") ||
+    combined.includes("transcript of the concall") ||
+    combined.includes("earnings call transcript") ||
+    combined.includes("concall transcript") ||
+    combined.includes("audio recording of the") ||
+    combined.includes("link of audio recording") ||
+    combined.includes("link for audio recording") ||
+    combined.includes("recording of the concall") ||
+    combined.includes("recording of the earnings call");
+
+  if (isConcallTranscriptOrAudio) {
+    return "QUARTERLY_EARNINGS";
+  }
+
   // 0. PROCEDURAL_ROUTINE_COMPLIANCE (Trading Window, Loss of Share, Board Meeting Notices, Investor Meet Intimations, Corrigendums, Voting Tallies)
   const STRICT_PROCEDURAL_TITLES = [
     "trading window",
@@ -48,13 +70,17 @@ export function classifyFilingCategory(title = "", text = "", attachmentUrl = ""
     return "ROUTINE_COMPLIANCE";
   }
 
-  // Newspaper publications of routine compliance (unless publishing actual financial results tables)
-  const isFinancialResultsRestatement = 
-    titleLower.includes("financial results") || 
-    titleLower.includes("un-audited financial") || 
-    titleLower.includes("audited financial");
+  // Newspaper publications under SEBI LODR Reg 47 are legal statutory extracts; the official results are already published in the BM outcome.
+  const isNewspaperPublication = 
+    titleLower.includes("newspaper publication") || 
+    titleLower.includes("newspaper advertisement") || 
+    titleLower.includes("newspaper advt") || 
+    titleLower.includes("newspaper clipping") ||
+    attachLower.includes("newspaperadvt") ||
+    attachLower.includes("newspaper_advt") ||
+    attachLower.includes("newspaper");
 
-  if ((titleLower.includes("newspaper publication") || titleLower.includes("newspaper advertisement")) && !isFinancialResultsRestatement) {
+  if (isNewspaperPublication) {
     return "ROUTINE_COMPLIANCE";
   }
 
@@ -64,7 +90,7 @@ export function classifyFilingCategory(title = "", text = "", attachmentUrl = ""
     titleLower.includes("errata") || 
     attachLower.includes("corrigendum") || 
     attachLower.includes("errata");
-  if (isCorrigendumOrErrata && !isFinancialResultsRestatement) {
+  if (isCorrigendumOrErrata) {
     return "ROUTINE_COMPLIANCE";
   }
 
@@ -88,8 +114,21 @@ export function classifyFilingCategory(title = "", text = "", attachmentUrl = ""
     combined.includes("investor presentation") ||
     titleLower.includes("speech") || 
     titleLower.includes("address");
-  if (isVotingOrScrutinizer && !hasStrategicAddress && !isFinancialResultsRestatement) {
+  if (isVotingOrScrutinizer && !hasStrategicAddress) {
     return "ROUTINE_COMPLIANCE";
+  }
+
+  // 0d. Investor Presentations & Earnings Decks (Route to QUARTERLY_EARNINGS; never misclassify as Restructuring)
+  const isInvestorDeck = 
+    titleLower.includes("investor presentation") || 
+    titleLower.includes("earnings presentation") || 
+    titleLower.includes("analyst presentation") || 
+    titleLower.includes("presentation to analyst") ||
+    titleLower.includes("presentation on financial") ||
+    attachLower.includes("investorpresentation") ||
+    attachLower.includes("investor_presentation");
+  if (isInvestorDeck) {
+    return "QUARTERLY_EARNINGS";
   }
 
   // 1. CREDIT_EVENT (Rating revision/upgrade/downgrade on debt instruments)
@@ -103,15 +142,28 @@ export function classifyFilingCategory(title = "", text = "", attachmentUrl = ""
   }
 
   // 2. RESTRUCTURING (Demerger, Merger, Spin-off, Slump sale)
-  if (
+  // Strictly require explicit title or composite scheme indicator to avoid false triggers from investor presentation narrative
+  const isRestructuringTitle = 
+    titleLower.includes("scheme of arrangement") ||
+    titleLower.includes("demerger") ||
+    titleLower.includes("amalgamation") ||
+    titleLower.includes("spin-off") ||
+    titleLower.includes("spinoff") ||
+    titleLower.includes("slump sale") ||
+    titleLower.includes("merger") ||
+    attachLower.includes("scheme") ||
+    attachLower.includes("demerger") ||
+    attachLower.includes("amalgamation");
+
+  const isRestructuringExplicitText = 
     combined.includes("scheme of arrangement") ||
-    combined.includes("demerger") ||
-    combined.includes("amalgamation") ||
-    combined.includes("spin-off") ||
-    combined.includes("spinoff") ||
-    combined.includes("slump sale") ||
-    combined.includes("merger")
-  ) {
+    combined.includes("composite scheme") ||
+    combined.includes("approval of scheme of amalgamation") ||
+    combined.includes("approval of demerger") ||
+    combined.includes("demerger of the business") ||
+    combined.includes("slump sale agreement");
+
+  if (isRestructuringTitle || isRestructuringExplicitText) {
     return "RESTRUCTURING";
   }
 
