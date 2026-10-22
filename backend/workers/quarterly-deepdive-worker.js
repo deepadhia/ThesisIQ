@@ -11,7 +11,8 @@ import { pool } from "../db/pool.js";
 import { compareFiscalQuartersDesc, parseFiscalQuarter } from "../utils/fiscal-quarter.js";
 import { reconcileGuidanceVsActual, classifyGuidanceScope } from "../utils/guidance-scope.js";
 import { extractTextFromPdfUrl } from "../services/announcement.service.js";
-import { sendTelegramMessage, sendAnnouncementAlert, sendConcallDiscrepancyAlert } from "../services/telegram.service.js";
+import { sendTelegramMessage, sendAnnouncementAlert, sendConcallDiscrepancyAlert, sendPipelineFailureAlert } from "../services/telegram.service.js";
+import { classifyFilingForWorker } from "../services/filing-classifier.service.js";
 import { NVIDIA_API_KEY } from "../config/env.js";
 import { extractDeterministicFinancials } from "../services/financial-validator.service.js";
 import { applyInstitutionalGuard } from "../services/institutional-guard.service.js";
@@ -604,31 +605,53 @@ export async function processPendingDeepDives(options = {}) {
         docText = item.title;
       }
 
-      // ── STAGE AUDIO: Concall / AGM Media Processing ──
-      const titleLowerForAudio = (item.title || "").toLowerCase();
-      const textLowerForAudio = (docText || "").toLowerCase();
-      const isConcallAudioFiling = 
-        item.deep_dive_status === "pending_audio" || 
-        titleLowerForAudio.includes("audio recording") || 
-        textLowerForAudio.includes("audio recording of the") || 
-        textLowerForAudio.includes("link of audio recording") || 
-        (titleLowerForAudio.includes("con. call") && textLowerForAudio.includes("audio recording"));
+      // ── UNIFIED DETERMINISTIC FILING CLASSIFICATION ──
+      const classification = classifyFilingForWorker({
+        title: item.title,
+        attachmentUrl: item.attachment_url,
+        docText,
+        filingCategory: item.filing_category,
+        deepDiveStatus: item.deep_dive_status
+      });
 
-      if (isConcallAudioFiling) {
-        console.log(`[WORKER AUDIO] Ingesting concall audio for ${item.ticker}...`);
-        const audioUrl = extractAudioUrlFromFiling(docText, item.attachment_url);
-        if (!audioUrl) {
-          console.warn(`[WORKER AUDIO] No media link found in filing for ${item.ticker}. Marking completed.`);
-          await pool.query("UPDATE corporate_announcements SET deep_dive_status = 'completed' WHERE id = $1", [item.id]);
-          return { success: true, skipped: true };
+      // 1. Fast Routine Compliance Pre-Filter
+      if (classification.isRoutine) {
+        console.log(`[WORKER FAST-SKIP] Procedural compliance notice skipped: ${item.ticker} - ${item.title}`);
+        await pool.query("UPDATE corporate_announcements SET deep_dive_status = 'not_required' WHERE id = $1", [item.id]);
+        return { success: true, skipped: true };
+      }
+
+      // 2. Unextractable Document Dead-Letter Guard:
+      // If a material earnings/concall document has empty extracted text, route to needs_review rather than silently failing
+      if (!classification.isAudio && docText.length < 50 && (classification.isTranscript || classification.isResults)) {
+        console.warn(`[WORKER DEAD-LETTER] Unextractable / Scanned filing text for ${item.ticker}: ${item.title}`);
+        await pool.query(
+          `UPDATE corporate_announcements 
+           SET deep_dive_status = 'needs_review',
+               event_analysis = COALESCE(event_analysis, '{}'::jsonb) || jsonb_build_object('dead_letter_reason', 'Unextractable or empty PDF text', 'flagged_at', NOW())
+           WHERE id = $1`,
+          [item.id]
+        );
+        if (!suppressTelegram) {
+          await sendPipelineFailureAlert({
+            ticker: item.ticker,
+            title: item.title,
+            error: "Unextractable document text (possible scanned PDF or network fetch failure)",
+            docUrl: item.attachment_url
+          }).catch(e => console.warn("[WORKER ALERT ERROR]:", e.message));
         }
+        return { success: false, skipped: true };
+      }
 
+      // 3. Audio Concall Processing
+      if (classification.isAudio && classification.audioUrl) {
+        console.log(`[WORKER AUDIO] Ingesting concall audio for ${item.ticker}...`);
         const scratchDir = path.resolve(process.cwd(), "scratch");
         if (!fs.existsSync(scratchDir)) fs.mkdirSync(scratchDir, { recursive: true });
         const mp3Path = path.resolve(scratchDir, `${item.ticker}_audio_${item.id.slice(0, 8)}.mp3`);
 
         try {
-          await downloadAndExtractMp3(audioUrl, mp3Path);
+          await downloadAndExtractMp3(classification.audioUrl, mp3Path);
           const audioAudit = await analyzeAudioWithGemini(mp3Path, item.ticker, item.company_name, item.investment_thesis);
 
           const eventAnalysisObj = {
@@ -663,13 +686,16 @@ export async function processPendingDeepDives(options = {}) {
           if (!suppressTelegram) {
             const sent = await sendAnnouncementAlert({
               ticker: item.ticker,
+              companyName: item.company_name,
               title: item.title,
               priority: "HIGH",
               impact: "POSITIVE",
               summary: audioAudit.executive_summary,
               confidence: 90,
               concall_type: "audio",
-              agm_highlights: audioAudit.catalysts,
+              audio_analysis: audioAudit,
+              event_analysis: eventAnalysisObj,
+              forward_catalysts: audioAudit.catalysts,
               docUrl: item.attachment_url
             });
             if (sent) {
@@ -680,95 +706,23 @@ export async function processPendingDeepDives(options = {}) {
           return { success: true, ticker: item.ticker, stage: "audio" };
         } catch (audioErr) {
           console.error(`[WORKER AUDIO ERROR] Failed for ${item.ticker}:`, audioErr);
-          await pool.query("UPDATE corporate_announcements SET deep_dive_status = 'failed' WHERE id = $1", [item.id]);
+          await pool.query(
+            `UPDATE corporate_announcements 
+             SET deep_dive_status = 'needs_review',
+                 event_analysis = COALESCE(event_analysis, '{}'::jsonb) || jsonb_build_object('pipeline_error', $1::text, 'failed_at', NOW())
+             WHERE id = $2`,
+            [audioErr.message, item.id]
+          );
+          if (!suppressTelegram) {
+            await sendPipelineFailureAlert({
+              ticker: item.ticker,
+              title: item.title,
+              error: `Audio ingestion failed: ${audioErr.message}`,
+              docUrl: item.attachment_url
+            }).catch(e => console.warn("[WORKER ALERT ERROR]:", e.message));
+          }
           return { success: false, error: audioErr.message };
         }
-      }
-
-      // ── FAST CONTENT PRE-FILTER: Instant 1ms skip for routine cover letters ──
-      const titleLower = (item.title || "").toLowerCase();
-      const textLower = (docText + " " + item.title).toLowerCase();
-
-      const isStrictProceduralTitle =
-        titleLower.includes("trading window") ||
-        titleLower.includes("closure of trading") ||
-        titleLower.includes("trading window closure") ||
-        titleLower.includes("loss of share") ||
-        titleLower.includes("duplicate share") ||
-        titleLower.includes("compliance certificate") ||
-        titleLower.includes("certificate under reg") ||
-        titleLower.includes("prior intimation") ||
-        titleLower.includes("board meeting intimation") ||
-        titleLower.includes("notice of board meeting") ||
-        titleLower.includes("schedule of analyst") ||
-        titleLower.includes("schedule of institutional") ||
-        titleLower.includes("newspaper publication") ||
-        titleLower.includes("newspaper advertisement");
-
-      if (isStrictProceduralTitle) {
-        console.log(`[WORKER FAST-SKIP] Procedural compliance notice skipped: ${item.ticker} - ${item.title}`);
-        await pool.query("UPDATE corporate_announcements SET deep_dive_status = 'not_required' WHERE id = $1", [item.id]);
-        return { success: true, skipped: true };
-      }
-
-      const isRoutineNotice =
-        docText.length < 450 ||
-        textLower.includes("trading window") ||
-        textLower.includes("loss of share certificate") ||
-        textLower.includes("dematerialisation") ||
-        textLower.includes("newspaper publication") ||
-        textLower.includes("audio recording") ||
-        textLower.includes("intimation of schedule of analyst") ||
-        textLower.includes("closure of trading") ||
-        textLower.includes("agm notice") ||
-        textLower.includes("notice of the annual general meeting") ||
-        textLower.includes("e-voting instructions") ||
-        textLower.includes("shareholders meeting") ||
-        textLower.includes("record date") ||
-        textLower.includes("cost auditor") ||
-        textLower.includes("investor meet");
-
-      const isCoreEarningsDoc =
-        titleLower.includes("transcript") ||
-        titleLower.includes("concall") ||
-        titleLower.includes("con. call") ||
-        titleLower.includes("conference call") ||
-        titleLower.includes("earnings call") ||
-        titleLower.includes("investor presentation") ||
-        titleLower.includes("financial result") ||
-        titleLower.includes("outcome of board meeting") ||
-        titleLower.includes("outcome of the board meeting") ||
-        titleLower.includes("press release") ||
-        textLower.includes("transcript") ||
-        textLower.includes("concall") ||
-        textLower.includes("con. call") ||
-        textLower.includes("conference call") ||
-        textLower.includes("earnings call") ||
-        textLower.includes("investor presentation") ||
-        textLower.includes("financial result") ||
-        textLower.includes("un-audited financial") ||
-        textLower.includes("audited financial") ||
-        textLower.includes("press release") ||
-        (textLower.includes("outcome of board meeting") && (textLower.includes("financial") || textLower.includes("result")));
-
-      const isHighValueOperationalDoc =
-        textLower.includes("commercial production") ||
-        textLower.includes("commercial operation") ||
-        textLower.includes("commissioning of plant") ||
-        textLower.includes("plant commissioning") ||
-        textLower.includes("order win") ||
-        textLower.includes("bagging of order") ||
-        textLower.includes("letter of award") ||
-        textLower.includes("contract award") ||
-        textLower.includes("capacity expansion") ||
-        textLower.includes("scheme of arrangement") ||
-        textLower.includes("demerger") ||
-        textLower.includes("acquisition of");
-
-      if (isRoutineNotice && !isCoreEarningsDoc && !isHighValueOperationalDoc) {
-        console.log(`[WORKER FAST-SKIP] Marked procedural filing as not_required: ${item.title}`);
-        await pool.query("UPDATE corporate_announcements SET deep_dive_status = 'not_required' WHERE id = $1", [item.id]);
-        return { success: true, skipped: true };
       }
 
       const cappedText = capContext(docText);
@@ -1236,9 +1190,20 @@ ${docLink ? `${docLink}\n` : ""}_Stage 1 initial snapshot. Concall transcript re
     } catch (err) {
       console.error(`[WORKER ERROR] Deep-dive failed for ${item.ticker} (ID: ${item.id}):`, err.message);
       await pool.query(
-        "UPDATE corporate_announcements SET deep_dive_status = 'failed' WHERE id = $1",
-        [item.id]
+        `UPDATE corporate_announcements 
+         SET deep_dive_status = 'needs_review',
+             event_analysis = COALESCE(event_analysis, '{}'::jsonb) || jsonb_build_object('pipeline_error', $1::text, 'failed_at', NOW())
+         WHERE id = $2`,
+        [err.message, item.id]
       );
+      if (!suppressTelegram) {
+        await sendPipelineFailureAlert({
+          ticker: item.ticker,
+          title: item.title,
+          error: err.message,
+          docUrl: item.attachment_url
+        }).catch(e => console.warn("[WORKER ALERT ERROR] Failed to send failure alert:", e.message));
+      }
       return false;
     }
   }));

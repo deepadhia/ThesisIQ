@@ -5,6 +5,7 @@
  */
 
 import { NVIDIA_API_KEY } from "../config/env.js";
+import { extractAudioUrlFromFiling } from "./audio-transcript-analyzer.service.js";
 
 const NIM_BASE_URL = "https://integrate.api.nvidia.com/v1/chat/completions";
 
@@ -21,19 +22,26 @@ export function classifyFilingCategory(title = "", text = "", attachmentUrl = ""
   const isConcallTranscriptOrAudio = 
     titleLower.includes("transcript") || 
     attachLower.includes("transcript") || 
+    attachLower.includes("calltranscript") || 
     titleLower.includes("audio recording") ||
+    titleLower.includes("earnings recording") ||
     attachLower.includes("audio") ||
+    attachLower.includes("recording") ||
     attachLower.endsWith(".mp3") ||
+    attachLower.endsWith(".m4a") ||
     combined.includes("transcript of the conference call") || 
     combined.includes("transcript of the earnings call") ||
     combined.includes("transcript of the concall") ||
+    combined.includes("transcript of conference call") ||
+    combined.includes("transcript of earnings call") ||
     combined.includes("earnings call transcript") ||
     combined.includes("concall transcript") ||
     combined.includes("audio recording of the") ||
     combined.includes("link of audio recording") ||
     combined.includes("link for audio recording") ||
     combined.includes("recording of the concall") ||
-    combined.includes("recording of the earnings call");
+    combined.includes("recording of the earnings call") ||
+    combined.includes("recording of earnings call");
 
   if (isConcallTranscriptOrAudio) {
     return "QUARTERLY_EARNINGS";
@@ -718,4 +726,153 @@ export async function extractCorporateActionDetails(category, ticker, announceme
   }
 
   return null;
+}
+
+/**
+ * Unified, deterministic filing classifier for the Quarterly Deep-Dive Worker.
+ * Enforces strict hierarchy:
+ * 1. Concall Transcript (Stage 2) - ALWAYS prioritized over audio.
+ * 2. Concall Audio (Stage 2) - Only if verified media URL is present.
+ * 3. Core Financial Results (Stage 1) - Outcome of board meeting with results.
+ * 4. High-Value Operational / Corporate Action.
+ * 5. Routine Procedural Compliance.
+ */
+export function classifyFilingForWorker({
+  title = "",
+  attachmentUrl = "",
+  docText = "",
+  filingCategory = "",
+  deepDiveStatus = ""
+}) {
+  const tLower = (title || "").toLowerCase();
+  const urlLower = (attachmentUrl || "").toLowerCase();
+  const textLower = (docText || "").toLowerCase();
+  const combined = `${tLower} ${urlLower} ${textLower.slice(0, 4000)}`;
+
+  // 1. Strict procedural title check
+  const isStrictProceduralTitle =
+    tLower.includes("trading window") ||
+    tLower.includes("closure of trading") ||
+    tLower.includes("trading window closure") ||
+    tLower.includes("loss of share") ||
+    tLower.includes("duplicate share") ||
+    tLower.includes("compliance certificate") ||
+    tLower.includes("certificate under reg") ||
+    tLower.includes("newspaper publication") ||
+    tLower.includes("newspaper advertisement");
+
+  // 2. Transcript check: Always prioritized over audio!
+  const isTranscript =
+    deepDiveStatus === "pending_stage2" ||
+    tLower.includes("transcript") ||
+    urlLower.includes("transcript") ||
+    urlLower.includes("calltranscript") ||
+    combined.includes("transcript of the conference call") ||
+    combined.includes("transcript of the earnings call") ||
+    combined.includes("transcript of the concall") ||
+    combined.includes("transcript of conference call") ||
+    combined.includes("transcript of earnings call") ||
+    combined.includes("earnings call transcript") ||
+    combined.includes("concall transcript") ||
+    (textLower.slice(0, 3000).includes("transcript") && !tLower.includes("audio recording"));
+
+  // 3. Audio check:
+  // Must NOT be a transcript. Must have indication of recording or media link.
+  const audioCandidate =
+    !isTranscript && (
+      deepDiveStatus === "pending_audio" ||
+      tLower.includes("audio recording") ||
+      tLower.includes("earnings recording") ||
+      urlLower.includes("audio") ||
+      urlLower.includes("recording") ||
+      textLower.includes("audio recording of the") ||
+      textLower.includes("link of audio recording") ||
+      textLower.includes("link for audio recording") ||
+      (tLower.includes("con. call") && textLower.includes("audio recording"))
+    );
+
+  const audioUrl = audioCandidate ? extractAudioUrlFromFiling(docText, attachmentUrl) : null;
+  const isAudio = Boolean(audioCandidate && audioUrl);
+
+  // 4. Core earnings / Results check
+  const isResults =
+    deepDiveStatus === "pending_stage1" ||
+    filingCategory === "QUARTERLY_EARNINGS" ||
+    tLower.includes("financial result") ||
+    tLower.includes("outcome of board meeting") ||
+    tLower.includes("outcome of the board meeting") ||
+    textLower.includes("un-audited financial") ||
+    textLower.includes("audited financial") ||
+    textLower.includes("statement of unaudited") ||
+    textLower.includes("financial results for the quarter");
+
+  // 5. High-value operational / corporate action
+  const isHighValueOperational =
+    textLower.includes("commercial production") ||
+    textLower.includes("commercial operation") ||
+    textLower.includes("commissioning of plant") ||
+    textLower.includes("plant commissioning") ||
+    textLower.includes("order win") ||
+    textLower.includes("bagging of order") ||
+    textLower.includes("letter of award") ||
+    textLower.includes("contract award") ||
+    textLower.includes("capacity expansion") ||
+    textLower.includes("scheme of arrangement") ||
+    textLower.includes("demerger") ||
+    textLower.includes("acquisition of");
+
+  // 6. Routine Notice filter
+  const isRoutine =
+    !isTranscript &&
+    !isAudio &&
+    !isResults &&
+    !isHighValueOperational &&
+    (
+      isStrictProceduralTitle ||
+      docText.length < 450 ||
+      textLower.includes("trading window") ||
+      textLower.includes("loss of share certificate") ||
+      textLower.includes("dematerialisation") ||
+      textLower.includes("newspaper publication") ||
+      textLower.includes("intimation of schedule of analyst") ||
+      textLower.includes("schedule of analyst") ||
+      textLower.includes("agm notice") ||
+      textLower.includes("e-voting instructions") ||
+      textLower.includes("record date")
+    );
+
+  let stage = "ROUTINE_COMPLIANCE";
+  let stageName = "Routine Compliance";
+  let promptStage = "Standard Document";
+
+  if (isTranscript) {
+    stage = "STAGE_2_TRANSCRIPT";
+    stageName = "Stage 2: Concall Transcript";
+    promptStage = "Stage 2 (Concall Transcript Re-assessment)";
+  } else if (isAudio) {
+    stage = "STAGE_2_AUDIO";
+    stageName = "Stage 2: Concall Audio";
+    promptStage = "Stage 2 (Concall Audio Deep-Dive)";
+  } else if (isResults) {
+    stage = "STAGE_1_RESULTS";
+    stageName = "Stage 1: Financial Results";
+    promptStage = "Stage 1 (Initial Post-Earnings Snapshot)";
+  } else if (isHighValueOperational) {
+    stage = "MAJOR_CORPORATE_ACTION";
+    stageName = "Major Operational Action";
+    promptStage = "Operational & Strategic Action";
+  }
+
+  return {
+    stage,
+    stageName,
+    promptStage,
+    isTranscript,
+    isAudio,
+    audioCandidate,
+    audioUrl,
+    isResults,
+    isHighValueOperational,
+    isRoutine
+  };
 }

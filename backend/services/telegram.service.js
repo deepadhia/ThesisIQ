@@ -52,7 +52,19 @@ export function buildBseDocumentUrl(newsId, pdfFlag) {
 export async function sendTelegramMessage(text) {
   if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
     console.warn("Telegram bot token or chat ID not configured.");
-    return;
+    return false;
+  }
+
+  // Telegram 4096 character limit safeguard: Split cleanly if message exceeds 3900 characters
+  if (text.length > 3900) {
+    const splitPoint = text.lastIndexOf("\n\n", 3800);
+    const cut = splitPoint > 1000 ? splitPoint : 3800;
+    const part1 = text.slice(0, cut).trim();
+    const part2 = text.slice(cut).trim();
+    
+    const res1 = await sendTelegramMessage(part1);
+    const res2 = await sendTelegramMessage(part2);
+    return res1 || res2;
   }
 
   const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`;
@@ -258,7 +270,8 @@ export function formatAnnouncementMessage(params) {
     is_earnings_release, concall_type, concall_date, concall_time, is_rescheduled, category, filing_category, exchangeTimestamp, docUrl, source = "NSE",
     is_agm, is_egm, is_postal_ballot, agm_status, agm_highlights, has_substantive_business_insights,
     companyName, thesis_drift_state, root_cause, recovery_state, final_action, action_signal_authorized = false,
-    eventAnalysis = null, event_analysis = null
+    eventAnalysis = null, event_analysis = null,
+    audio_analysis = null, concall_highlights = null
   } = params || {};
 
   const analysis = eventAnalysis || event_analysis;
@@ -326,8 +339,8 @@ export function formatAnnouncementMessage(params) {
   else if (filing_category === "GOVERNANCE_RISK") eventTypeLabel = "Management / Governance Update";
   else if (filing_category === "CREDIT_EVENT") eventTypeLabel = "Credit Rating Action";
   else if (filing_category === "ACQUISITION") eventTypeLabel = "🤝 M&A / Strategic Acquisition";
-  else if (concall_type === "transcript") eventTypeLabel = "Concall Transcript Audit";
-  else if (concall_type === "audio") eventTypeLabel = "Concall Audio Recording";
+  else if (concall_type === "transcript") eventTypeLabel = "🎙️ Concall Transcript Audit";
+  else if (concall_type === "audio") eventTypeLabel = "🎙️ Concall Audio Recording & Guidance Audit";
 
   const cleanedCompany = cleanCompanyName(companyName);
   const companyHeader = cleanedCompany ? `*${ticker.toUpperCase()}* | ${cleanedCompany}` : `*${ticker.toUpperCase()}*`;
@@ -348,8 +361,82 @@ export function formatAnnouncementMessage(params) {
 
   // 2. Specialized Key Details / Metrics (strictly deduplicated against summary)
   const summaryLower = (summary || "").toLowerCase();
-  
-  if (filing_category === "ORDER_WIN" && analysis?.extracted_data) {
+  const audioData = audio_analysis || analysis?.audio_analysis;
+  const concallData = concall_highlights || analysis?.concall_highlights;
+
+  if (audioData || concall_type === "audio") {
+    const data = audioData || {};
+    // Forward Guidance & Commitments
+    if (Array.isArray(data.commitments) && data.commitments.length > 0) {
+      const commItems = data.commitments.map(c => {
+        const target = c.target_value ? ` [Target: ${c.target_value}]` : "";
+        const timeline = c.timeline ? ` [Timeline: ${c.timeline}]` : "";
+        return `• *${c.metric || 'Guidance'}:* ${cleanReaderFriendlyText(cleanBullet(c.statement))}${target}${timeline}`;
+      });
+      message += `🎯 *Forward Guidance & Commitments:*\n${commItems.join("\n")}\n\n`;
+    }
+
+    // Capacity & Operational Run-Rate
+    if (data.capacity_and_utilization) {
+      message += `🏭 *Capacity & Operational Run-Rate:*\n• ${cleanReaderFriendlyText(cleanBullet(data.capacity_and_utilization))}\n\n`;
+    }
+
+    // Margin & Cost Dynamics
+    if (data.margin_and_cost_dynamics) {
+      message += `📈 *Margin & Cost Dynamics:*\n• ${cleanReaderFriendlyText(cleanBullet(data.margin_and_cost_dynamics))}\n\n`;
+    }
+
+    // Key Management Q&A Insights
+    if (Array.isArray(data.qa_highlights) && data.qa_highlights.length > 0) {
+      const qaItems = data.qa_highlights.slice(0, 3).map(qa => {
+        const who = qa.analyst_or_shareholder ? ` (${qa.analyst_or_shareholder})` : "";
+        let ans = cleanReaderFriendlyText(cleanBullet(qa.management_answer));
+        if (ans.length > 280) {
+          ans = ans.slice(0, 277) + "...";
+        }
+        return `• *Q${who}:* ${cleanReaderFriendlyText(cleanBullet(qa.question))}\n  *A:* ${ans}`;
+      });
+      message += `💬 *Key Management Q&A Insights:*\n${qaItems.join("\n")}\n\n`;
+    }
+
+    // Strategic Catalysts
+    const catalysts = Array.isArray(data.catalysts) && data.catalysts.length > 0 ? data.catalysts : (forward_catalysts || []);
+    if (Array.isArray(catalysts) && catalysts.length > 0) {
+      message += `🚀 *Strategic Catalysts:*\n${catalysts.map(c => `• ${cleanReaderFriendlyText(cleanBullet(c))}`).join("\n")}\n\n`;
+    }
+  } else if (concallData) {
+    const ch = concallData;
+    if ((ch.financial_performance || ch.performance_overview || []).length > 0) {
+      message += `📊 *Financial Metrics & Order Book:*\n${(ch.financial_performance || ch.performance_overview).map(p => `• ${cleanReaderFriendlyText(cleanBullet(p))}`).join('\n')}\n\n`;
+    }
+    if ((ch.business_performance || ch.segment_highlights || []).length > 0) {
+      message += `📦 *Business Execution & Contract Wins:*\n${(ch.business_performance || ch.segment_highlights).map(b => `• ${cleanReaderFriendlyText(cleanBullet(b))}`).join('\n')}\n\n`;
+    }
+    if ((ch.operational_highlights || []).length > 0) {
+      message += `🏭 *Capex & Capacity Expansion:*\n${ch.operational_highlights.map(o => `• ${cleanReaderFriendlyText(cleanBullet(o))}`).join('\n')}\n\n`;
+    }
+    if ((ch.growth_initiatives || []).length > 0) {
+      message += `🚀 *Growth Initiatives & Partnerships:*\n${ch.growth_initiatives.map(g => `• ${cleanReaderFriendlyText(cleanBullet(g))}`).join('\n')}\n\n`;
+    }
+    const guidItems = [
+      ...(ch.quarterly_guidance || []),
+      ...(ch.annual_guidance || []),
+      ...(ch.multi_year_targets || []),
+      ...(ch.management_guidance || [])
+    ];
+    if (guidItems.length > 0) {
+      message += `📈 *Forward Guidance & Targets:*\n${guidItems.map(g => `• ${cleanReaderFriendlyText(cleanBullet(g))}`).join('\n')}\n\n`;
+    }
+    if ((ch.key_positives || []).length > 0) {
+      message += `✅ *Key Positives:*\n${ch.key_positives.map(p => `• ${cleanReaderFriendlyText(cleanBullet(p))}`).join('\n')}\n\n`;
+    }
+    if ((ch.key_challenges || ch.key_risks || []).length > 0) {
+      message += `⚠️ *Key Risks & Challenges:*\n${(ch.key_challenges || ch.key_risks).map(c => `• ${cleanReaderFriendlyText(cleanBullet(c))}`).join('\n')}\n\n`;
+    }
+    if (ch.management_tone) {
+      message += `🗣️ *Management Tone:* ${ch.management_tone}\n\n`;
+    }
+  } else if (filing_category === "ORDER_WIN" && analysis?.extracted_data) {
     const ext = analysis.extracted_data;
     const orderDetails = [];
     if (ext.order_value_cr && !isNotDisclosed(ext.order_value_cr)) {
@@ -551,7 +638,7 @@ export function formatAnnouncementMessage(params) {
     // Forward catalysts / AGM highlights
     const catalysts = Array.isArray(forward_catalysts) && forward_catalysts.length > 0 
       ? forward_catalysts 
-      : (is_agm && agm_highlights ? (Array.isArray(agm_highlights) ? agm_highlights : [agm_highlights]) : []);
+      : (agm_highlights ? (Array.isArray(agm_highlights) ? agm_highlights : [agm_highlights]) : []);
     catalysts.forEach(addUniqueBullet);
 
     // Financial metrics & Corporate actions
@@ -603,10 +690,11 @@ export function formatAnnouncementMessage(params) {
 
   // 4. Footer
   message += `──────────────────────────────\n`;
+  const mediaBadge = concall_type === "audio" ? " • 🎧 Concall Audio Recording" : (concall_type === "transcript" ? " • 📄 Concall Transcript" : "");
   if (docUrl) {
-    message += `📄 [View Official Filing →](${docUrl}) • 🕐 ${timestamp} (${source})`;
+    message += `📄 [View Official Filing →](${docUrl})${mediaBadge} • 🕐 ${timestamp} (${source})`;
   } else {
-    message += `🕐 ${timestamp} (${source})`;
+    message += `🕐 ${timestamp} (${source})${mediaBadge}`;
   }
 
   return message;
@@ -722,5 +810,25 @@ export async function sendConcallDiscrepancyAlert({
   message += `──────────────────────────────\n`;
   message += `_Institutional Forensic Concall Audit • 🕐 ${timestamp}_`;
 
+  return sendTelegramMessage(message);
+}
+
+/**
+ * Sends a high-visibility pipeline failure alert when a material filing fails deep-dive extraction.
+ * Ensures dead-letter items are never silently dropped.
+ */
+export async function sendPipelineFailureAlert({ ticker, title, error, docUrl }) {
+  const timestamp = getIstTimestamp();
+  let message = `⚠️ *PIPELINE EXTRACTION FAILURE ALERT*\n`;
+  message    += `──────────────────────────────\n`;
+  message    += `🏢 *${(ticker || "UNKNOWN").toUpperCase()}* | ${cleanReaderFriendlyText(cleanBullet(title))}\n`;
+  message    += `❌ *Failure Reason:* ${cleanReaderFriendlyText(error || "Unknown processing error")}\n`;
+  message    += `📋 *Routing:* Marked as 'needs_review' in dead-letter queue.\n`;
+  message    += `──────────────────────────────\n`;
+  if (docUrl) {
+    message += `📄 [Inspect Source Document →](${docUrl}) • 🕐 ${timestamp}`;
+  } else {
+    message += `🕐 ${timestamp}`;
+  }
   return sendTelegramMessage(message);
 }
