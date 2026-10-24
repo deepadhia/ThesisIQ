@@ -1,5 +1,36 @@
 # Changelog
 
+## [v4.4.0] - 2026-10-24 (Results / Concall / Presentation Pipeline Repair & Thesis-Driver Verification)
+
+### Root causes fixed (alerts silently missing in the Q2 FY27 season)
+- **BSE feed returned zero filings**: the BSE API now rejects requests without a From/To date window ("Both From Date and To Date must be provided") and the scanner swallowed it as "0 announcements". `fetchBseAnnouncements` now uses a dated, paginated all-category query, surfaces API rejections, and normalises rows (`NEWSID`, `ATTACHMENTNAME`, `MORE` description, `AUDIO_VIDEO_FILE`).
+- **BSE document links 404'd** (`NEWSID` is not the PDF name) and Node's `fetch` rejects BSE's PDF headers: documents are now built from `ATTACHMENTNAME` and downloaded with a lenient HTTPS fallback.
+- **Alerts were lost mid-flight**: the worker marked a filing `completed`, then ran minutes of multi-LLM synthesis *before* sending the alert, while the PM2 cron restarts the process every 5 minutes. Alerts are now sent first, completion is recorded after delivery, undeliverable alerts are parked on the row and re-sent next run, and synthesis is deadline-bounded and deferred.
+- **`isCoreEarningsDoc` ReferenceError** (introduced in the classifier refactor) would have crashed every Stage 1 / Stage 2 alert; the worker now has an end-to-end test suite.
+- **Fabricated verdicts**: an all-LLM-failure no longer becomes a silent "Deep-dive completed; maintaining neutral hold signal". It retries (3 attempts) and then degrades honestly to verified numbers + gates with an "AI unavailable" banner. JSON-salvage no longer defaults to ADD.
+- **Telegram**: queued/paced sending, `retry_after` handling on HTTP 429, paragraph-aware splitting, and `sendTelegramMessage` now THROWS when undelivered. The scanner no longer records suppressed/failed sends as `sent`/`ignored`.
+- **Timestamps** were stored 5.5h off (IST parsed as UTC) — now pinned to +05:30.
+- **Dedup was swallowing real events**: generic NSE titles ("Updates", "Press Release") hashed identically; first-3-word fuzzy matching and token/summary overlap suppressed distinct orders/deals. Rewritten with amount-aware matching, plus cross-exchange document de-duplication by content.
+- Stale backfill is archived silently (72h) and stuck PDF deferrals expire (6h); a cross-process scan lease stops the Oracle daemon and GitHub failover double-alerting.
+
+### Financial parser & gates
+- Statement parser rewritten (block based): consolidated vs standalone decided from the nearest real heading (before or after the table), per-block units, header-date column mapping, bracketed negatives, PDF digit-glitch repair, owners' PAT, derived exceptional items, partial rows rejected. Verified on the real SHAKTIPUMP and LUMAXTECH Q2 FY27 PDFs (previously PAT -65.6% / -3,642 bps, and a phantom ₹14.5 Cr exceptional gain).
+- Narrative documents (transcripts, decks, press releases) no longer produce fake "financials".
+- Gates: a bearish analysis or a falsified HIGH-materiality thesis driver now vetoes a buy; loss-to-profit turnarounds are handled; filings with no statements (transcripts/decks) use the latest verified results instead of showing "Thesis Deviation".
+- Guard: no repeated Lakh→Crore re-scaling, pending-regulatory rule caps instead of forcing ADD, LLM growth claims that contradict verified numbers are dropped.
+
+### Unparseable results tables & concall heads-up
+- When a results PDF's tables cannot be read by the rule-based parser, the model now only LOCATES the printed figures; every number must literally appear in the filing text (otherwise discarded) and all ratios are computed by the deterministic engine. The alert labels them "AI-LOCATED, UNVERIFIED", they never feed the snapshot / carry-forward, and the gate will not authorise a buy on them.
+- New "Earnings Concall Scheduled / Rescheduled" Telegram heads-up (date, time IST, joining link). NSE's standard "Analysts/Institutional Investor Meet/Con. Call Updates" subject was wrongly treated as a private fund meet and is now recognised; genuine one-on-one / roadshow meets are still ignored.
+
+### Theses fed for every stock
+- `backend/scripts/seed-stock-theses.js` (dry-run by default, `--apply` writes with a JSON backup) tops up `stocks.investment_thesis` / `key_thesis_metrics` from the driver contracts: placeholders like "Auto premiumisation" are expanded around the original wording, empty catalysts / risks / conviction drivers are filled, plain-text theses become JSON. Substantive text and non-empty lists are never overwritten. Applied to all 20 stocks.
+- MOREPENLAB (no contract) gets a provisional contract in `reports/thesis_board/supplementary-thesis-contracts.json`, built only from repo facts and flagged for analyst review.
+- The scanner's first-pass classifier now uses the thesis + driver contract, and the scan logs a warning for any stock with neither a usable thesis nor a contract.
+
+### Thesis-driven analysis
+- Every result / presentation / concall is now judged against the stock's driver-level thesis contract (`reports/thesis_board/driver-level-thesis-contracts.json`): each driver is marked CONFIRMED / ON_TRACK / AT_RISK / BROKEN / NO_EVIDENCE with quoted evidence and shown as a "THESIS DRIVER CHECK" section in the alert.
+
 ## [v4.3.0] - 2026-10-11 (Season 2 Earnings Engine Hardening, ROCE-Tethered Dynamic Pricing Hurdle & Dual-Layer Thesis Gating)
 
 ### Added

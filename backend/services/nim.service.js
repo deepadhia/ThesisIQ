@@ -6,6 +6,7 @@
 import { NVIDIA_API_KEY } from "../config/env.js";
 import { extractDeterministicFinancials } from "./financial-validator.service.js";
 import { applyInstitutionalGuard } from "./institutional-guard.service.js";
+import { buildThesisContext } from "./thesis-driver-context.service.js";
 
 const NIM_BASE_URL = "https://integrate.api.nvidia.com/v1/chat/completions";
 
@@ -70,20 +71,13 @@ export async function classifyAnnouncementWithNim(ticker, announcementText, titl
     throw new Error("NVIDIA_API_KEY not configured.");
   }
 
-  let displayThesis = investmentThesis;
-  if (investmentThesis && typeof investmentThesis === 'string' && investmentThesis.trim().startsWith('{')) {
-    try {
-      const parsed = JSON.parse(investmentThesis);
-      if (parsed.primary_thesis) {
-        displayThesis = parsed.primary_thesis;
-      }
-    } catch (e) {
-      // Not JSON or parse failed, use raw string
-    }
-  }
-
-  const thesisSection = displayThesis 
-    ? `── Investment Thesis (Context) ──\n${displayThesis}\n`
+  // Thesis + driver contract (what must be true / what would falsify it) so even the first-pass classification
+  // judges "does this filing reinforce or break the thesis" against the real drivers, not a one-line placeholder.
+  const thesisCtx = buildThesisContext(ticker, investmentThesis);
+  const thesisSection = thesisCtx.text
+    ? `── Investment Thesis (Context) ──
+${thesisCtx.text}
+`
     : "";
 
   // Cap text to 16,000 chars for fast, responsive NIM processing without gateway timeouts
@@ -172,14 +166,14 @@ export async function classifyAnnouncementWithNim(ticker, announcementText, titl
     "meta/llama-3.2-11b-vision-instruct",
     "meta/llama-3.2-90b-vision-instruct"
   ];
-  const MAX_RETRIES = 4;
-  const BASE_DELAY_MS = 2000;
+  const MAX_RETRIES = 3;
+  const BASE_DELAY_MS = 1500;
   let lastError;
 
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
     const currentModel = ACTIVE_MODELS[(attempt - 1) % ACTIVE_MODELS.length];
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 90000); // 90s timeout (NIM can be slow)
+    const timeoutId = setTimeout(() => controller.abort(), 40000); // 40s per attempt: the daemon is restarted every 5 minutes, one slow filing must not eat the cycle
 
     try {
       const response = await fetch(NIM_BASE_URL, {
@@ -259,7 +253,7 @@ export async function classifyAnnouncementWithNim(ticker, announcementText, titl
       clearTimeout(timeoutId);
       lastError = err;
       if (err.name === "AbortError") {
-        lastError = new Error("NVIDIA NIM API request timed out (90s)");
+        lastError = new Error("NVIDIA NIM API request timed out (40s)");
       }
 
       const isNetworkOrTimeout = err.name === "TypeError" || err.name === "AbortError" || err.message.includes("fetch");

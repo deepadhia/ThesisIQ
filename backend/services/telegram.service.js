@@ -32,93 +32,162 @@ function getIstTimestamp() {
  * @param {number} pdfFlag - 0, 1, or 2
  * @returns {string|null}
  */
-export function buildBseDocumentUrl(newsId, pdfFlag) {
-  if (!newsId) return null;
+export function buildBseDocumentUrl(newsId, pdfFlag, attachmentName = null) {
+  // BSE's NEWSID is NOT the document name: the PDF lives under ATTACHMENTNAME (verified against the live API).
+  // AttachLive serves current AND historical files, so it is the safe default for PDFFLAG 0/1.
+  const fileName = attachmentName ? String(attachmentName).trim() : (newsId ? `${newsId}.pdf` : null);
+  if (!fileName) return null;
   const basePaths = {
     0: "AttachLive",
-    1: "AttachHis",
+    1: "AttachLive",
     2: "CorpAttachment",
   };
   const base = basePaths[Number(pdfFlag)] ?? "AttachLive";
-  return `https://www.bseindia.com/xml-data/corpfiling/${base}/${newsId}.pdf`;
+  return `https://www.bseindia.com/xml-data/corpfiling/${base}/${fileName}`;
 }
 
 // ─── Core send ────────────────────────────────────────────────────────────────
 
+export function isTelegramConfigured() {
+  return Boolean(TELEGRAM_BOT_TOKEN && TELEGRAM_CHAT_ID);
+}
+
+const TELEGRAM_MAX_CHARS = 3900;
+const TELEGRAM_MIN_INTERVAL_MS = 1100; // Telegram allows ~1 msg/sec per chat; bursts get HTTP 429
+const TELEGRAM_MAX_ATTEMPTS = 4;
+
+let telegramQueue = Promise.resolve();
+let lastTelegramSendAt = 0;
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
 /**
- * Sends a message to the configured Telegram chat.
- * @param {string} text - Markdown formatted text.
+ * Splits long text into <=TELEGRAM_MAX_CHARS chunks on paragraph / line boundaries.
  */
-export async function sendTelegramMessage(text) {
-  if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
-    console.warn("Telegram bot token or chat ID not configured.");
-    return false;
+export function splitTelegramText(text, limit = TELEGRAM_MAX_CHARS) {
+  const chunks = [];
+  let rest = String(text || "").trim();
+  while (rest.length > limit) {
+    let cut = rest.lastIndexOf("\n\n", limit - 100);
+    if (cut < limit * 0.4) cut = rest.lastIndexOf("\n", limit - 100);
+    if (cut < limit * 0.4) cut = limit - 100;
+    chunks.push(rest.slice(0, cut).trim());
+    rest = rest.slice(cut).trim();
   }
+  if (rest) chunks.push(rest);
+  return chunks;
+}
 
-  // Telegram 4096 character limit safeguard: Split cleanly if message exceeds 3900 characters
-  if (text.length > 3900) {
-    const splitPoint = text.lastIndexOf("\n\n", 3800);
-    const cut = splitPoint > 1000 ? splitPoint : 3800;
-    const part1 = text.slice(0, cut).trim();
-    const part2 = text.slice(cut).trim();
-    
-    const res1 = await sendTelegramMessage(part1);
-    const res2 = await sendTelegramMessage(part2);
-    return res1 || res2;
-  }
-
+async function postTelegram(body) {
   const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`;
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 20000); // 20s timeout
-
+  const timeoutId = setTimeout(() => controller.abort(), 20000);
   try {
     const response = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       signal: controller.signal,
-      body: JSON.stringify({
+      body: JSON.stringify(body),
+    });
+    let data = null;
+    try { data = await response.json(); } catch (_) { data = null; }
+    return { ok: response.ok, status: response.status, data };
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+/**
+ * Sends one (already short enough) message with pacing, 429 back-off and a Markdown -> plain-text fallback.
+ */
+async function sendOneTelegramMessage(text) {
+  let lastError = null;
+  for (let attempt = 1; attempt <= TELEGRAM_MAX_ATTEMPTS; attempt++) {
+    const wait = lastTelegramSendAt + TELEGRAM_MIN_INTERVAL_MS - Date.now();
+    if (wait > 0) await sleep(wait);
+
+    try {
+      let res = await postTelegram({
         chat_id: TELEGRAM_CHAT_ID,
-        text: text,
+        text,
         parse_mode: "Markdown",
         // Disable web page preview so PDF links don't expand into huge blocks
         disable_web_page_preview: true,
-      }),
-    });
+      });
+      lastTelegramSendAt = Date.now();
 
-    clearTimeout(timeoutId);
-
-    if (!response.ok) {
-      const errorData = await response.json();
-      console.error("[TELEGRAM ERROR] API failed:", errorData);
-
-      // Resilient fallback: If Telegram Markdown parsing fails due to unescaped characters, retry cleanly
-      if (errorData.description && errorData.description.includes("can't parse entities")) {
-        console.warn("[TELEGRAM WARN] Retrying alert dispatch without Markdown parse_mode due to entity parsing error...");
-        const fallbackRes = await fetch(url, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            chat_id: TELEGRAM_CHAT_ID,
-            text: text.replace(/[*_`\[\]]/g, ""),
-            disable_web_page_preview: true,
-          }),
+      // Resilient fallback: unescaped entities in AI text must never drop an alert
+      if (!res.ok && res.data?.description && /can't parse entities/i.test(res.data.description)) {
+        console.warn("[TELEGRAM WARN] Markdown entity parse failed — retrying as plain text...");
+        res = await postTelegram({
+          chat_id: TELEGRAM_CHAT_ID,
+          text: text.replace(/[*_`]/g, "").replace(/\[([^\]]+)\]\(([^)]+)\)/g, "$1: $2"),
+          disable_web_page_preview: true,
         });
-        if (fallbackRes.ok) {
-          return await fallbackRes.json();
-        }
+        lastTelegramSendAt = Date.now();
       }
 
-      throw new Error(`Telegram API error: ${errorData.description}`);
-    }
+      if (res.ok) return res.data;
 
-    return await response.json();
-  } catch (err) {
-    clearTimeout(timeoutId);
-    if (err.name === "AbortError") {
-      throw new Error("Telegram API request timed out (20s)");
+      if (res.status === 429) {
+        const retryAfterSec = Number(res.data?.parameters?.retry_after) || 5;
+        console.warn(`[TELEGRAM] Rate limited (429). Waiting ${retryAfterSec}s before retry ${attempt}/${TELEGRAM_MAX_ATTEMPTS}...`);
+        lastError = new Error(`Telegram API error: ${res.data?.description || "Too Many Requests"}`);
+        await sleep((retryAfterSec + 1) * 1000);
+        continue;
+      }
+
+      console.error("[TELEGRAM ERROR] API failed:", res.data);
+      lastError = new Error(`Telegram API error (${res.status}): ${res.data?.description || "unknown"}`);
+      if (res.status >= 500 && attempt < TELEGRAM_MAX_ATTEMPTS) {
+        await sleep(1500 * attempt);
+        continue;
+      }
+      throw lastError;
+    } catch (err) {
+      if (err.name === "AbortError") {
+        lastError = new Error("Telegram API request timed out (20s)");
+        if (attempt < TELEGRAM_MAX_ATTEMPTS) { await sleep(1500 * attempt); continue; }
+        throw lastError;
+      }
+      if (err === lastError) throw err;
+      lastError = err;
+      if (/fetch failed|ECONNRESET|ETIMEDOUT|ENOTFOUND/i.test(err.message || "") && attempt < TELEGRAM_MAX_ATTEMPTS) {
+        await sleep(1500 * attempt);
+        continue;
+      }
+      throw err;
     }
-    throw err;
   }
+  throw lastError || new Error("Telegram send failed");
+}
+
+/**
+ * Sends a message to the configured Telegram chat.
+ * Messages are serialised through a queue (Telegram throttles bursts), long messages are split on
+ * paragraph boundaries, and a failure is THROWN so callers never mistake "not delivered" for "sent".
+ * @param {string} text - Markdown formatted text.
+ */
+export async function sendTelegramMessage(text) {
+  if (!isTelegramConfigured()) {
+    const msg = "Telegram bot token or chat ID not configured.";
+    console.error(`[TELEGRAM ERROR] ${msg} Alert NOT delivered.`);
+    throw new Error(msg);
+  }
+
+  const run = async () => {
+    const chunks = splitTelegramText(text);
+    let last = null;
+    for (const chunk of chunks) {
+      last = await sendOneTelegramMessage(chunk);
+    }
+    return last;
+  };
+
+  // Keep the queue alive even when a send fails; each caller still gets its own result/rejection.
+  const result = telegramQueue.then(run, run);
+  telegramQueue = result.catch(() => {});
+  return result;
 }
 
 // ─── Announcement Alert ───────────────────────────────────────────────────────
@@ -753,7 +822,44 @@ export async function sendAnnouncementAlert(params) {
   }
 
   const message = formatAnnouncementMessage(params);
-  return sendTelegramMessage(message);
+  const result = await sendTelegramMessage(message);
+  return result || true;
+}
+
+/**
+ * Short heads-up for an upcoming earnings concall (date / time / joining link).
+ */
+export function formatConcallScheduleMessage({ ticker, companyName, schedule = {}, isRescheduled = false, docUrl = null, summary = null, resultDate = null }) {
+  const cleanedCompany = cleanCompanyName(companyName);
+  const header = cleanedCompany ? `*${ticker.toUpperCase()}* | ${cleanedCompany}` : `*${ticker.toUpperCase()}*`;
+  let when = "see the filing";
+  if (schedule.date) {
+    const [yy, mm, dd] = schedule.date.split("-").map(Number);
+    const weekday = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][new Date(Date.UTC(yy, mm - 1, dd)).getUTCDay()];
+    const monthName = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][mm - 1];
+    const dateStr = `${weekday}, ${String(dd).padStart(2, "0")} ${monthName} ${yy}`;
+    let timeStr = "";
+    if (schedule.time) {
+      const [h, m] = schedule.time.split(":").map(Number);
+      timeStr = ` • ${((h + 11) % 12) + 1}:${String(m).padStart(2, "0")} ${h >= 12 ? "PM" : "AM"} IST`;
+    }
+    when = `${dateStr}${timeStr}`;
+  }
+  let msg = `🏢 ${header}\n`;
+  msg += `📞 *Event:* Earnings Concall ${isRescheduled ? "Rescheduled" : "Scheduled"}\n`;
+  msg += `──────────────────────────────\n`;
+  msg += `🗓️ *When:* ${when}\n`;
+  if (schedule.link) msg += `🔗 *Join:* ${schedule.link}\n`;
+  if (resultDate) msg += `📊 *Results date:* ${resultDate}\n`;
+  if (summary) msg += `• ${cleanReaderFriendlyText(cleanBullet(summary)).slice(0, 220)}\n`;
+  msg += `──────────────────────────────\n`;
+  msg += docUrl ? `📄 [View Official Intimation →](${docUrl}) • 🕐 ${getIstTimestamp()}\n` : `🕐 ${getIstTimestamp()}\n`;
+  msg += `_Transcript & thesis-driver audit will follow when the call is filed._`;
+  return msg;
+}
+
+export async function sendConcallScheduleAlert(params) {
+  return sendTelegramMessage(formatConcallScheduleMessage(params));
 }
 
 // ─── Run Summary ──────────────────────────────────────────────────────────────

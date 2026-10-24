@@ -109,29 +109,24 @@ export function applyInstitutionalGuard(llmOutput = {}, financialData = null, ti
     const patQoQStr = (financialData.patQoQGrowthPct !== null && financialData.patQoQGrowthPct !== undefined) ? `${financialData.patQoQGrowthPct >= 0 ? '+' : ''}${financialData.patQoQGrowthPct}% QoQ` : null;
     const patStrParts = [patYoYStr, patQoQStr].filter(Boolean);
 
-    const safeRevenue = financialData.revenue !== null 
-      ? (financialData.revenue > 10000 ? parseFloat((financialData.revenue / 100).toFixed(2)) : financialData.revenue) 
-      : null;
-    const safeEbitda = financialData.ebitda !== null 
-      ? (financialData.ebitda > 5000 ? parseFloat((financialData.ebitda / 100).toFixed(2)) : financialData.ebitda) 
-      : null;
-    const safePat = financialData.patAttributable !== null 
-      ? (financialData.patAttributable > 2000 ? parseFloat((financialData.patAttributable / 100).toFixed(2)) : financialData.patAttributable) 
-      : null;
+    // Values are already normalised to Crores by the validator; never re-scale here.
+    const safeRevenue = financialData.revenue ?? null;
+    const safeEbitda = financialData.ebitda ?? null;
+    const safePat = financialData.patAttributable ?? financialData.patConsolidated ?? null;
 
     guarded.financial_highlights = {
       revenue: safeRevenue !== null ? `₹${safeRevenue} Cr (${revStrParts.join(" | ") || 'N/A'})` : "N/A",
       revenue_yoy: revYoYStr || "N/A",
       revenue_qoq: revQoQStr || "N/A",
       ebitda: safeEbitda !== null ? `₹${safeEbitda} Cr` : "N/A",
-      ebitda_margin: financialData.ebitdaMarginPct !== null ? `${financialData.ebitdaMarginPct}%` : "N/A",
-      ebitda_margin_delta: financialData.ebitdaMarginBpsDelta !== null ? `${financialData.ebitdaMarginBpsDelta >= 0 ? '+' : ''}${financialData.ebitdaMarginBpsDelta} bps YoY` : "N/A",
+      ebitda_margin: (financialData.ebitdaMarginPct !== null && financialData.ebitdaMarginPct !== undefined) ? `${financialData.ebitdaMarginPct}%` : "N/A",
+      ebitda_margin_delta: (financialData.ebitdaMarginBpsDelta !== null && financialData.ebitdaMarginBpsDelta !== undefined) ? `${financialData.ebitdaMarginBpsDelta >= 0 ? '+' : ''}${financialData.ebitdaMarginBpsDelta} bps YoY` : "N/A",
       pat_consolidated: safePat !== null ? `₹${safePat} Cr (${patStrParts.join(" | ") || 'N/A'})` : "N/A",
       pat_yoy: patYoYStr || "N/A",
       pat_qoq: patQoQStr || "N/A"
     };
 
-    if (safeEbitda !== null && financialData.ebitdaMarginPct !== null) {
+    if (safeEbitda !== null && financialData.ebitdaMarginPct !== null && financialData.ebitdaMarginPct !== undefined) {
       const ebitdaStr = `EBITDA: ₹${safeEbitda} Cr (Margin: ${financialData.ebitdaMarginPct}%${financialData.ebitdaMarginBpsDelta !== null ? `, ${financialData.ebitdaMarginBpsDelta >= 0 ? '+' : ''}${financialData.ebitdaMarginBpsDelta} bps YoY` : ''})`;
       if (!summaryText.includes("EBITDA")) {
         summaryText = `${summaryText} ${ebitdaStr}.`.trim();
@@ -211,7 +206,34 @@ export function applyInstitutionalGuard(llmOutput = {}, financialData = null, ti
         .trim();
     };
 
-    summaryText = stripErroneousQoQ(summaryText);
+    // Contradiction filter: the LLM often quotes YoY / bps figures from the wrong column or entity.
+    // Any LLM sentence quoting a YoY % or bps move that matches NONE of the verified figures is dropped,
+    // so the alert never shows two different growth numbers for the same quarter.
+    const verifiedPcts = [
+      financialData.revenueYoYGrowthPct, financialData.patYoYGrowthPct, financialData.ebitdaYoYGrowthPct,
+      financialData.normalisedPatYoYGrowthPct
+    ].filter(v => v !== null && v !== undefined && !isNaN(v)).map(Number);
+    const verifiedBps = (financialData.ebitdaMarginBpsDelta !== null && financialData.ebitdaMarginBpsDelta !== undefined)
+      ? [Number(financialData.ebitdaMarginBpsDelta)] : [];
+    const reconcileSummaryWithVerified = (txt) => {
+      if (typeof txt !== "string" || (verifiedPcts.length === 0 && verifiedBps.length === 0)) return txt;
+      const sentences = txt.split(/(?<=[.!?])\s+/);
+      const kept = sentences.filter(sent => {
+        if (/EXCEPTIONAL ITEM DISCLOSURE|YoY Earnings Contraction|SEGMENT RED FLAG|^EBITDA:/i.test(sent)) return true;
+        const pctClaims = [...sent.matchAll(/([+-]?\d{1,3}(?:\.\d+)?)\s*%\s*(?:yoy|y-o-y|year[-\s]on[-\s]year|growth|increase|decline|rise|fall|expansion|contraction)/gi)]
+          .map(m => Math.abs(parseFloat(m[1])));
+        const bpsClaims = [...sent.matchAll(/([+-]?\d{2,4})\s*(?:bps|basis\s+points)/gi)].map(m => Math.abs(parseFloat(m[1])));
+        const pctBad = pctClaims.length > 0 && verifiedPcts.length > 0 &&
+          pctClaims.every(c => !verifiedPcts.some(v => Math.abs(Math.abs(v) - c) <= 1.0));
+        const bpsBad = bpsClaims.length > 0 && verifiedBps.length > 0 &&
+          bpsClaims.every(c => !verifiedBps.some(v => Math.abs(Math.abs(v) - c) <= 15));
+        return !(pctBad || bpsBad);
+      });
+      const out = kept.join(" ").trim();
+      return out.length > 0 ? out : txt;
+    };
+
+    summaryText = reconcileSummaryWithVerified(stripErroneousQoQ(summaryText));
     if (guarded.key_drivers && Array.isArray(guarded.key_drivers)) {
       guarded.key_drivers = guarded.key_drivers
         .map(d => stripErroneousQoQ(d))
@@ -231,9 +253,14 @@ export function applyInstitutionalGuard(llmOutput = {}, financialData = null, ti
     if (conv > 10) conv = Math.min(10, Math.round(conv / 10)); // Converts 95 -> 10, 90 -> 9, 85 -> 9, 80 -> 8
     rawScore = Math.max(1, Math.min(10, conv));
 
+    const analysisIsBearish = ["TRIM", "SELL", "REDUCE", "EXIT"].includes(String(rawSignal).trim().toUpperCase());
+
     if (financialData.isYoYDecline || financialData.isMarginErosion) {
-      // Hard-cap signal on YoY contraction: Cannot be BUY or ADD
-      rawSignal = "HOLD";
+      // Hard-cap signal on YoY contraction: Cannot be BUY or ADD (an explicit TRIM/EXIT stays bearish)
+      rawSignal = analysisIsBearish ? rawSignal : "HOLD";
+      rawScore = Math.min(rawScore, 5);
+    } else if (analysisIsBearish) {
+      // Fundamentals are clean but the analysis flagged a bearish reason (governance, guidance cut, ...): never upgrade it
       rawScore = Math.min(rawScore, 5);
     } else if (
       financialData.patYoYGrowthPct !== null && financialData.patYoYGrowthPct >= 10 &&
@@ -268,11 +295,11 @@ export function applyInstitutionalGuard(llmOutput = {}, financialData = null, ti
         if (rawSignal === "STRONG BUY") rawSignal = "ADD";
       }
       if (isModerateRevenueGrowth && hasPendingRegulatoryCommitments) {
-        rawScore = Math.min(rawScore, 7); // Stacked constraint: 7/10
-        rawSignal = "ADD";
+        rawScore = Math.min(rawScore, 7); // Stacked constraint: 7/10 (cap only; never force a buy signal)
+        if (rawSignal === "STRONG BUY") rawSignal = "ADD";
       } else if (hasPendingRegulatoryCommitments) {
-        rawScore = Math.min(rawScore, 7); // Regulatory binary risk: 7/10
-        rawSignal = "ADD";
+        rawScore = Math.min(rawScore, 7); // Regulatory binary risk: 7/10 (cap only)
+        if (rawSignal === "STRONG BUY") rawSignal = "ADD";
       } else if (isModerateRevenueGrowth) {
         rawScore = Math.min(rawScore, 8); // Moderate growth constraint: 8/10
         if (rawSignal === "STRONG BUY") rawSignal = "ADD";
@@ -346,15 +373,19 @@ function sanitizeLlmOutput(guarded, title = "", ticker = "") {
 
       // If document text is available for grounding check
       if (rawDocText && rawDocText.length > 50) {
-        // Check for specific large numbers or currency figures in the item
-        const numbers = item.match(/\b\d{2,}(?:[.,]\d+)?\b/g) || [];
-        for (const num of numbers) {
-          const cleanNum = num.replace(/,/g, "");
-          // Allow common years like 2024, 2025, 2026, 2027
-          if (["2024", "2025", "2026", "2027", "2028"].includes(cleanNum)) continue;
-          if (!rawDocText.includes(cleanNum) && !rawDocText.includes(num)) {
-            // Number does not exist in the source document -> hallucination leak
-            return false;
+        // Only hard-ground absolute figures. Computed ratios (% / bps / x), years and Lakh->Crore
+        // conversions legitimately differ from the literal document text.
+        const docNoCommas = rawDocText.replace(/,/g, "");
+        for (const m of item.matchAll(/(\d{2,}(?:[.,]\d+)*)(\s*(?:%|bps|x\b))?/gi)) {
+          if (m[2]) continue; // computed percentage / bps / multiple
+          const cleanNum = m[1].replace(/,/g, "");
+          if (["2024", "2025", "2026", "2027", "2028", "2029", "2030"].includes(cleanNum)) continue;
+          if (cleanNum.length < 3) continue; // two-digit tokens are mostly ratios, months and dates
+          const intPart = cleanNum.split(".")[0];
+          const asNumber = parseFloat(cleanNum);
+          const lakhForm = isNaN(asNumber) ? null : String(Math.round(asNumber * 100));
+          if (!docNoCommas.includes(cleanNum) && !docNoCommas.includes(intPart) && !(lakhForm && docNoCommas.includes(lakhForm))) {
+            return false; // Number does not exist in the source document -> hallucination leak
           }
         }
       }

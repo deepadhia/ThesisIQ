@@ -1,4 +1,5 @@
 import crypto from "crypto";
+import https from "https";
 import { pool } from "../db/pool.js";
 import { PDFParse } from "pdf-parse";
 import { sendTelegramMessage } from "./telegram.service.js";
@@ -120,8 +121,24 @@ export function getConcallType(title, rawText = "", attachmentUrl = "") {
     return null;
   }
 
+  // A call invitation routinely says "the audio recording and transcript will be available on our website".
+  // That is NOT a transcript. Body-only detection requires a full-length document that reads like a call.
+  const bodyLooksLikeTranscript = (() => {
+    if (!body.includes("transcript")) return false;
+    // (a) a full-length document that reads like a call
+    if (body.length >= 3500 && /moderator|question[\s-]+and[\s-]+answer|q\s*&\s*a session|management\s*:|operator\s*:/.test(body.slice(0, 20000))) {
+      return true;
+    }
+    // (b) an explicit "Transcript of the <earnings/conference call>" statement that is not future-tense boilerplate
+    const m = body.match(/transcript\s+(?:of|for)\s+(?:the\s+)?(?:earnings|conference|con\.?\s?call|concall|q[1-4]|investor|analyst)/);
+    if (!m) return false;
+    const ctx = body.slice(Math.max(0, m.index - 140), m.index + m[0].length + 140);
+    const futureTense = /(?:will|shall|would|to)\s+be\s+(?:made\s+)?(?:available|uploaded|hosted|published|posted|shared)|available\s+on\s+(?:the\s+)?(?:company|our|website)|in\s+due\s+course|within\s+\d+\s+(?:working\s+)?days/.test(ctx);
+    return !futureTense;
+  })();
+
   // 1. Check for Transcript (most specific)
-  if (t.includes("transcript") || body.includes("transcript") || attach.includes("transcript")) {
+  if (t.includes("transcript") || bodyLooksLikeTranscript || attach.includes("transcript")) {
     const isConcallFiling = t.includes("con. call") || t.includes("conference call") || t.includes("earnings call") || attach.includes("transcript");
     const isGenericMeet = !isConcallFiling && (
       combined.includes("investor meet") ||
@@ -240,23 +257,29 @@ export function getConcallType(title, rawText = "", attachmentUrl = "") {
 
   // 4. Exclude private fund meets, roadshows, and one-on-one meetings.
   // Applied to BOTH paths — an earnings concall will never have these meeting phrases.
+  // The exchanges' STANDARD subject lines for ANY analyst/earnings call filing contain the words "investor meet"
+  // ("Analysts/Institutional Investor Meet/Con. Call Updates", "Analyst / Investor Meet - Intimation").
+  // Those words must not, by themselves, mark an earnings-call invitation as a private fund meet.
+  const combinedForPrivateCheck = combined
+    .replace(/analysts?\s*\/\s*institutional\s+investors?\s+meet(?:\s*\/\s*con\.?\s*call\s+updates)?/g, " con. call updates ")
+    .replace(/analysts?\s*\/\s*investors?\s+meet(?:\s*-\s*intimation)?/g, " analyst call intimation ");
   const isPrivateMeet =
-    combined.includes("investor meet") ||
-    combined.includes("analyst meet") ||
-    combined.includes("investor meeting") ||
-    combined.includes("analyst meeting") ||
-    combined.includes("investor/analyst meet") ||
-    combined.includes("analyst / institutional investor meeting") ||
-    combined.includes("meeting with") ||
-    combined.includes("interaction with") ||
-    combined.includes("one on one") ||
-    combined.includes("one-on-one") ||
-    combined.includes("group meeting") ||
-    combined.includes("group meet") ||
-    combined.includes("fund meeting") ||
-    combined.includes("roadshow") ||
-    combined.includes("participating in") ||
-    combined.includes("organized by");
+    combinedForPrivateCheck.includes("investor meet") ||
+    combinedForPrivateCheck.includes("analyst meet") ||
+    combinedForPrivateCheck.includes("investor meeting") ||
+    combinedForPrivateCheck.includes("analyst meeting") ||
+    combinedForPrivateCheck.includes("investor/analyst meet") ||
+    combinedForPrivateCheck.includes("analyst / institutional investor meeting") ||
+    combinedForPrivateCheck.includes("meeting with") ||
+    combinedForPrivateCheck.includes("interaction with") ||
+    combinedForPrivateCheck.includes("one on one") ||
+    combinedForPrivateCheck.includes("one-on-one") ||
+    combinedForPrivateCheck.includes("group meeting") ||
+    combinedForPrivateCheck.includes("group meet") ||
+    combinedForPrivateCheck.includes("fund meeting") ||
+    combinedForPrivateCheck.includes("roadshow") ||
+    combinedForPrivateCheck.includes("participating in") ||
+    combinedForPrivateCheck.includes("organized by");
 
   // Private meet without earnings context → always skip.
   // Private meet WITH earnings context (e.g. earnings roadshow Q4) → borderline, still skip
@@ -280,6 +303,65 @@ export function getConcallType(title, rawText = "", attachmentUrl = "") {
 
   // Otherwise, default to scheduled (since simple "Earnings Call" is upcoming, not completed)
   return "scheduled";
+}
+
+/**
+ * True when a filing is the invitation / intimation for an EARNINGS call (not a private fund meet or a roadshow).
+ */
+export function isEarningsConcallInvite(title = "", text = "") {
+  if (getConcallType(title, text) !== "scheduled") return false;
+  const combined = `${title} ${text}`.toLowerCase();
+  return /earnings|results|quarter|q[1-4]\b|fy\s?\d{2}|half[\s-]year/.test(combined);
+}
+
+/**
+ * Pulls the call date / time / joining link out of an intimation. Dates already in the past are ignored.
+ * Returns { date: 'YYYY-MM-DD'|null, time: 'HH:MM'|null, link: string|null } (all IST wall-clock).
+ */
+export function extractConcallSchedule(text = "", hint = {}, now = new Date()) {
+  const src = String(text || "");
+  const months = { jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6, jul: 7, aug: 8, sep: 9, sept: 9, oct: 10, nov: 11, dec: 12 };
+  const todayIst = new Date(now.getTime() + 5.5 * 3600000).toISOString().slice(0, 10);
+
+  const candidates = [];
+  if (hint.date && /^\d{4}-\d{2}-\d{2}$/.test(hint.date)) candidates.push({ iso: hint.date, idx: -1 });
+  const push = (y, m, d, idx) => {
+    if (!(m >= 1 && m <= 12 && d >= 1 && d <= 31 && y >= 2024 && y <= 2035)) return;
+    candidates.push({ iso: `${y}-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}`, idx });
+  };
+  for (const m of src.matchAll(/\b(\d{1,2})(?:st|nd|rd|th)?[\s,-]+(jan|feb|mar|apr|may|jun|jul|aug|sept?|oct|nov|dec)[a-z]*\.?,?\s+(\d{4})\b/gi)) push(+m[3], months[m[2].toLowerCase().slice(0, 4) === "sept" ? "sept" : m[2].toLowerCase().slice(0, 3)], +m[1], m.index);
+  for (const m of src.matchAll(/\b(jan|feb|mar|apr|may|jun|jul|aug|sept?|oct|nov|dec)[a-z]*\.?\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})\b/gi)) push(+m[3], months[m[1].toLowerCase().slice(0, 4) === "sept" ? "sept" : m[1].toLowerCase().slice(0, 3)], +m[2], m.index);
+  for (const m of src.matchAll(/\b(\d{1,2})[\/.\-](\d{1,2})[\/.\-](\d{4})\b/g)) push(+m[3], +m[2], +m[1], m.index);
+
+  // Prefer a date mentioned close to the word "call" / "conference" and not in the past
+  const callIdx = [...src.matchAll(/\b(?:call|conference|concall|con\.\s?call)\b/gi)].map(m => m.index);
+  const future = candidates.filter(c => c.iso >= todayIst);
+  future.sort((a, b) => {
+    const da = callIdx.length ? Math.min(...callIdx.map(i => Math.abs(i - a.idx))) : 0;
+    const db = callIdx.length ? Math.min(...callIdx.map(i => Math.abs(i - b.idx))) : 0;
+    return da - db;
+  });
+  const date = future.length ? future[0].iso : null;
+
+  let time = null;
+  if (hint.time && /^\d{1,2}:\d{2}$/.test(hint.time)) time = hint.time.padStart(5, "0");
+  if (!time) {
+    const m12 = src.match(/\b(\d{1,2})(?:[:.](\d{2}))?\s*(a\.?m\.?|p\.?m\.?)\s*(?:\(?IST\)?)?/i);
+    const m24 = src.match(/\b([01]?\d|2[0-3])[:.]([0-5]\d)\s*(?:hrs|hours|IST)\b/i);
+    if (m12) {
+      let h = +m12[1] % 12;
+      if (/p/i.test(m12[3])) h += 12;
+      time = `${String(h).padStart(2, "0")}:${m12[2] || "00"}`;
+    } else if (m24) {
+      time = `${m24[1].padStart(2, "0")}:${m24[2]}`;
+    }
+  }
+
+  const links = [...src.matchAll(/https?:\/\/[^\s"'<>)\]]+/gi)].map(m => m[0].replace(/[.,;]+$/, ""))
+    .filter(u => !/nseindia|bseindia|sebi\.gov/i.test(u));
+  const link = links.find(u => /diamondpass|choruscall|zoom|webex|teams|meet\.|webcast|researchbytes|orientcapital|bit\.ly|tinyurl|link/i.test(u)) || links[0] || null;
+
+  return { date, time, link };
 }
 
 /**
@@ -311,25 +393,84 @@ export async function resetStuckPending(timeoutMs = 15 * 60 * 1000) {
 }
 
 /**
- * Fetches recent announcements from BSE API for a specific scrip code.
- * @param {string} scripCode 
+ * Exchange timestamps (NSE "12102026142235" / "12-Oct-2026 14:22:35", BSE "2026-10-23T16:58:29.837")
+ * are all IST wall-clock times WITHOUT a zone. Parsing them with `new Date(...)` on a UTC server shifts
+ * every filing by 5.5 hours. This pins them to +05:30 and returns an ISO string (or null).
  */
-/**
- * BSE categories that carry high-impact filings.
- * Fetched in parallel so we never miss an award, MOU, acquisition, result,
- * or concall just because it was filed under a different category.
- */
-const BSE_CATEGORIES = [
-  "Company Update",          // General announcements, orders, MOUs, awards
-  "Result",                  // Financial results
-  "AGM/EGM",                // Board meetings, AGMs
-  "Corp. Action",            // Dividends, splits, buybacks
-  "Insider Trading / SAST",   // Bulk deals, promoter activity
-  "Analyst / Investor Meet", // Concall intimations, investor meets, presentations, transcripts
-  "Board Meeting",           // Board meeting notices & outcomes
-];
+export function parseExchangeTimestamp(value) {
+  if (value === null || value === undefined || value === "") return null;
+  const raw = String(value).trim();
 
-export async function fetchBseAnnouncements(scripCode) {
+  // Already zoned (Z or +hh:mm)
+  if (/[zZ]$|[+-]\d{2}:?\d{2}$/.test(raw) && /\d{4}-\d{2}-\d{2}T/.test(raw)) {
+    const d = new Date(raw);
+    return isNaN(d.getTime()) ? null : d.toISOString();
+  }
+
+  let m = raw.match(/^(\d{2})(\d{2})(\d{4})(\d{2})(\d{2})(\d{2})$/); // ddmmyyyyHHMMSS
+  if (m) return toIstIso(m[3], m[2], m[1], m[4], m[5], m[6]);
+
+  m = raw.match(/^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2}):(\d{2})(?:\.\d+)?$/);
+  if (m) return toIstIso(m[1], m[2], m[3], m[4], m[5], m[6]);
+
+  m = raw.match(/^(\d{2})-([A-Za-z]{3})-(\d{4})\s+(\d{2}):(\d{2}):(\d{2})$/);
+  if (m) {
+    const months = { jan: "01", feb: "02", mar: "03", apr: "04", may: "05", jun: "06", jul: "07", aug: "08", sep: "09", oct: "10", nov: "11", dec: "12" };
+    const mm = months[m[2].toLowerCase()];
+    if (mm) return toIstIso(m[3], mm, m[1], m[4], m[5], m[6]);
+  }
+
+  m = raw.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (m) return toIstIso(m[1], m[2], m[3], "00", "00", "00");
+
+  const fallback = new Date(raw);
+  return isNaN(fallback.getTime()) ? null : fallback.toISOString();
+}
+
+function toIstIso(y, mo, d, h, mi, sec) {
+  const dt = new Date(`${y}-${mo}-${d}T${h}:${mi}:${sec}+05:30`);
+  return isNaN(dt.getTime()) ? null : dt.toISOString();
+}
+
+/**
+ * Age of a filing in hours (never negative). Unknown timestamps count as fresh (age 0).
+ */
+export function getFilingAgeHours(timestamp, now = Date.now()) {
+  const iso = parseExchangeTimestamp(timestamp);
+  if (!iso) return 0;
+  return Math.max(0, (now - new Date(iso).getTime()) / 3600000);
+}
+
+/**
+ * Formats a Date as BSE's YYYYMMDD query-string date.
+ */
+function toBseDate(d) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}${m}${day}`;
+}
+
+const BSE_PAGE_LIMIT = 4;
+
+/**
+ * Fetches recent announcements from the BSE API for a specific scrip code.
+ *
+ * The BSE endpoint now REJECTS requests without an explicit date window
+ * ("Both From Date and To Date must be provided.") and the old per-category
+ * calls silently produced zero rows. A single all-category (strCat=-1) call over
+ * a date window returns every category (Result, Board Meeting, Company Update,
+ * Analyst/Investor Meet, AGM/EGM, ...) and is paginated.
+ *
+ * Rows are normalised to the shape the scanner expects (NEWS_ID, NEWSSUB, DT_TM,
+ * PDFFLAG) and enriched with ATTACHMENTNAME (the real PDF file name — NEWSID is
+ * NOT the document name), the exchange's own descriptive text, and any
+ * concall audio link.
+ *
+ * @param {string} scripCode
+ * @param {number} lookbackDays
+ */
+export async function fetchBseAnnouncements(scripCode, lookbackDays = 7) {
   if (!scripCode) return [];
 
   const baseUrl = `https://api.bseindia.com/BseIndiaAPI/api/AnnSubCategoryGetData/w`;
@@ -342,33 +483,59 @@ export async function fetchBseAnnouncements(scripCode) {
     "Connection": "keep-alive"
   };
 
-  // Fetch all relevant BSE categories in parallel and merge results.
-  // Deduplicate by NEWS_ID so the same filing appearing in multiple categories isn't doubled.
-  const results = await Promise.allSettled(
-    BSE_CATEGORIES.map(async (cat) => {
-      const params = new URLSearchParams({ strCat: cat, strScrip: scripCode });
-      const res = await fetch(`${baseUrl}?${params.toString()}`, { headers });
-      if (!res.ok) {
-        console.warn(`[BSE] Category '${cat}' fetch failed for ${scripCode}: ${res.status}`);
-        return [];
-      }
-      const data = await res.json();
-      return data.Table || [];
-    })
-  );
+  const today = new Date();
+  const from = new Date(Date.now() - lookbackDays * 24 * 60 * 60 * 1000);
 
   const seen = new Set();
   const merged = [];
-  for (const result of results) {
-    if (result.status === "fulfilled") {
-      for (const ann of result.value) {
-        const key = String(ann.NEWS_ID || ann.NEWSSUB || "");
-        if (key && !seen.has(key)) {
-          seen.add(key);
-          merged.push(ann);
-        }
-      }
+
+  for (let page = 1; page <= BSE_PAGE_LIMIT; page++) {
+    const params = new URLSearchParams({
+      pageno: String(page),
+      strCat: "-1",
+      strPrevDate: toBseDate(from),
+      strScrip: String(scripCode),
+      strSearch: "P",
+      strToDate: toBseDate(today),
+      strType: "C",
+      subcategory: "-1"
+    });
+
+    const res = await fetch(`${baseUrl}?${params.toString()}`, { headers });
+    if (!res.ok) {
+      throw new Error(`BSE announcements HTTP ${res.status} for scrip ${scripCode}`);
     }
+    const data = await res.json();
+
+    // Surface API-level rejections instead of silently reporting "0 announcements".
+    if (data && data.Status === false && data.Message) {
+      throw new Error(`BSE announcements rejected for scrip ${scripCode}: ${data.Message}`);
+    }
+
+    const rows = Array.isArray(data?.Table) ? data.Table : [];
+    for (const raw of rows) {
+      const id = String(raw.NEWSID || raw.NEWS_ID || raw.XML_NAME || "").trim();
+      if (!id || seen.has(id)) continue;
+      seen.add(id);
+
+      const description = String(raw.MORE || raw.HEADLINE || "").trim();
+      const audioLink = raw.AUDIO_VIDEO_FILE ? String(raw.AUDIO_VIDEO_FILE).trim() : "";
+      const extraText = [description, audioLink ? `Audio/Video link: ${audioLink}` : ""].filter(Boolean).join("\n");
+
+      merged.push({
+        ...raw,
+        NEWS_ID: id,
+        NEWSSUB: raw.NEWSSUB,
+        DT_TM: parseExchangeTimestamp(raw.DT_TM || raw.NEWS_DT) || raw.DT_TM || raw.NEWS_DT,
+        PDFFLAG: raw.PDFFLAG ?? 0,
+        ATTACHMENTNAME: raw.ATTACHMENTNAME || null,
+        CATEGORYNAME: raw.CATEGORYNAME || null,
+        attachment_text: extraText || undefined
+      });
+    }
+
+    const totalRows = Number(data?.Table1?.[0]?.ROWCNT ?? rows.length);
+    if (rows.length === 0 || merged.length >= totalRows) break;
   }
 
   return merged;
@@ -479,9 +646,12 @@ export async function fetchNseAnnouncements(symbol, lookbackDaysNum = 30) {
     const lookbackDate = new Date();
     lookbackDate.setDate(lookbackDate.getDate() - lookbackDaysNum);
 
+    const annIso = (ann) => parseExchangeTimestamp(ann.dt) || parseExchangeTimestamp(ann.an_dt) || parseExchangeTimestamp(ann.sort_date);
+
     return (Array.isArray(data) ? data : [])
       .filter(ann => {
-        const annDate = new Date(ann.sort_date || ann.an_dt || ann.dt);
+        const iso = annIso(ann);
+        const annDate = iso ? new Date(iso) : new Date(ann.sort_date || ann.an_dt || ann.dt);
         return annDate >= lookbackDate;
       })
       .map(ann => {
@@ -490,7 +660,7 @@ export async function fetchNseAnnouncements(symbol, lookbackDaysNum = 30) {
         return {
           NEWS_ID: uniqueNewsId,
           NEWSSUB: ann.desc,
-          DT_TM: ann.sort_date || ann.an_dt || ann.dt,
+          DT_TM: annIso(ann) || ann.sort_date || ann.an_dt || ann.dt,
           SOURCE: "NSE",
           attachment: ann.attchmntFile 
             ? (ann.attchmntFile.startsWith("http") ? ann.attchmntFile : `https://nsearchives.nseindia.com/corporate/${ann.attchmntFile}`)
@@ -508,11 +678,17 @@ export async function fetchNseAnnouncements(symbol, lookbackDaysNum = 30) {
  * Generates a unique hash for an announcement to prevent duplicates 
  * when source_id (NEWS_ID) is missing or unreliable.
  */
-export function generateAnnouncementHash(ticker, title, timestamp) {
+export function generateAnnouncementHash(ticker, title, timestamp, discriminator = null) {
   // Use normalized title and DATE ONLY for the hash to handle small time drifts between exchanges
   const norm = normalizeTitle(title);
-  const date = timestamp ? new Date(timestamp).toISOString().split('T')[0] : 'nodate';
-  const data = `${ticker}:${norm}:${date}`;
+  const iso = parseExchangeTimestamp(timestamp);
+  const date = iso ? iso.split('T')[0] : 'nodate';
+  // NSE files many different documents under the same short generic subject ("Updates", "Press Release",
+  // "Financial Results", ...). Without a discriminator the 2nd..nth such filing of the day is silently
+  // dropped as a duplicate of the first. Long descriptive titles keep the cross-exchange dedup behaviour.
+  const isGenericShort = norm.split(/\s+/).filter(Boolean).length <= 5;
+  const disc = isGenericShort && discriminator ? `:${discriminator}` : '';
+  const data = `${ticker}:${norm}:${date}${disc}`;
   return crypto.createHash("md5").update(data).digest("hex");
 }
 
@@ -529,6 +705,28 @@ export async function isAnnouncementProcessed(ticker, sourceId, titleHash) {
     [ticker, cleanSourceId, titleHash]
   );
   return result.rows.length > 0;
+}
+
+/**
+ * Extracts rupee amounts (normalised to a plain number string) from free text, e.g. "₹420 Cr", "Rs. 1,250.5 crore".
+ */
+function extractAmounts(text) {
+  const out = new Set();
+  const src = String(text || "");
+  for (const m of src.matchAll(/(?:₹|rs\.?|inr)\s*([\d,]+(?:\.\d+)?)/gi)) out.add(String(parseFloat(m[1].replace(/,/g, ""))));
+  for (const m of src.matchAll(/([\d,]+(?:\.\d+)?)\s*(?:cr\b|crores?\b|lakhs?\b|mn\b|million\b)/gi)) out.add(String(parseFloat(m[1].replace(/,/g, ""))));
+  return out;
+}
+
+/**
+ * True when BOTH texts quote rupee amounts and they share none — i.e. two different deals/orders.
+ */
+function amountsDiffer(a, b) {
+  const A = extractAmounts(a);
+  const B = extractAmounts(b);
+  if (A.size === 0 || B.size === 0) return false;
+  for (const v of A) if (B.has(v)) return false;
+  return true;
 }
 
 /**
@@ -586,21 +784,22 @@ export async function isEventAlertRecentlySent({ ticker, title, summary, concall
 
   // 3. Concall Stage deduplication check (1 alert per concall_type stage per ticker per 24 hours)
   if (concall_type) {
-    let typeKeyword = concall_type;
-    if (concall_type === 'audio') typeKeyword = 'audio';
-    else if (concall_type === 'transcript') typeKeyword = 'transcript';
-
+    const typeKeyword = concall_type;
+    // Only look at the filing's own title/summary (raw_text matches words like "audio" or "scheduled" almost anywhere)
+    // and, for scheduled/done calls, require an actual call-style title.
+    const keywordPattern = (typeKeyword === 'audio' || typeKeyword === 'transcript')
+      ? `%${typeKeyword}%`
+      : `%call%`;
     const res = await pool.query(
       `SELECT id FROM corporate_announcements 
        WHERE ticker = $1 
          AND sent_to_telegram = true 
          AND (
            title ILIKE $2 
-           OR summary ILIKE $2 
-           OR raw_text ILIKE $2
+           OR summary ILIKE $2
          ) 
          AND processed_at > NOW() - interval '24 hours'`,
-      [ticker, `%${typeKeyword}%`]
+      [ticker, keywordPattern]
     );
     if (res.rows.length > 0) return true;
   }
@@ -673,15 +872,13 @@ export async function isEventAlertRecentlySent({ ticker, title, summary, concall
       );
       
       for (const prev of rows) {
-        const prevText = `${prev.title || ""} ${prev.summary || ""} ${prev.raw_text || ""}`.toLowerCase();
-        // If at least 2 distinct tokens match, or 1 token matches when only 1 specific token exists,
-        // or at least 1 token matches AND the filing category matches (e.g. "scheme" + RESTRUCTURING)
+        // Compare only against the earlier alert's own title + summary (its 4,000-char raw_text matches generic words everywhere)
+        const prevText = `${prev.title || ""} ${prev.summary || ""}`.toLowerCase();
+        if (amountsDiffer(summary, prev.summary)) continue; // different ₹ amounts => different order / deal / investment
         const matchingTokens = tokens.filter(t => prevText.includes(t));
-        if (
-          matchingTokens.length >= 2 ||
-          (matchingTokens.length === 1 && tokens.length === 1) ||
-          (matchingTokens.length >= 1 && prev.filing_category === filing_category)
-        ) {
+        // Distinct events from the same company routinely share 1-2 generic words ("order", "subsidiary").
+        // Require strong overlap before suppressing an alert.
+        if (matchingTokens.length >= 3 || (tokens.length === 2 && matchingTokens.length === 2)) {
           return true;
         }
       }
@@ -717,10 +914,11 @@ export async function isEventAlertRecentlySent({ ticker, title, summary, concall
       "noted", "taken", "record", "office", "registered", "place", "copy"
     ]);
 
+    const tickerWord = String(ticker || "").toLowerCase();
     const sumWords = summary.toLowerCase()
       .replace(/[^a-z0-9\s]/g, " ")
       .split(/\s+/)
-      .filter(w => w.length >= 4 && !SUMMARY_STOP_WORDS.has(w));
+      .filter(w => w.length >= 4 && !SUMMARY_STOP_WORDS.has(w) && !(tickerWord && (w === tickerWord || tickerWord.startsWith(w))));
 
     const GENERIC_WRAPPER_REGEX = /\b(press release|media release|general update|general updates|corporate announcement|company update|business update|disclosure under regulation 30|intimation under regulation 30|outcome of board meeting|investor update)\b/i;
     const isCurrentWrapper = GENERIC_WRAPPER_REGEX.test(title || "") || filing_category === "GENERAL" || !filing_category;
@@ -730,7 +928,8 @@ export async function isEventAlertRecentlySent({ ticker, title, summary, concall
 
       const prevTitle = prev.title || "";
       const prevSumLower = prev.summary.toLowerCase();
-      const prevCombined = `${prevTitle.toLowerCase()} ${prevSumLower} ${(prev.raw_text || "").toLowerCase().slice(0, 3000)}`;
+      const prevCombined = `${prevTitle.toLowerCase()} ${prevSumLower}`;
+      if (amountsDiffer(summary, prev.summary)) continue; // different ₹ amounts => a different event
 
       const commonWords = sumWords.filter(w => prevCombined.includes(w));
       const isPrevWrapper = GENERIC_WRAPPER_REGEX.test(prevTitle) || prev.filing_category === "GENERAL";
@@ -738,17 +937,17 @@ export async function isEventAlertRecentlySent({ ticker, title, summary, concall
 
       // 6a. If either filing is a generic wrapper (Press Release / Media Release / GENERAL):
       // 2 or more substantive entity tokens indicate it is marketing/PR duplication of the same event
-      if ((isCurrentWrapper || isPrevWrapper) && commonWords.length >= 2) {
+      if ((isCurrentWrapper || isPrevWrapper) && commonWords.length >= 3) {
         return true;
       }
 
-      // 6b. Same-category filings: 3 or more substantive content words match across summaries
-      if (isSameCategory && commonWords.length >= 3) {
+      // 6b. Same-category filings: 4 or more substantive content words match across summaries
+      if (isSameCategory && commonWords.length >= 4) {
         return true;
       }
 
-      // 6c. Cross-category match: 4 or more substantive entity tokens match across summaries
-      if (commonWords.length >= 4) {
+      // 6c. Cross-category match: 6 or more substantive entity tokens match across summaries
+      if (commonWords.length >= 6) {
         return true;
       }
     }
@@ -757,6 +956,48 @@ export async function isEventAlertRecentlySent({ ticker, title, summary, concall
   return false;
 }
 
+
+/**
+ * True when the SAME filing was already alerted in the last 24h under a slightly different exchange title.
+ * Compares full normalised titles (equality / containment) — NOT a 3-word prefix, which used to swallow
+ * distinct filings such as "Award of Order ..." for two different customers.
+ */
+export async function isFuzzyDuplicateTitle(ticker, title) {
+  const norm = normalizeTitle(title);
+  if (!ticker || !norm || norm.length < 20) return false;
+  const { rows } = await pool.query(
+    `SELECT title FROM corporate_announcements
+     WHERE ticker = $1
+       AND status = 'sent'
+       AND processed_at > NOW() - interval '24 hours'`,
+    [ticker]
+  );
+  return rows.some(r => {
+    const prev = normalizeTitle(r.title);
+    return prev.length >= 20 && (prev === norm || (norm.length >= 30 && (prev.includes(norm) || norm.includes(prev))));
+  });
+}
+
+/**
+ * Cross-exchange document de-duplication: NSE and BSE publish the same PDF under different ids/titles.
+ * Matches on the first ~1,000 characters of extracted text already stored for this ticker.
+ */
+export async function findContentDuplicate(ticker, extractedText, withinDays = 10) {
+  const text = String(extractedText || "");
+  if (!ticker || text.length < 1200) return null;
+  const probe = text.slice(0, 1000);
+  const { rows } = await pool.query(
+    `SELECT id, status, deep_dive_status, sent_to_telegram, title
+     FROM corporate_announcements
+     WHERE ticker = $1
+       AND created_at > NOW() - ($3 || ' days')::interval
+       AND status != 'failed'
+       AND POSITION($2 IN raw_text) > 0
+     LIMIT 1`,
+    [ticker, probe, String(withinDays)]
+  );
+  return rows[0] || null;
+}
 
 /**
  * Saves a processed announcement to the database.
@@ -1049,6 +1290,58 @@ export async function markHeartbeatSent() {
   );
 }
 
+const SCAN_LEASE_KEY = "scan_lease";
+const SCAN_LEASE_TTL_SEC = 120;
+const SCAN_LEASE_RENEW_MS = 30000;
+
+/**
+ * Cross-process scan lease. Oracle PM2 (every 5 min) and the GitHub Actions failover (every 30 min) share one
+ * database; without a lease both can analyse and alert the same filing. The lease is renewed by a heartbeat and
+ * expires on its own if the process is killed (PM2 cron restart, runner timeout). Fails OPEN on any error so a
+ * lease problem can never stop alerts.
+ * @returns {Promise<object|null>} lease handle, or null when another scan currently holds it
+ */
+export async function acquireScanLease() {
+  const holder = `${process.env.GITHUB_ACTIONS === "true" ? "gha" : "daemon"}-${process.pid}-${Date.now()}`;
+  try {
+    const res = await pool.query(
+      `INSERT INTO system_settings (key, value, updated_at)
+       VALUES ($1, $2::jsonb, NOW())
+       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
+       WHERE system_settings.updated_at < NOW() - make_interval(secs => $3)
+       RETURNING key`,
+      [SCAN_LEASE_KEY, JSON.stringify({ holder }), SCAN_LEASE_TTL_SEC]
+    );
+    if (res.rows.length === 0) return null;
+
+    const timer = setInterval(() => {
+      pool.query(
+        `UPDATE system_settings SET updated_at = NOW() WHERE key = $1 AND value::text LIKE $2`,
+        [SCAN_LEASE_KEY, `%${holder}%`]
+      ).catch(() => {});
+    }, SCAN_LEASE_RENEW_MS);
+    if (typeof timer.unref === "function") timer.unref();
+    return { holder, timer };
+  } catch (err) {
+    console.warn(`[LEASE] Could not evaluate scan lease (${err.message}). Proceeding without it.`);
+    return { holder, timer: null, failOpen: true };
+  }
+}
+
+export async function releaseScanLease(lease) {
+  if (!lease) return;
+  if (lease.timer) clearInterval(lease.timer);
+  if (lease.failOpen) return;
+  try {
+    await pool.query(
+      `UPDATE system_settings SET updated_at = NOW() - interval '1 hour' WHERE key = $1 AND value::text LIKE $2`,
+      [SCAN_LEASE_KEY, `%${lease.holder}%`]
+    );
+  } catch (err) {
+    console.warn(`[LEASE] Could not release scan lease: ${err.message}`);
+  }
+}
+
 const FAILURE_THRESHOLD = 3;
 const COOLDOWN_HOURS = 6;
 
@@ -1228,6 +1521,54 @@ async function ocrPdfWithGemini(uint8Buffer, apiKey) {
   return null;
 }
 
+const DOWNLOAD_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
+
+/**
+ * Downloads a binary document. BSE's file server emits headers that undici (Node's fetch) rejects as malformed
+ * ("Unexpected whitespace after header value"), which silently turned every BSE PDF into "no text". On such a
+ * parser failure we retry through node:https with the lenient HTTP parser.
+ */
+async function downloadBinary(url, signal) {
+  try {
+    const response = await fetch(url, { headers: { "User-Agent": DOWNLOAD_UA }, signal });
+    if (!response.ok) {
+      throw new Error(`Failed to download PDF: ${response.status}`);
+    }
+    return Buffer.from(await response.arrayBuffer());
+  } catch (err) {
+    const parserError = /HPE_|HTTPParserError|does not match the HTTP|Unexpected whitespace|fetch failed/i.test(`${err?.message} ${err?.cause?.message || ""} ${err?.cause?.code || ""}`);
+    if (!parserError || err?.name === "AbortError") throw err;
+    console.warn(`[PDF] fetch() rejected the response (${err.cause?.message || err.message}). Retrying via lenient HTTPS parser...`);
+    return httpsDownload(url, signal);
+  }
+}
+
+function httpsDownload(url, signal, redirectsLeft = 3) {
+  return new Promise((resolve, reject) => {
+    const req = https.get(url, { headers: { "User-Agent": DOWNLOAD_UA }, insecureHTTPParser: true }, (res) => {
+      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location && redirectsLeft > 0) {
+        res.resume();
+        resolve(httpsDownload(new URL(res.headers.location, url).href, signal, redirectsLeft - 1));
+        return;
+      }
+      if (res.statusCode !== 200) {
+        res.resume();
+        reject(new Error(`Failed to download PDF: ${res.statusCode}`));
+        return;
+      }
+      const chunks = [];
+      res.on("data", (c) => chunks.push(c));
+      res.on("end", () => resolve(Buffer.concat(chunks)));
+      res.on("error", reject);
+    });
+    req.on("error", reject);
+    if (signal) {
+      if (signal.aborted) { req.destroy(new Error("aborted")); }
+      signal.addEventListener("abort", () => req.destroy(Object.assign(new Error("aborted"), { name: "AbortError" })), { once: true });
+    }
+  });
+}
+
 /**
  * Downloads a PDF from a URL and extracts its text content.
  * Limited to first ~10,000 characters to prevent AI context overflow.
@@ -1258,22 +1599,11 @@ export async function extractTextFromPdfUrl(url) {
         console.log(`[PDF] Downloading... ${downloadUrl}`);
       }
       
-      const response = await fetch(downloadUrl, {
-        headers: {
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        },
-        signal: controller.signal,
-      });
-
+      const bytes = await downloadBinary(downloadUrl, controller.signal);
       clearTimeout(timeoutId);
 
-      if (!response.ok) {
-        throw new Error(`Failed to download PDF: ${response.status}`);
-      }
-
       console.log(`[PDF] Parsing...`);
-      const arrayBuffer = await response.arrayBuffer();
-      const uint8 = new Uint8Array(arrayBuffer);
+      const uint8 = new Uint8Array(bytes);
 
       // Suppress noisy pdf.js standardFontDataUrl / TT bytecode / getHexString warnings from stdout
       const origWarn = console.warn;

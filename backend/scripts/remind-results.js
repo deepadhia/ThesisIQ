@@ -208,7 +208,7 @@ export async function syncForthcomingResults() {
             if (stock && !matchedIds.has(stock.id)) {
               matchedIds.add(stock.id);
               const existingStr = formatDbDateToYmd(stock.next_results_date);
-              if (meetDateStr !== existingStr) {
+              if (dateStr !== existingStr) {
                 updates.push({ id: stock.id, ticker: stock.ticker, date: dateStr, source: 'NSE' });
               }
             }

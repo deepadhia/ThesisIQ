@@ -15,6 +15,7 @@
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { summarizeDriverAssessment } from './thesis-driver-context.service.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -61,12 +62,27 @@ export function evaluateUniversalFinancialHealth(fin = {}) {
   }
 
   // 1. Mandatory Data Presence Checks (Fail-Closed: Missing data is NEVER positive evidence)
-  if (fin.patYoYGrowthPct === null || fin.patYoYGrowthPct === undefined || isNaN(fin.patYoYGrowthPct)) {
-    return {
-      status: 'UNAVAILABLE',
-      passed: false,
-      reason: 'Verified PAT YoY growth rate unavailable'
-    };
+  const patYoYMissing = fin.patYoYGrowthPct === null || fin.patYoYGrowthPct === undefined || isNaN(fin.patYoYGrowthPct);
+  let patGrowth;
+  if (patYoYMissing) {
+    // A mathematically undefined growth rate (prior-year loss) is still verifiable from the sign change.
+    if (fin.patTurnaround === 'LOSS_TO_PROFIT') {
+      patGrowth = Number.POSITIVE_INFINITY;
+    } else if (fin.patTurnaround === 'PROFIT_TO_LOSS' || fin.patTurnaround === 'LOSS_WIDENED') {
+      return {
+        status: 'FAIL',
+        passed: false,
+        reason: fin.patTurnaround === 'PROFIT_TO_LOSS' ? 'Swung from profit to loss YoY' : 'Net loss widened YoY'
+      };
+    } else {
+      return {
+        status: 'UNAVAILABLE',
+        passed: false,
+        reason: 'Verified PAT YoY growth rate unavailable'
+      };
+    }
+  } else {
+    patGrowth = Number(fin.patYoYGrowthPct);
   }
 
   if (fin.revenueYoYGrowthPct === null || fin.revenueYoYGrowthPct === undefined || isNaN(fin.revenueYoYGrowthPct)) {
@@ -86,7 +102,6 @@ export function evaluateUniversalFinancialHealth(fin = {}) {
   }
 
   // 2. Deterministic Financial Health Checks
-  const patGrowth = Number(fin.patYoYGrowthPct);
   const revGrowth = Number(fin.revenueYoYGrowthPct);
   const isMarginEroded = Boolean(fin.isMarginErosion) || (fin.ebitdaMarginBpsDelta !== null && fin.ebitdaMarginBpsDelta !== undefined && Number(fin.ebitdaMarginBpsDelta) < -150);
 
@@ -280,6 +295,14 @@ const SPECIFIC_THESIS_HURDLES = {
 };
 
 /**
+ * Human-readable hurdle definition for a ticker (e.g. "Primary: EBITDA margin ≥15.0% | Structural: ..."), or null.
+ */
+export function getThesisHurdleDescription(ticker) {
+  const h = SPECIFIC_THESIS_HURDLES[String(ticker || '').toUpperCase().trim()];
+  return h ? h.description : null;
+}
+
+/**
  * Evaluates Layer 2: Company-Specific Thesis Hurdle Gate (Fail-Closed)
  */
 export function evaluateThesisSpecificHurdle(ticker, fin = {}, operational = {}) {
@@ -407,70 +430,151 @@ export function evaluateThesisSpecificHurdle(ticker, fin = {}, operational = {})
   };
 }
 
+const BEARISH_ACTION = /\b(TRIM|SELL|REDUCE|EXIT)\b/i;
+
 /**
  * Main Dual-Layer Gating Function
  * Returns actionable verdict, granular categorization, and decision text.
+ *
+ * Gate order: quantitative gates authorise a buy; the analysis' own bearish call and any broken
+ * thesis driver can only VETO that buy, never be overridden by it.
+ *
+ * @param {object} params
+ * @param {boolean} [params.financialsRequired=true] false for filings that never contain statements (concall transcripts, decks)
+ * @param {Array}  [params.driverAssessment] normalised thesis-driver assessment for this filing
+ * @param {string} [params.financialsSource] e.g. 'THIS_FILING' | 'CARRIED_FORWARD'
+ * @param {boolean} [params.financialsVerified=true] false when the figures were only AI-located (never authorises a buy)
  */
-export function evaluateDualLayerActionGate({ ticker, financialData = {}, operationalMetrics = {}, proposedAction = 'HOLD', llmConviction = 5 }) {
+export function evaluateDualLayerActionGate({
+  ticker,
+  financialData = {},
+  operationalMetrics = {},
+  proposedAction = 'HOLD',
+  llmConviction = 5,
+  driverAssessment = [],
+  financialsRequired = true,
+  financialsSource = 'THIS_FILING',
+  financialsVerified = true
+}) {
+  const hasFinancials = Boolean(financialData) && typeof financialData === 'object' && Object.keys(financialData).length > 0;
   const safeFin = financialData || {};
   const safeOperational = operationalMetrics || {};
-  const universal = evaluateUniversalFinancialHealth(safeFin);
-  const thesis = evaluateThesisSpecificHurdle(ticker, safeFin, safeOperational);
+  const drivers = summarizeDriverAssessment(driverAssessment || []);
+  const bearishAnalysis = BEARISH_ACTION.test(String(proposedAction || ''));
+  const baseConviction = Math.max(1, Math.min(Number(llmConviction) || 5, 10));
+
+  const driverNote = (() => {
+    const parts = [];
+    if (drivers.broken.length) parts.push(`Thesis driver(s) BROKEN: ${drivers.broken.map(d => d.driver).join(', ')}`);
+    if (drivers.atRisk.length) parts.push(`At risk: ${drivers.atRisk.map(d => d.driver).join(', ')}`);
+    return parts.join(' | ');
+  })();
+  const withDriverNote = (text) => (driverNote ? `${text} ${driverNote}.` : text);
+  const sourceNote = financialsSource === 'CARRIED_FORWARD' ? ' (financials carried forward from the latest verified results)' : '';
+
+  const universal = (!hasFinancials && !financialsRequired)
+    ? { status: 'NOT_APPLICABLE', passed: false, reason: 'No financial statements in this filing' }
+    : evaluateUniversalFinancialHealth(safeFin);
+  const thesis = (!hasFinancials && !financialsRequired)
+    ? { status: 'NOT_APPLICABLE', passed: false, structuralConfirmed: false, reason: 'No financial statements in this filing', hurdlesEvaluated: 'n/a' }
+    : evaluateThesisSpecificHurdle(ticker, safeFin, safeOperational);
 
   const actionAuthorized = universal.status === 'PASS' && thesis.status === 'PASS';
 
-  let finalAction = 'HOLD';
-  let calibratedConviction = Math.min(Number(llmConviction) || 5, 10);
+  let finalAction = 'HOLD / MONITOR';
+  let calibratedConviction = baseConviction;
   let statusClassification = 'NEUTRAL';
   let decisionExplanation = '';
+  let authorized = actionAuthorized;
 
-  if (actionAuthorized) {
-    // Both gates cleared -> Authorize BUY / ACCUMULATE
-    // Structural confirmation adjusts conviction tier (9/10 for full structural beat vs 8/10 for primary gate pass)
-    finalAction = (calibratedConviction >= 9 && thesis.structuralConfirmed) ? 'STRONG BUY' : 'ADD';
-    calibratedConviction = thesis.structuralConfirmed ? Math.max(calibratedConviction, 9) : 8;
-    statusClassification = 'THESIS_CONFIRMED_BEAT';
-    decisionExplanation = thesis.structuralConfirmed
-      ? 'Primary financial growth and structural thesis hurdle rates verified.'
-      : 'Primary financial hurdle rates cleared; structural metrics in confirmation phase.';
+  if (universal.status === 'NOT_APPLICABLE') {
+    // Concall / presentation / transcript: judged on thesis drivers + the analysis, never on missing statements.
+    if (drivers.highBroken.length > 0) {
+      finalAction = 'REASSESS THESIS';
+      calibratedConviction = Math.min(baseConviction, 4);
+      statusClassification = 'THESIS_DRIVER_BROKEN';
+      decisionExplanation = withDriverNote('A high-materiality thesis driver is falsified by this filing.');
+    } else if (bearishAnalysis) {
+      finalAction = 'WATCH / WAIT FOR CONFIRMATION';
+      calibratedConviction = Math.min(baseConviction, 5);
+      statusClassification = 'NO_FINANCIALS_BEARISH_READ';
+      decisionExplanation = withDriverNote('Analysis of this filing is cautious; no new financial statements to confirm or refute it.');
+    } else {
+      finalAction = 'HOLD / MONITOR';
+      calibratedConviction = Math.min(baseConviction, drivers.highAtRisk.length > 0 ? 5 : 6);
+      statusClassification = 'NO_FINANCIALS_IN_FILING';
+      decisionExplanation = withDriverNote('No financial statements in this filing; action authority stays with the latest results gate.');
+    }
+    authorized = false;
+  } else if (actionAuthorized) {
+    if (drivers.highBroken.length > 0) {
+      finalAction = 'REASSESS THESIS';
+      calibratedConviction = Math.min(baseConviction, 4);
+      statusClassification = 'THESIS_DRIVER_BROKEN';
+      decisionExplanation = withDriverNote('Financial gates cleared, but a core thesis driver is falsified.');
+      authorized = false;
+    } else if (!financialsVerified) {
+      finalAction = 'WATCH / WAIT FOR CONFIRMATION';
+      calibratedConviction = Math.min(baseConviction, 5);
+      statusClassification = 'UNVERIFIED_FIGURES';
+      decisionExplanation = withDriverNote('Gates pass on AI-located figures, but a buy is only authorised on machine-verified statements — check the filing.');
+      authorized = false;
+    } else if (bearishAnalysis) {
+      finalAction = 'WATCH / WAIT FOR CONFIRMATION';
+      calibratedConviction = Math.min(baseConviction, 5);
+      statusClassification = 'GATES_PASS_ANALYSIS_BEARISH';
+      decisionExplanation = withDriverNote('Financial gates cleared, but the filing analysis raised a bearish flag (governance, guidance or segment risk).');
+      authorized = false;
+    } else {
+      // Both gates cleared and nothing vetoes -> authorise a buy.
+      const structural = thesis.structuralConfirmed;
+      calibratedConviction = structural ? Math.max(baseConviction, 8) : Math.min(Math.max(baseConviction, 7), 8);
+      if (drivers.highAtRisk.length > 0) calibratedConviction = Math.min(calibratedConviction, 7);
+      finalAction = (calibratedConviction >= 9 && structural) ? 'STRONG BUY' : 'ADD';
+      statusClassification = 'THESIS_CONFIRMED_BEAT';
+      decisionExplanation = withDriverNote((structural
+        ? 'Primary financial growth and structural thesis hurdle rates verified.'
+        : 'Primary financial hurdle rates cleared; structural metrics in confirmation phase.') + sourceNote);
+    }
   } else if (thesis.status === 'NO_CONTRACT') {
-    // No verified thesis contract -> Hold
     finalAction = 'HOLD / MONITOR';
-    calibratedConviction = Math.min(calibratedConviction, 5);
+    calibratedConviction = Math.min(baseConviction, 5);
     statusClassification = 'NO_CONTRACT';
     decisionExplanation = thesis.reason;
   } else if (universal.status === 'PASS' && thesis.status === 'FAIL') {
-    // Company is financially growing, but thesis-specific hurdle not yet met
-    finalAction = 'WATCH / WAIT FOR CONFIRMATION';
-    calibratedConviction = Math.min(calibratedConviction, 6);
+    finalAction = drivers.highBroken.length > 0 ? 'REASSESS THESIS' : 'WATCH / WAIT FOR CONFIRMATION';
+    calibratedConviction = Math.min(baseConviction, drivers.highBroken.length > 0 ? 4 : 6);
     statusClassification = 'GROWING_BUT_THESIS_UNCONFIRMED';
-    decisionExplanation = `Company is financially growing, but specific thesis gates unmet: ${thesis.reason}`;
+    decisionExplanation = withDriverNote(`Company is financially growing, but specific thesis gates unmet: ${thesis.reason}.`);
   } else if (universal.status === 'UNAVAILABLE' || thesis.status === 'UNAVAILABLE') {
-    // Missing required data -> Strict Fail-Closed Holding Pattern
     finalAction = 'HOLD / MONITOR';
-    calibratedConviction = Math.min(calibratedConviction, 5);
+    calibratedConviction = Math.min(baseConviction, 5);
     statusClassification = 'DATA_UNAVAILABLE';
-    decisionExplanation = `Data requirement unmet: ${universal.status === 'UNAVAILABLE' ? universal.reason : thesis.reason}`;
+    decisionExplanation = withDriverNote(`Data requirement unmet: ${universal.status === 'UNAVAILABLE' ? universal.reason : thesis.reason}.`);
   } else if (universal.status === 'FAIL') {
-    // Margin compression or earnings contraction
     finalAction = 'REASSESS THESIS';
-    calibratedConviction = Math.min(calibratedConviction, 4);
+    calibratedConviction = Math.min(baseConviction, 4);
     statusClassification = 'THESIS_DEVIATION';
-    decisionExplanation = `Universal financial health failure: ${universal.reason}`;
+    decisionExplanation = withDriverNote(`Universal financial health failure: ${universal.reason}.`);
   } else {
     finalAction = 'HOLD / MONITOR';
-    calibratedConviction = Math.min(calibratedConviction, 5);
+    calibratedConviction = Math.min(baseConviction, 5);
     statusClassification = 'NEUTRAL_HOLD';
     decisionExplanation = universal.reason || 'Holding position pending further evidence.';
   }
 
   return {
-    actionAuthorized,
+    actionAuthorized: authorized,
     finalAction,
     calibratedConviction,
     statusClassification,
     decisionExplanation,
     universalGate: universal,
-    thesisGate: thesis
+    thesisGate: thesis,
+    driverSummary: {
+      broken: drivers.broken.map(d => d.driver),
+      atRisk: drivers.atRisk.map(d => d.driver),
+      confirmed: drivers.confirmed.map(d => d.driver)
+    }
   };
 }

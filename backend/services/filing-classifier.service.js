@@ -762,19 +762,23 @@ export function classifyFilingForWorker({
     tLower.includes("newspaper advertisement");
 
   // 2. Transcript check: Always prioritized over audio!
+  // A call invitation / audio-link cover letter often says "the transcript will be uploaded on our website".
+  // Text-only transcript signals therefore need a full-length call document or a non-future-tense statement.
+  const transcriptTextSignal = (() => {
+    if (!/transcript/.test(textLower.slice(0, 6000))) return false;
+    if (docText.length >= 3500 && /moderator|question[\s-]+and[\s-]+answer|q\s*&\s*a session|management\s*:|operator\s*:/.test(textLower.slice(0, 20000))) return true;
+    const m = textLower.match(/transcript\s+(?:of|for)\s+(?:the\s+)?(?:earnings|conference|con\.?\s?call|concall|q[1-4]|investor|analyst)|earnings\s+call\s+transcript|concall\s+transcript/);
+    if (!m) return false;
+    const ctx = textLower.slice(Math.max(0, m.index - 140), m.index + m[0].length + 140);
+    return !/(?:will|shall|would|to)\s+be\s+(?:made\s+)?(?:available|uploaded|hosted|published|posted|shared)|available\s+on\s+(?:the\s+)?(?:company|our|website)|in\s+due\s+course|within\s+\d+\s+(?:working\s+)?days/.test(ctx);
+  })();
+
   const isTranscript =
     deepDiveStatus === "pending_stage2" ||
     tLower.includes("transcript") ||
     urlLower.includes("transcript") ||
     urlLower.includes("calltranscript") ||
-    combined.includes("transcript of the conference call") ||
-    combined.includes("transcript of the earnings call") ||
-    combined.includes("transcript of the concall") ||
-    combined.includes("transcript of conference call") ||
-    combined.includes("transcript of earnings call") ||
-    combined.includes("earnings call transcript") ||
-    combined.includes("concall transcript") ||
-    (textLower.slice(0, 3000).includes("transcript") && !tLower.includes("audio recording"));
+    transcriptTextSignal;
 
   // 3. Audio check:
   // Must NOT be a transcript. Must have indication of recording or media link.

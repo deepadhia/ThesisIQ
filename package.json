@@ -27,7 +27,9 @@
     "watchdog:daily:dryrun": "node --env-file=.env.local backend/scripts/run-daily-valuation-watchdog.js --dry-run",
     "watchdog:benchmark": "node --env-file=.env.local backend/scripts/run-production-benchmark-dry-run.js",
     "ranking": "node --env-file=.env.local backend/scripts/run-asymmetric-mispricing-ranking.js",
-    "onboard:stock": "node --env-file=.env.local backend/scripts/onboard-new-stock.js"
+    "onboard:stock": "node --env-file=.env.local backend/scripts/onboard-new-stock.js",
+    "lint:backend": "eslint -c eslint.backend.config.js backend scripts",
+    "test:heart": "vitest run --config vitest.config.ts backend/tests/worker-pipeline.test.js backend/tests/regression/heart-pipeline-invariants.test.js"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.10.0",

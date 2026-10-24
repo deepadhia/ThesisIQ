@@ -18,12 +18,19 @@ import {
   isConcallOrTranscript,
   getConcallType,
   recordScannerSuccess,
-  recordScannerFailure
+  recordScannerFailure,
+  isFuzzyDuplicateTitle,
+  isEarningsConcallInvite,
+  extractConcallSchedule,
+  findContentDuplicate,
+  getFilingAgeHours,
+  acquireScanLease,
+  releaseScanLease
 } from "../services/announcement.service.js";
 import { classifyAnnouncementWithNim } from "../services/nim.service.js";
 import { classifyFilingCategory, extractCorporateActionDetails, isRoutineCreditRatingReaffirmation } from "../services/filing-classifier.service.js";
 import { processPendingDeepDives } from "../workers/quarterly-deepdive-worker.js";
-import { sendAnnouncementAlert, sendRunSummary, sendTelegramMessage, buildBseDocumentUrl } from "../services/telegram.service.js";
+import { sendAnnouncementAlert, sendConcallScheduleAlert, sendRunSummary, sendTelegramMessage, buildBseDocumentUrl } from "../services/telegram.service.js";
 import { 
   evaluateAndDispatchDislocationAlerts,
   isDailyValuationWatchdogNeeded,
@@ -31,6 +38,7 @@ import {
 } from "../services/valuation-dislocation-watchdog.service.js";
 import { syncAllPortfolioValuations } from "../services/portfolio-market-valuation.service.js";
 import { pool } from "../db/pool.js";
+import { findThesisGaps } from "../services/thesis-driver-context.service.js";
 
 /**
  * Retry wrapper for flaky APIs.
@@ -52,7 +60,19 @@ async function withRetry(fn, label = "Operation", retries = 2) {
   throw lastErr;
 }
 
-const MAX_ALERTS_PER_RUN = 10;
+const MAX_ALERTS_PER_RUN = 25;
+
+// Filings older than this are archived silently unless they are earnings material (results / concall / deck),
+// so switching a feed on (or recovering from downtime) never floods Telegram with stale duplicates.
+const MAX_ALERT_AGE_HOURS = 72;
+const MAX_EARNINGS_AGE_HOURS = 24 * 10;
+// A material PDF that is not readable yet is retried each cycle, but never deferred forever.
+const MAX_PDF_DEFER_HOURS = 6;
+const EARNINGS_MATERIAL_RE = /result|outcome of board|transcript|con\.?\s?call|conference call|earnings|investor presentation|audio recording|analyst|presentation/i;
+
+// The daemon is restarted by PM2 cron every 5 minutes: stop starting new work well before that.
+const SCAN_PHASE_BUDGET_MS = 150 * 1000;
+const WORKER_DEADLINE_MS = 270 * 1000;
 
 /**
  * Weekly Heartbeat to confirm the system is alive.
@@ -72,6 +92,26 @@ export async function scan({ isDryRun = false, runUrl = null, targetTicker = nul
   writeLog("SCANNER", `🟢 Starting Corporate Announcement Scan... ${isDryRun ? "[DRY RUN]" : "[LIVE DAEMON]"}${forceReevaluate ? " [FORCE REEVALUATE]" : ""}`);
   const startTime = Date.now();
 
+  // Oracle PM2 and the GitHub Actions failover share one database: only one scan may run at a time,
+  // otherwise both alert for the same filing. (Dry runs / single-ticker debug runs never take the lease.)
+  const useLease = !isDryRun && !targetTicker;
+  let lease = null;
+  if (useLease) {
+    lease = await acquireScanLease();
+    if (!lease) {
+      writeLog("SCANNER", "⏭️ Another scan holds the lease. Skipping this run.");
+      return { stocksScanned: 0, newAnnouncements: 0, alertsSent: 0, bseErrors: 0, nseErrors: 0, durationMs: Date.now() - startTime, skipped: true };
+    }
+  }
+  try {
+    return await runScan({ isDryRun, runUrl, targetTicker, forceReevaluate, startTime });
+  } finally {
+    if (lease) await releaseScanLease(lease);
+  }
+}
+
+async function runScan({ isDryRun, runUrl, targetTicker, forceReevaluate, startTime }) {
+
   // 0. System Cleanup & Heartbeat
   await resetStuckPending();
   // 1. Get portfolio & watchlist stocks dynamically from DB
@@ -82,8 +122,15 @@ export async function scan({ isDryRun = false, runUrl = null, targetTicker = nul
     params.push(targetTicker.toUpperCase().trim());
   }
   query += " ORDER BY ticker";
-  const { rows: stocks } = await pool.query(query, params);
+  const { rows: allStocks } = await pool.query(query, params);
+  // Rotate the starting point every cycle so a time-limited run never starves the same tail of the list
+  const rotation = allStocks.length > 0 ? Math.floor(Date.now() / 300000) % allStocks.length : 0;
+  const stocks = targetTicker ? allStocks : [...allStocks.slice(rotation), ...allStocks.slice(0, rotation)];
   writeLog("SCANNER", `🔍 Monitoring ${stocks.length} stock(s) across NSE & BSE${targetTicker ? ` (Filtered: ${targetTicker})` : ''}`);
+  const thesisGaps = findThesisGaps(stocks);
+  if (thesisGaps.length > 0) {
+    writeLog("SCANNER", `⚠️ No usable thesis (placeholder text and no driver contract) for: ${thesisGaps.join(", ")}. Run backend/scripts/seed-stock-theses.js or add a contract.`);
+  }
 
   if (!targetTicker) {
     await sendHeartbeat(stocks.length);
@@ -96,6 +143,10 @@ export async function scan({ isDryRun = false, runUrl = null, targetTicker = nul
   let nseErrors         = 0;
 
   for (const stock of stocks) {
+    if (!targetTicker && Date.now() - startTime > SCAN_PHASE_BUDGET_MS) {
+      console.log(`[SCAN] Scan-phase time budget used. Remaining stocks continue next cycle (rotation keeps this fair).`);
+      break;
+    }
     try {
       console.log(`Checking ${stock.ticker} (BSE: ${stock.bse_scrip_code}, NSE: ${stock.nse_symbol})...`);
       
@@ -125,7 +176,7 @@ export async function scan({ isDryRun = false, runUrl = null, targetTicker = nul
       bseList.forEach(ann => {
         const title = ann.NEWSSUB;
         const timestamp = ann.DT_TM;
-        const hash = generateAnnouncementHash(stock.ticker, title, timestamp);
+        const hash = generateAnnouncementHash(stock.ticker, title, timestamp, ann.NEWS_ID);
         if (!mergedMap.has(hash)) {
           mergedMap.set(hash, { ...ann, hash, _source: "BSE" });
         }
@@ -133,7 +184,7 @@ export async function scan({ isDryRun = false, runUrl = null, targetTicker = nul
       nseList.forEach(ann => {
         const title = ann.NEWSSUB;
         const timestamp = ann.DT_TM;
-        const hash = generateAnnouncementHash(stock.ticker, title, timestamp);
+        const hash = generateAnnouncementHash(stock.ticker, title, timestamp, ann.NEWS_ID);
         if (!mergedMap.has(hash)) {
           mergedMap.set(hash, { ...ann, hash, _source: "NSE" });
         }
@@ -142,7 +193,14 @@ export async function scan({ isDryRun = false, runUrl = null, targetTicker = nul
       const uniqueAnnouncements = Array.from(mergedMap.values());
       console.log(`Merged to ${uniqueAnnouncements.length} unique announcements for ${stock.ticker}`);
 
+      // Newest filings first, so a time-limited run always handles the freshest results/concalls before older items
+      uniqueAnnouncements.sort((a, b) => new Date(b.DT_TM || 0) - new Date(a.DT_TM || 0));
+
       for (const ann of uniqueAnnouncements) {
+        if (!targetTicker && Date.now() - startTime > SCAN_PHASE_BUDGET_MS + 30000) {
+          console.log(`[SCAN] Time budget reached mid-stock; remaining filings for ${stock.ticker} continue next cycle.`);
+          break;
+        }
         const title    = ann.NEWSSUB;
         const hash     = ann.hash;
         const sourceId = ann.NEWS_ID;
@@ -166,23 +224,9 @@ export async function scan({ isDryRun = false, runUrl = null, targetTicker = nul
           }
 
           const GENERIC_TITLES = ["General Updates", "Updates", "Corporate Announcement", "Press Release"];
-          const isGenericTitle = GENERIC_TITLES.includes(title);
-
-          if (!isGenericTitle) {
-            // Use first 3 words for the fuzzy prefix (single-word is too broad for common words like "Award")
-            const prefixWords = title.split(' ').slice(0, 3).join(' ');
-            const fuzzyResult = await pool.query(
-              `SELECT id FROM corporate_announcements 
-               WHERE ticker = $1 
-               AND (title ILIKE $2 OR $3 ILIKE '%' || title || '%')
-               AND status = 'sent' 
-               AND processed_at > NOW() - interval '24 hours'`,
-              [ticker, `%${prefixWords}%`, title]
-            );
-            if (fuzzyResult.rows.length > 0) {
-              console.log(`[SKIP] Fuzzy duplicate detected for ${ticker}: ${title}`);
-              continue;
-            }
+          if (!GENERIC_TITLES.includes(title) && await isFuzzyDuplicateTitle(ticker, title)) {
+            console.log(`[SKIP] Fuzzy duplicate detected for ${ticker}: ${title}`);
+            continue;
           }
         }
 
@@ -194,8 +238,36 @@ export async function scan({ isDryRun = false, runUrl = null, targetTicker = nul
         let announcementText = title; // Default to title
         let docUrl = null;
 
-        if (annSource === "BSE" && newsId) {
-          docUrl = buildBseDocumentUrl(newsId, pdfFlag);
+        const ageHrs = getFilingAgeHours(timestamp);
+
+        // Archive stale non-earnings filings without spending AI time or sending alerts (feed backfill / downtime recovery)
+        if (!forceReevaluate && ageHrs > MAX_ALERT_AGE_HOURS && !EARNINGS_MATERIAL_RE.test(`${title} ${ann.attachment || ""}`)) {
+          if (!isDryRun) {
+            await saveAnnouncement({
+              stock_id: stock.id, ticker, source_id: sourceId, title_hash: hash, title, raw_text: title,
+              priority: "LOW", impact: "NEUTRAL", confidence: "LOW",
+              summary: `Archived without alert (filed ${Math.round(ageHrs)}h ago, beyond the ${MAX_ALERT_AGE_HOURS}h alert window).`,
+              status: "ignored", sent_to_telegram: false, is_earnings_release: false,
+              attachment_url: null, filing_date: timestamp
+            });
+          }
+          continue;
+        }
+        if (!forceReevaluate && ageHrs > MAX_EARNINGS_AGE_HOURS) {
+          if (!isDryRun) {
+            await saveAnnouncement({
+              stock_id: stock.id, ticker, source_id: sourceId, title_hash: hash, title, raw_text: title,
+              priority: "LOW", impact: "NEUTRAL", confidence: "LOW",
+              summary: `Archived without alert (filed ${Math.round(ageHrs / 24)}d ago).`,
+              status: "ignored", sent_to_telegram: false, is_earnings_release: false,
+              attachment_url: null, filing_date: timestamp
+            });
+          }
+          continue;
+        }
+
+        if (annSource === "BSE" && ann.ATTACHMENTNAME) {
+          docUrl = buildBseDocumentUrl(newsId, pdfFlag, ann.ATTACHMENTNAME);
         } else if (annSource === "NSE" && ann.attachment) {
           // NSE API usually provides a direct attachment path
           docUrl = ann.attachment.startsWith('http') ? ann.attachment : `https://nsearchives.nseindia.com/corporate/${ann.attachment}`;
@@ -205,6 +277,24 @@ export async function scan({ isDryRun = false, runUrl = null, targetTicker = nul
         if (docUrl) {
           console.log(`[PDF] Extracting text from: ${docUrl}`);
           extractedText = await extractTextFromPdfUrl(docUrl);
+        }
+
+        // The same PDF is published on NSE and BSE under different ids/titles: analyse and alert it once.
+        if (!forceReevaluate && extractedText && extractedText.length >= 1200) {
+          const dup = await findContentDuplicate(ticker, extractedText);
+          if (dup) {
+            console.log(`[SKIP CONTENT-DUP] ${ticker} "${title}" is the same document as "${dup.title}" already processed.`);
+            if (!isDryRun) {
+              await saveAnnouncement({
+                stock_id: stock.id, ticker, source_id: sourceId, title_hash: hash, title, raw_text: title,
+                priority: "LOW", impact: "NEUTRAL", confidence: "LOW",
+                summary: `Duplicate of an already processed filing (${dup.title}).`,
+                status: "ignored", sent_to_telegram: false, is_earnings_release: false,
+                attachment_url: docUrl, filing_date: timestamp
+              });
+            }
+            continue;
+          }
         }
 
         const isMaterialActionText = 
@@ -241,7 +331,7 @@ export async function scan({ isDryRun = false, runUrl = null, targetTicker = nul
         if (extractedText && extractedText.trim().length > 50) {
           announcementText = `TITLE: ${title}\n\nCONTENT:\n${extractedText}`;
           console.log(`[PDF] Successfully extracted ${extractedText.length} chars.`);
-        } else if (docUrl && isMaterialActionText && (!extractedText || extractedText.trim().length <= 50)) {
+        } else if (docUrl && isMaterialActionText && (!extractedText || extractedText.trim().length <= 50) && ageHrs < MAX_PDF_DEFER_HOURS) {
           console.log(`[PDF DEFER] Material corporate action PDF not replicated yet on CDN (${ticker} - ${title}). Deferring to next scan cycle for full extraction.`);
           continue;
         } else if (ann.attachment_text) {
@@ -257,7 +347,7 @@ export async function scan({ isDryRun = false, runUrl = null, targetTicker = nul
         // 6. NVIDIA NIM AI Classify (Stage 2) with Retry
         let aiResult;
         try {
-          aiResult = await withRetry(() => classifyAnnouncementWithNim(ticker, announcementText, title, stock.investment_thesis), "AI Classification");
+          aiResult = await withRetry(() => classifyAnnouncementWithNim(ticker, announcementText, title, stock.investment_thesis), "AI Classification", 0);
         } catch (err) {
           console.error(`AI Classification permanently failed for ${ticker}:`, err.message);
           // Save as 'failed' to skip re-download on next runs; will still be retried
@@ -320,7 +410,14 @@ export async function scan({ isDryRun = false, runUrl = null, targetTicker = nul
         // Determine deep_dive_status queue state for Quarterly Engine
         let deepDiveStatus = "not_required";
         const concallType = getConcallType(title, announcementText, ann.attachment || docUrl);
-        const isExcludedFromEarnings = NEVER_EARNINGS_TITLES.some(p => titleLower.includes(p)) || filingCategory === "ROUTINE_COMPLIANCE";
+        // "Outcome of Board Meeting - Financial Results ... and AGM date" must not be excluded just because it mentions an AGM:
+        // generic meeting words only exclude when the title is NOT a results/presentation/transcript title and not an intimation.
+        const titleHasResultSignal = /financial\s+results?|un-?audited|audited\s+financial|quarterly\s+results?|transcript|investor\s+presentation|earnings\s+presentation/.test(titleLower);
+        const titleIsIntimation = /intimation|prior\s+intimation|schedule\s+of|notice\s+of|trading\s+window|closure\s+of|invite|invitation/.test(titleLower);
+        const EXCLUSION_OVERRIDABLE = new Set(["agm", "egm", "general meeting", "shareholders meeting", "voting results", "xbrl", "investor meet"]);
+        const isExcludedFromEarnings =
+          NEVER_EARNINGS_TITLES.some(p => titleLower.includes(p) && !(EXCLUSION_OVERRIDABLE.has(p) && titleHasResultSignal && !titleIsIntimation)) ||
+          filingCategory === "ROUTINE_COMPLIANCE";
         if (concallType === "audio") {
           deepDiveStatus = "pending_audio";
         } else if (concallType === "transcript") {
@@ -336,6 +433,7 @@ export async function scan({ isDryRun = false, runUrl = null, targetTicker = nul
 
         // 7. Alert ONLY if non-earnings routine/regulatory event (Earnings Results & Concalls/Audio are deferred to Quarterly Deep-Dive Worker for verified full-page/audio audit)
         let sentToTelegram = false;
+        let telegramFailed = false;
         const isRegulatoryOrCredit = ["REGULATORY_ACTION", "CREDIT_EVENT"].includes(filingCategory);
         
         // 7a. Clerical Corrigendums & Erratas Gate (Clerical amendments to meeting notices, agendas, disclosures)
@@ -488,7 +586,15 @@ export async function scan({ isDryRun = false, runUrl = null, targetTicker = nul
           String(aiResult?.impact || "").includes("NEUTRAL")
         );
 
-        const shouldHaveAlerted = !isQueuedForDeepDive && 
+        // Earnings-call invitations are filed as routine "Con. Call Updates"; the user still wants the date/time heads-up.
+        const concallSchedule = (concallType === "scheduled" && !isMeetingFiling && isEarningsConcallInvite(title, announcementText))
+          ? extractConcallSchedule(`${title}\n${announcementText}`, { date: aiResult.concall_date, time: aiResult.concall_time })
+          : null;
+        const isConcallScheduleAlert = Boolean(concallSchedule) && ageHrs <= MAX_ALERT_AGE_HOURS &&
+          // an invitation whose date is known and already past is stale news
+          !(concallSchedule.date === null && /held\s+on|was\s+held|concluded/i.test(announcementText.slice(0, 1500)));
+
+        const shouldHaveAlerted = isConcallScheduleAlert || ageHrs <= MAX_ALERT_AGE_HOURS && !isQueuedForDeepDive && 
           !isUnparsedZipFallback && 
           !isMeetingFiling && 
           !isRoutineCreditReaffirmation && 
@@ -501,7 +607,8 @@ export async function scan({ isDryRun = false, runUrl = null, targetTicker = nul
         // 7a. Event-level Deduplication Guard (Check if alert sent recently for same ticker & event identity)
         let isDuplicateEvent = false;
         if (shouldHaveAlerted && !forceReevaluate) {
-          isDuplicateEvent = await isEventAlertRecentlySent({
+          // A rescheduled call must go out even though the original invitation was alerted
+          isDuplicateEvent = !(isConcallScheduleAlert && aiResult.is_rescheduled) && await isEventAlertRecentlySent({
             ticker,
             title,
             summary: aiResult.summary,
@@ -524,7 +631,17 @@ export async function scan({ isDryRun = false, runUrl = null, targetTicker = nul
             console.log(`[DRY RUN] Would send alert for ${ticker}: ${title}`);
           } else {
             try {
-              await withRetry(() => sendAnnouncementAlert({
+              const sendResult = isConcallScheduleAlert
+                ? await withRetry(() => sendConcallScheduleAlert({
+                    ticker,
+                    companyName: stock.company_name,
+                    schedule: concallSchedule,
+                    isRescheduled: Boolean(aiResult.is_rescheduled),
+                    docUrl,
+                    summary: aiResult.summary,
+                    resultDate: aiResult.result_date || extractResultDateFromText(announcementText)
+                  }), "Concall Schedule Alert")
+                : await withRetry(() => sendAnnouncementAlert({
                 ticker,
                 companyName: stock.company_name,
                 title,
@@ -561,9 +678,16 @@ export async function scan({ isDryRun = false, runUrl = null, targetTicker = nul
                 has_substantive_business_insights: aiResult.has_substantive_business_insights,
                 eventAnalysis
               }), "Telegram Alert");
-              sentToTelegram = true;
-              alertsSent++;
+              // sendAnnouncementAlert returns false when its own gate suppressed the alert (AGM / corrigendum / routine);
+              // that must not be recorded as "sent".
+              if (sendResult) {
+                sentToTelegram = true;
+                alertsSent++;
+              } else {
+                console.log(`[SUPPRESSED] Sender gate suppressed alert for ${ticker}: ${title}`);
+              }
             } catch (err) {
+              telegramFailed = true;
               console.error(`Telegram alert permanently failed for ${ticker}:`, err.message);
             }
           }
@@ -574,9 +698,12 @@ export async function scan({ isDryRun = false, runUrl = null, targetTicker = nul
           continue;
         }
 
+        // A delivery failure must be retried next scan ('failed' rows are re-evaluated), never archived as 'ignored'.
         const dbStatus = sentToTelegram
           ? "sent"
-          : (shouldHaveAlerted && !isDuplicateEvent && alertsSent >= MAX_ALERTS_PER_RUN ? "pending" : "ignored");
+          : (telegramFailed && ageHrs <= MAX_ALERT_AGE_HOURS
+              ? "failed"
+              : (shouldHaveAlerted && !isDuplicateEvent && alertsSent >= MAX_ALERTS_PER_RUN ? "pending" : "ignored"));
 
         await saveAnnouncement({
           stock_id: stock.id,
@@ -647,11 +774,18 @@ export async function scan({ isDryRun = false, runUrl = null, targetTicker = nul
 
   console.log("Scan complete.");
 
-  // Trigger queued quarterly deep-dives
+  // Trigger queued quarterly deep-dives (results / presentations / concalls). The worker is deadline-aware: it never starts
+  // new filings after the budget, sends each alert BEFORE slow optional work, and parks undeliverable alerts for retry.
   try {
     if (!isDryRun) {
       console.log("[SCAN] Triggering queued quarterly deep-dives...");
-      await processPendingDeepDives();
+      const workerDeadline = startTime + WORKER_DEADLINE_MS;
+      for (let round = 0; round < 6; round++) {
+        if (Date.now() > workerDeadline) break;
+        const r = await processPendingDeepDives({ deadlineAt: workerDeadline });
+        // Keep draining only while the queue is deep and nothing is failing (failures retry next cycle)
+        if (!r || !r.found || r.found < 4 || r.failed > 0 || r.processed === 0) break;
+      }
     }
   } catch (err) {
     console.error("[SCAN WARN] Deep-dive worker execution failed:", err.message);

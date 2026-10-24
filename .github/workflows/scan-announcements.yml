@@ -54,6 +54,7 @@ jobs:
           DATABASE_URL:        ${{ secrets.DATABASE_URL }}
           JWT_SECRET:          ${{ secrets.JWT_SECRET }}
           NVIDIA_API_KEY:      ${{ secrets.NVIDIA_API_KEY }}
+          GEMINI_API_KEY:      ${{ secrets.GEMINI_API_KEY }}   # scanned-PDF OCR + concall audio
           TELEGRAM_BOT_TOKEN:  ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID:    ${{ secrets.TELEGRAM_CHAT_ID }}
           # Pass through Actions context for richer Telegram messages
