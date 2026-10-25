@@ -281,8 +281,8 @@ async function runDeepDiveQueue(stock, dryRun) {
     const pendingCount = parseInt(pending[0].cnt, 10);
     if (pendingCount === 0) break;
 
-    console.log(`   [Deep-Dive Batch ${batchNum}] ${pendingCount} filings pending...`);
-    const result = await processPendingDeepDives({ suppressTelegram: true, batchSize: 2 });
+    console.log(`   [Deep-Dive Batch ${batchNum}] ${pendingCount} filings pending for ${stock.ticker}...`);
+    const result = await processPendingDeepDives({ tickers: [stock.ticker], suppressTelegram: true, batchSize: 2 });
     totalProcessed += result?.processed ?? 0;
     batchNum++;
   }
