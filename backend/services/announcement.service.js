@@ -1590,7 +1590,7 @@ export async function extractTextFromPdfUrl(url) {
 
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 30000); // 30s timeout for PDF download
+    const timeoutId = setTimeout(() => controller.abort(), 60000); // 60s timeout for PDF download (presentations can be 10MB+)
 
     try {
       if (attempt > 1) {
