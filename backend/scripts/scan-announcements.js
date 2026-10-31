@@ -15,6 +15,7 @@ import {
   markHeartbeatSent,
   extractTextFromPdfUrl,
   extractResultDateFromText,
+  sanitizeResultDate,
   isConcallOrTranscript,
   getConcallType,
   recordScannerSuccess,
@@ -25,10 +26,12 @@ import {
   findContentDuplicate,
   getFilingAgeHours,
   acquireScanLease,
-  releaseScanLease
+  releaseScanLease,
+  recordClassificationFailure
 } from "../services/announcement.service.js";
+import { CLASSIFICATION_ALERT_AFTER_FAILURES, buildClassificationStuckMessage } from "../services/retry-policy.service.js";
 import { classifyAnnouncementWithNim } from "../services/nim.service.js";
-import { classifyFilingCategory, extractCorporateActionDetails, isRoutineCreditRatingReaffirmation } from "../services/filing-classifier.service.js";
+import { classifyFilingCategory, extractCorporateActionDetails, isRoutineCreditRatingReaffirmation, isNewspaperPublicationFiling } from "../services/filing-classifier.service.js";
 import { processPendingDeepDives } from "../workers/quarterly-deepdive-worker.js";
 import { sendAnnouncementAlert, sendConcallScheduleAlert, sendRunSummary, sendTelegramMessage, buildBseDocumentUrl } from "../services/telegram.service.js";
 import { 
@@ -39,6 +42,8 @@ import {
 import { syncAllPortfolioValuations } from "../services/portfolio-market-valuation.service.js";
 import { pool } from "../db/pool.js";
 import { findThesisGaps } from "../services/thesis-driver-context.service.js";
+import { getConfiguredProviders, initModelRegistry, settleModelRegistry, markModelsDirty } from "../services/llm.service.js";
+import { reportLlmHealth, dbStore } from "../services/llm-health.service.js";
 
 /**
  * Retry wrapper for flaky APIs.
@@ -111,6 +116,16 @@ export async function scan({ isDryRun = false, runUrl = null, targetTicker = nul
 }
 
 async function runScan({ isDryRun, runUrl, targetTicker, forceReevaluate, startTime }) {
+
+  // The AI models are discovered, not hard-coded: load the cached list now (fast) and refresh it in the background when it
+  // is stale, so a retired model or a newer better one never needs a code change. Dry runs read nothing and write nothing.
+  if (!isDryRun) {
+    try {
+      await initModelRegistry({ store: dbStore(pool) });
+    } catch (err) {
+      console.warn("[MODELS WARN] Could not initialise the model registry; using the built-in seed models:", err.message);
+    }
+  }
 
   // 0. System Cleanup & Heartbeat
   await resetStuckPending();
@@ -344,7 +359,7 @@ async function runScan({ isDryRun, runUrl, targetTicker, forceReevaluate, startT
           announcementText = `TITLE: ${title}\n\nCONTENT:\n[NO FILING TEXT AVAILABLE: Pure title intimation only.]`;
         }
 
-        // 6. NVIDIA NIM AI Classify (Stage 2) with Retry
+        // 6. AI Classify (Stage 2) via the shared LLM failover chain
         let aiResult;
         try {
           aiResult = await withRetry(() => classifyAnnouncementWithNim(ticker, announcementText, title, stock.investment_thesis), "AI Classification", 0);
@@ -369,6 +384,16 @@ async function runScan({ isDryRun, runUrl, targetTicker, forceReevaluate, startT
             attachment_url: docUrl,
             filing_date: timestamp
           });
+          // Back off instead of re-running the whole chain every cycle, and tell the user once if it keeps failing.
+          try {
+            const failure = await recordClassificationFailure(ticker, sourceId, hash);
+            console.warn(`[RETRY] ${ticker}: classification failure #${failure.failures}; next try after ${failure.nextRetryAt ? failure.nextRetryAt.toISOString() : "the next cycle"}.`);
+            if (failure.failures === CLASSIFICATION_ALERT_AFTER_FAILURES && !isDryRun) {
+              await sendTelegramMessage(buildClassificationStuckMessage({ ticker, title, failures: failure.failures, docUrl }));
+            }
+          } catch (retryErr) {
+            console.warn(`[RETRY WARN] Could not record the classification failure for ${ticker}:`, retryErr.message);
+          }
           continue;
         }
 
@@ -594,8 +619,15 @@ async function runScan({ isDryRun, runUrl, targetTicker, forceReevaluate, startT
           // an invitation whose date is known and already past is stale news
           !(concallSchedule.date === null && /held\s+on|was\s+held|concluded/i.test(announcementText.slice(0, 1500)));
 
-        const shouldHaveAlerted = isConcallScheduleAlert || ageHrs <= MAX_ALERT_AGE_HOURS && !isQueuedForDeepDive && 
-          !isUnparsedZipFallback && 
+        // A newspaper clipping repeats results that are analysed from the full filing; alone it is a thin, number-free alert.
+        const isNewspaperClipping = isNewspaperPublicationFiling(title, ann.attachment || docUrl);
+        if (isNewspaperClipping) {
+          console.log(`[SKIP NEWSPAPER] Statutory newspaper publication for ${ticker} is not alerted on its own: ${title}`);
+        }
+
+        const shouldHaveAlerted = isConcallScheduleAlert || ageHrs <= MAX_ALERT_AGE_HOURS && !isQueuedForDeepDive &&
+          !isNewspaperClipping &&
+          !isUnparsedZipFallback &&
           !isMeetingFiling && 
           !isRoutineCreditReaffirmation && 
           !isSuppressedCorrigendum && (
@@ -639,7 +671,7 @@ async function runScan({ isDryRun, runUrl, targetTicker, forceReevaluate, startT
                     isRescheduled: Boolean(aiResult.is_rescheduled),
                     docUrl,
                     summary: aiResult.summary,
-                    resultDate: aiResult.result_date || extractResultDateFromText(announcementText)
+                    resultDate: sanitizeResultDate(aiResult.result_date, timestamp) || sanitizeResultDate(extractResultDateFromText(announcementText), timestamp)
                   }), "Concall Schedule Alert")
                 : await withRetry(() => sendAnnouncementAlert({
                 ticker,
@@ -791,6 +823,14 @@ async function runScan({ isDryRun, runUrl, targetTicker, forceReevaluate, startT
     console.error("[SCAN WARN] Deep-dive worker execution failed:", err.message);
   }
 
+  // ── AI health guard: tell the user when the LLM chain is down / a provider is retired (never throws) ──
+  if (!isDryRun && !targetTicker) {
+    // let a running model refresh finish and persist before the process exits (the daemon restarts every 5 minutes)
+    await settleModelRegistry(60000);
+    await reportLlmHealth({ store: dbStore(pool), send: sendTelegramMessage, providers: getConfiguredProviders(), onBroken: markModelsDirty });
+    await settleModelRegistry(60000);
+  }
+
   // ── End-of-run summary to Telegram ───────────────────────────────────────
   const durationMs = Date.now() - startTime;
   try {
@@ -818,8 +858,13 @@ async function runScan({ isDryRun, runUrl, targetTicker, forceReevaluate, startT
       } catch (syncErr) {
         console.warn("[SCAN WARN] Midday market price sync before watchdog encountered an issue:", syncErr.message);
       }
-      await evaluateAndDispatchDislocationAlerts({ pool, isDryRun: false });
-      await markDailyValuationWatchdogExecuted(pool);
+      const watchdog = await evaluateAndDispatchDislocationAlerts({ pool, isDryRun: false });
+      if (watchdog?.alertsFailed) {
+        // A delivery failure leaves the day unmarked so the next scan cycle retries (failed rows do not start a cooldown).
+        console.warn(`[SCAN WARN] Valuation alert delivery failed for ${watchdog.failedTickers.join(", ")}; will retry next cycle.`);
+      } else {
+        await markDailyValuationWatchdogExecuted(pool);
+      }
     }
   } catch (err) {
     console.error("[SCAN WARN] Market-hours valuation watchdog failed:", err.message);

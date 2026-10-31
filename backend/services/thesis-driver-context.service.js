@@ -1,7 +1,7 @@
 /**
  * Thesis Driver Context Service
  *
- * Turns each stock's driver-level thesis contract (reports/thesis_board/driver-level-thesis-contracts.json)
+ * Turns each stock's driver-level thesis contract (backend/config/thesis-contracts/driver-level-thesis-contracts.json)
  * into (a) a prompt block telling the analysis exactly which thesis drivers to verify against a new
  * result / presentation / concall, (b) a sanitised per-driver assessment, and (c) a Telegram section.
  *
@@ -10,25 +10,21 @@
  */
 
 import fs from "fs";
-import path from "path";
-import { fileURLToPath } from "url";
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
+import { findThesisContractFile } from "../utils/thesis-contract-files.js";
 
 let cachedContracts = null;
 
 export function loadThesisContracts() {
   if (cachedContracts) return cachedContracts;
   const map = new Map();
-  const readInto = (fileName, { override }) => {
+  const readInto = (fileName, { override, required = false }) => {
     try {
-      const candidatePaths = [
-        path.resolve(process.cwd(), `reports/thesis_board/${fileName}`),
-        path.resolve(process.cwd(), `../reports/thesis_board/${fileName}`),
-        path.resolve(__dirname, `../../reports/thesis_board/${fileName}`)
-      ];
-      const contractsPath = candidatePaths.find(p => fs.existsSync(p));
-      if (!contractsPath) return;
+      const contractsPath = findThesisContractFile(fileName);
+      if (!contractsPath) {
+        // Not silent any more: without this file no stock has a driver board and every digest says "no driver evidence".
+        if (required) console.warn(`[THESIS DRIVERS] ${fileName} not found (expected in backend/config/thesis-contracts/). No stock will have thesis drivers.`);
+        return;
+      }
       const parsed = JSON.parse(fs.readFileSync(contractsPath, "utf8"));
       const list = parsed.contracts || parsed || [];
       for (const c of list) {
@@ -40,7 +36,7 @@ export function loadThesisContracts() {
       console.warn(`[THESIS DRIVERS] Could not load ${fileName}:`, err.message);
     }
   };
-  readInto("driver-level-thesis-contracts.json", { override: true });
+  readInto("driver-level-thesis-contracts.json", { override: true, required: true });
   readInto("supplementary-thesis-contracts.json", { override: false });
   cachedContracts = map;
   return map;

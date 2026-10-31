@@ -229,6 +229,40 @@ describeFn('Guidance vs Actual Delivery Invariants', () => {
     expectFn(rec5).toBeNull();
   });
 
+  testFn('A target years away (FY30) is never shown as "full-year pacing" against one quarter (a real alert printed "60% YoY (FY30 Target)")', () => {
+    const farFuture = [
+      {
+        statement: "Management guides 60% YoY revenue growth for the full year FY30.",
+        metric: "Revenue Growth",
+        target_value: "60%",
+        timeline: "FY30",
+        quarter: "Q4 FY26"
+      }
+    ];
+    const rec = reconcileGuidanceVsActual({
+      commitments: farFuture,
+      currentQuarter: "Q2 FY27",
+      currentFinancials: { revenue: 1427, revenueYoYGrowthPct: 37.84 }
+    });
+    expectFn(rec === null || rec.annual === null || rec.annual === undefined).toBe(true);
+  });
+
+  testFn('A single-point growth target prints as one number, never as a range like "30–30%"', () => {
+    const rec = reconcileGuidanceVsActual({
+      commitments: [{
+        statement: "We expect 30% YoY revenue growth for FY27.",
+        metric: "Revenue Growth FY27",
+        target_value: "30%",
+        timeline: "FY27",
+        quarter: "Q4 FY26"
+      }],
+      currentQuarter: "Q2 FY27",
+      currentFinancials: { revenue: 1427, revenueYoYGrowthPct: 20 }
+    });
+    expectFn(rec).not.toBeNull();
+    expectFn(rec.formattedSection).not.toMatch(/(\d+(?:\.\d+)?)–\1%/);
+  });
+
   testFn('Active annual guidance for the current fiscal year (FY27) given in Q4 FY26 matches and calculates pacing', () => {
     const activeCommitment = [
       {

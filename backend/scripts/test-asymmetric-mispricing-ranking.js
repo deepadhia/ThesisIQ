@@ -19,6 +19,14 @@ import { evaluateEquityMispricing, rankUniverseByMispricing, MISPRICING_OPPORTUN
 let totalTests = 0;
 let passedTests = 0;
 
+// Remember each fixture's INPUT so the ranking test ranks real inputs (evaluation results are not valid inputs).
+const evaluatedInputs = new Map();
+function evaluate(input) {
+  const result = evaluateEquityMispricing(input);
+  evaluatedInputs.set(result.ticker, input);
+  return result;
+}
+
 function assert(condition, message) {
   totalTests++;
   if (!condition) {
@@ -38,7 +46,7 @@ console.log('===================================================================
 // Test 1: Reverse-DCF Sensitivity & Thesis Robustness
 // -------------------------------------------------------------------------
 console.log('--- 1. Testing Reverse-DCF Sensitivity & Robustness Classification ---');
-const resilientStock = evaluateEquityMispricing({
+const resilientStock = evaluate({
   ticker: 'HBLENGINE',
   companyName: 'HBL Power Systems',
   thesisHealth: 'STRENGTHENING',
@@ -66,7 +74,7 @@ assert(resilientStock.mispricingScore >= 80.0, 'Composite score is >= 80.0');
 // Test 2: High Multiple Sensitive Compounder
 // -------------------------------------------------------------------------
 console.log('\n--- 2. Testing High Multiple Sensitive Compounder ---');
-const highMultipleStock = evaluateEquityMispricing({
+const highMultipleStock = evaluate({
   ticker: 'LUMAXTECH',
   companyName: 'Lumax Auto Technologies',
   thesisHealth: 'STRENGTHENING',
@@ -93,7 +101,7 @@ assert(highMultipleStock.opportunityTier === MISPRICING_OPPORTUNITY_TIER.COMPOUN
 // Test 3: Structural Value Trap & Weakening Thesis Gate
 // -------------------------------------------------------------------------
 console.log('\n--- 3. Testing Structural Value Trap & Weakening Hard Gate ---');
-const weakeningStock = evaluateEquityMispricing({
+const weakeningStock = evaluate({
   ticker: 'SHAKTIPUMP',
   companyName: 'Shakti Pumps',
   thesisHealth: 'WEAKENING',
@@ -117,7 +125,7 @@ assert(weakeningStock.opportunityTier === MISPRICING_OPPORTUNITY_TIER.STRUCTURAL
 // Test 4: Extreme Valuation Trim Candidate
 // -------------------------------------------------------------------------
 console.log('\n--- 4. Testing Extreme Valuation Overvalued Compounder ---');
-const extremeStock = evaluateEquityMispricing({
+const extremeStock = evaluate({
   ticker: 'JYOTICNC',
   companyName: 'Jyoti CNC Automation',
   thesisHealth: 'STRENGTHENING',
@@ -141,7 +149,7 @@ assert(extremeStock.opportunityTier === MISPRICING_OPPORTUNITY_TIER.OVERVALUED_C
 // Test 5: Watchlist Friction on UNDER_PRESSURE
 // -------------------------------------------------------------------------
 console.log('\n--- 5. Testing Watchlist Friction on UNDER_PRESSURE ---');
-const frictionStock = evaluateEquityMispricing({
+const frictionStock = evaluate({
   ticker: 'ELECON',
   companyName: 'Elecon Engineering',
   thesisHealth: 'UNDER_PRESSURE',
@@ -165,7 +173,9 @@ assert(frictionStock.opportunityTier === MISPRICING_OPPORTUNITY_TIER.WATCHLIST_F
 // Test 6: Deterministic Universe Ranking & Tier Partitioning
 // -------------------------------------------------------------------------
 console.log('\n--- 6. Testing Deterministic Universe Ranking ---');
-const ranked = rankUniverseByMispricing([weakeningStock, extremeStock, resilientStock, frictionStock, highMultipleStock]);
+const ranked = rankUniverseByMispricing(
+  [weakeningStock, extremeStock, resilientStock, frictionStock, highMultipleStock].map((r) => evaluatedInputs.get(r.ticker))
+);
 
 assert(ranked[0].ticker === 'HBLENGINE', 'Rank #1 is TOP_CONVICTION_DISLOCATION (HBLENGINE)');
 assert(ranked[1].ticker === 'LUMAXTECH', 'Rank #2 is COMPOUNDING_AT_FAIR_PRICE (LUMAXTECH)');

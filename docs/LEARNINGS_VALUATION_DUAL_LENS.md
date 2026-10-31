@@ -1,5 +1,7 @@
 # Architectural & Analytical Learnings: Dual-Lens Valuation Architecture
 
+> **Superseded numbers (2026-10-31).** The case-study figures below (e.g. CCL 33.4x → 16.0% implied growth) came from an earlier simple model that treated 100% of earnings as cash flow. The engine now uses one shared FCFF model (11.5% WACC, reinvestment = growth / return on capital, uncapped) for both the reverse DCF and the fair value, so implied-growth numbers are higher and "unreachable" is a possible answer. Read the formulas in section 2A as history; the current model is `fcffValuePerEps` in `backend/services/asymmetric-mispricing-ranking.service.js`.
+
 **Author**: Antigravity Engineering & Investment Research  
 **Scope**: Institutional Framework for Valuation Regime Shifts, Reverse-DCF Expectation Gaps, and Sensitivity Stress-Testing  
 **Target Repository**: `multibagger-live`  

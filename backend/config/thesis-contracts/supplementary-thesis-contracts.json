@@ -1,0 +1,58 @@
+{
+  "note": "Supplementary driver-level thesis contracts for stocks missing from driver-level-thesis-contracts.json. Loaded by thesis-driver-context.service.js (never overrides the main file). Entries marked provisional were derived only from facts already in this repo and need analyst review.",
+  "contracts": [
+    {
+      "ticker": "MOREPENLAB",
+      "companyName": "Morepen Laboratories",
+      "provisional": true,
+      "provisionalBasis": "Stored investment thesis (₹825 Cr CDMO mandate), portfolio_capacity_engines seed (Baddi USFDA API expansion, glucometer/BP-monitor capacity), hurdle table (EBITDA margin ≥10%) and the CFO/PAT + revenue-growth falsification trigger in ASYMMETRIC_MISPRICING_RANKING_18_STOCKS.md.",
+      "thesisTitle": "API-to-CDMO Transition with Medical Devices Capacity Ramp (Baddi USFDA expansion)",
+      "drivers": [
+        {
+          "name": "Baddi USFDA API Capacity Ramp & US/EU Export Approvals",
+          "category": "Capacity Commissioning",
+          "mustBeTrue": "US/EU API export filing approvals convert into commercial dispatches, lifting the ~₹1,900 Cr revenue run-rate toward ₹3,200 Cr full-capacity revenue.",
+          "currentEvidence": "Baseline from the capacity engine: QIP-funded capex tranche achieved; export approvals/commercial dispatch tranche still PENDING. No filing-verified update yet.",
+          "sourceAnchor": "Capacity engine seed (Baddi USFDA API Expansion); company filings to confirm",
+          "direction": "STABLE",
+          "materiality": "HIGH",
+          "confidence": "LOW",
+          "falsificationTrigger": "US/EU export approvals stall or Baddi commissioning slips beyond Q3 FY27 without dispatches."
+        },
+        {
+          "name": "CDMO Multi-Year Supply Mandate Execution (₹825 Cr)",
+          "category": "Contracted Order Book",
+          "mustBeTrue": "Dispatches under the landmark ₹825 Cr multi-year supply mandate scale quarter-on-quarter, driving operating leverage.",
+          "currentEvidence": "Mandate disclosed in the stored thesis; execution run-rate not yet verified from quarterly filings.",
+          "sourceAnchor": "Stored investment thesis; concall / presentation to confirm",
+          "direction": "STABLE",
+          "materiality": "HIGH",
+          "confidence": "LOW",
+          "falsificationTrigger": "Mandate dispatches deferred or scaled back, or consolidated revenue YoY growth decelerates below 10%."
+        },
+        {
+          "name": "Medical Devices & Diagnostics Franchise (glucometers / BP monitors)",
+          "category": "Product Franchise",
+          "mustBeTrue": "Market leadership in point-of-care devices holds and the doubled plant capacity converts into billing at healthy margins.",
+          "currentEvidence": "Capacity-doubling tranche marked ACHIEVED in the capacity engine; demand conversion not yet verified.",
+          "sourceAnchor": "Capacity engine seed (Diagnostic Point-of-Care Devices)",
+          "direction": "STABLE",
+          "materiality": "MEDIUM",
+          "confidence": "LOW",
+          "falsificationTrigger": "Device segment revenue growth stalls or segment margins compress materially YoY."
+        },
+        {
+          "name": "Earnings Quality & Cash Conversion",
+          "category": "Financial Quality",
+          "mustBeTrue": "Growth is cash-backed: CFO/PAT stays at or above 0.50 while EBITDA margin holds at or above 10% on the path to the 16% normalised margin.",
+          "currentEvidence": "Ranking dossier flags FCFF negative during growth; valuation is priced for perfection (high hurdle).",
+          "sourceAnchor": "Asymmetric mispricing ranking dossier",
+          "direction": "STABLE",
+          "materiality": "HIGH",
+          "confidence": "MODERATE",
+          "falsificationTrigger": "CFO/PAT drops below 0.50 for 2 consecutive quarters OR EBITDA margin falls below 10%."
+        }
+      ]
+    }
+  ]
+}

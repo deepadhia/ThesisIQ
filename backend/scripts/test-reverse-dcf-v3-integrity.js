@@ -41,6 +41,14 @@ import {
 let totalTests = 0;
 let passedTests = 0;
 
+// Remember each fixture's INPUT so the ranking test ranks real inputs (evaluation results are not valid inputs).
+const evaluatedInputs = new Map();
+function evaluate(input) {
+  const result = evaluateEquityMispricing(input);
+  evaluatedInputs.set(result.ticker, input);
+  return result;
+}
+
 function assert(condition, message) {
   totalTests++;
   if (!condition) {
@@ -365,7 +373,7 @@ console.log('\n--- 8. Testing Layer 8: Strict Deterministic Decision Engine ---'
 // At ₹762: Asymmetry = 0.79:1 (downside > upside), 3Y-Asym = 3.97:1 (via compounding), MoS = 27.1%.
 // RULE: Leg A fails (asymmetry 0.79 < 1.0 floor). Leg B fails (price > BB, asym < 2.0, 3Y-asym >= 3.0 BUT asym < 1.0).
 // MUST be COMPOUNDING_AT_FAIR_PRICE (Core Hold) — NOT accumulate signal.
-const hblEvaluated = evaluateEquityMispricing({
+const hblEvaluated = evaluate({
   ticker: 'HBLENGINE',
   companyName: 'HBL Power Systems',
   sector: 'Defence & Railways',
@@ -384,7 +392,7 @@ assert(hblEvaluated.opportunityTier === MISPRICING_OPPORTUNITY_TIER.COMPOUNDING_
   `HBL at CMP ₹762 (Asymmetry +${hblEvaluated.thesisIqScorecard.asymmetryRatio}:1 — below 1.0 floor; 3Y-Asym +${hblEvaluated.thesisIqScorecard.asymmetry3YrRatio}:1 gated out as point-in-time asymmetry inverted) is correctly COMPOUNDING_AT_FAIR_PRICE (Core Hold), NOT an accumulate signal.`);
 
 // Case B: Transrail Case: Separates Valuation Conviction (DEEP_DISLOCATION) from Investability (UNDER_REVALIDATION)
-const transrailEvaluated = evaluateEquityMispricing({
+const transrailEvaluated = evaluate({
   ticker: 'TRANSRAILL',
   companyName: 'Transrail Lighting',
   sector: 'Infra & Power EPC',
@@ -405,7 +413,7 @@ assert(transrailEvaluated.opportunityTier === MISPRICING_OPPORTUNITY_TIER.COMPOU
 
 // Case C: Dislocation Candidate at qualified entry price (P0 <= Buy Below Price)
 // When price is ₹450 (below Buy Below ceiling), MoS >= 25%, Asymmetry >= 3:1, 3Y IRR >= 20% -> ACCUMULATE
-const hblDislocationPrice = evaluateEquityMispricing({
+const hblDislocationPrice = evaluate({
   ticker: 'HBLENGINE',
   companyName: 'HBL Power Systems',
   sector: 'Defence & Railways',
@@ -426,7 +434,7 @@ assert(hblDislocationPrice.opportunityTier === MISPRICING_OPPORTUNITY_TIER.TOP_C
 // Case D: Orthogonal Separation Invariant: FCFF Conversion Status (Cash Economics) != Opportunity Tier (Decision State)
 // Transrail: FCFF_RECOVERY_REQUIRED + UNDER_REVALIDATION -> COMPOUNDING_AT_FAIR_PRICE (MONITOR)
 // Shakti Pumps: FCFF_RECOVERY_REQUIRED + BROKEN -> STRUCTURAL_VALUE_TRAP (SYSTEMATIC_EXIT)
-const shaktiEvaluated = evaluateEquityMispricing({
+const shaktiEvaluated = evaluate({
   ticker: 'SHAKTIPUMP',
   companyName: 'Shakti Pumps',
   thesisHealth: 'BROKEN',
@@ -452,7 +460,7 @@ console.log('\n--- 8. Testing Full Universe Deterministic Ranking ---');
 const testUniverse = [
   hblEvaluated,
   shaktiEvaluated,
-  evaluateEquityMispricing({
+  evaluate({
     ticker: 'INOXINDIA',
     companyName: 'INOX India',
     thesisHealth: 'STRENGTHENING',
@@ -461,12 +469,13 @@ const testUniverse = [
     valuationState: 'EXTREME',
     currentPrice: 2200.0,
     currentPE: 79.0,
+    expectedGrowthTrajectory: '20% CAGR', // explicit: the engine no longer invents a growth rate when none is given
     financialEvidence: { roce: 22.0 },
     cashFlowEvidence: { cfoPatRatio: 0.85, receivableDays: 75, debtToEquity: 0.00 }
   })
 ];
 
-const ranked = rankUniverseByMispricing(testUniverse);
+const ranked = rankUniverseByMispricing(testUniverse.map((r) => evaluatedInputs.get(r.ticker)));
 assert(ranked[0].ticker === 'HBLENGINE', 'Rank #1 is HBLENGINE (COMPOUNDING_AT_FAIR_PRICE)');
 assert(ranked[1].ticker === 'INOXINDIA', 'Rank #2 is INOXINDIA (OVERVALUED_COMPOUNDER)');
 assert(ranked[2].ticker === 'SHAKTIPUMP', 'Rank #3 is SHAKTIPUMP (STRUCTURAL_VALUE_TRAP)');

@@ -19,6 +19,13 @@ export const JWT_SECRET = (process.env.JWT_SECRET || "").trim();
 /** NVIDIA NIM (Geforce Now) API Key */
 export const NVIDIA_API_KEY = process.env.NVIDIA_API_KEY || "";
 
+/**
+ * Groq API key: secondary LLM provider when NVIDIA NIM is slow or down. GROK_API_KEY is accepted as an alias only when
+ * the value is a Groq key (gsk_ prefix), because that is how it was first stored; an xAI key there is ignored.
+ */
+const groqAlias = (process.env.GROK_API_KEY || "").trim();
+export const GROQ_API_KEY = (process.env.GROQ_API_KEY || "").trim() || (groqAlias.startsWith("gsk_") ? groqAlias : "");
+
 /** Telegram Bot Token and Destination Chat ID */
 export const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || "";
 export const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || "";

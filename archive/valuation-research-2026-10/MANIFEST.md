@@ -1,0 +1,65 @@
+# Archived valuation / research code (2026-10-31)
+
+These files were not reachable from any production entry point (PM2 scanner, GitHub Actions scanner, deep-dive worker, server, daily valuation watchdog, nightly reconciliation, market-data sync).
+They were moved here, not deleted. To restore one, move it back to the same relative path under `backend/`.
+
+## Services
+
+- `backend/services/capacity-normalized-valuation.service.js` (184 lines)
+- `backend/services/claim-lineage.service.js` (263 lines)
+- `backend/services/data-quality-gate.service.js` (382 lines)
+- `backend/services/data-reliability.service.js` (514 lines)
+- `backend/services/decision-journal.service.js` (463 lines)
+- `backend/services/decision-outcome-resolver.service.js` (231 lines)
+- `backend/services/event-dataset.service.js` (310 lines)
+- `backend/services/execution-scenario-gate.service.js` (158 lines)
+- `backend/services/filing-reconciler.service.js` (166 lines)
+- `backend/services/forensic-verifier.service.js` (454 lines)
+- `backend/services/fundamental-evidence.service.js` (240 lines)
+- `backend/services/fundamental-trajectory-engine.service.js` (2185 lines)
+- `backend/services/high-conviction-thesis-tracker.service.js` (809 lines)
+- `backend/services/immutable-decision-journal.service.js` (121 lines)
+- `backend/services/kpi-shadow.service.js` (364 lines)
+- `backend/services/live-output-integrity.service.js` (104 lines)
+- `backend/services/management-evidence.service.js` (196 lines)
+- `backend/services/management-execution-ledger.service.js` (265 lines)
+- `backend/services/management-execution-profile.service.js` (195 lines)
+- `backend/services/market-disagreement-attribution.service.js` (176 lines)
+- `backend/services/market-dislocation.service.js` (289 lines)
+- `backend/services/market-expectations.service.js` (275 lines)
+- `backend/services/market-thesis-reconciliation.service.js` (2182 lines)
+- `backend/services/metamorphic-adversarial-tester.service.js` (89 lines)
+- `backend/services/multi-benchmark-engine.service.js` (247 lines)
+- `backend/services/multi-horizon-thesis-survival.service.js` (299 lines)
+- `backend/services/pit-evidence-builder.service.js` (286 lines)
+- `backend/services/point-in-time-backtest.service.js` (308 lines)
+- `backend/services/portfolio-replay-simulator.service.js` (384 lines)
+- `backend/services/research-integrity-audit.service.js` (360 lines)
+- `backend/services/research-quality-reporter.service.js` (357 lines)
+- `backend/services/thesis-contract.service.js` (169 lines)
+- `backend/services/thesis-conviction-classifier.service.js` (362 lines)
+- `backend/services/thesis-engine.service.js` (284 lines)
+- `backend/services/thesis-prediction-ledger.service.js` (166 lines)
+- `backend/services/universe-data-reconciliation.service.js` (356 lines)
+- `backend/services/valuation-scenarios.service.js` (336 lines)
+- `backend/services/version-b-valuation-engine.service.js` (309 lines)
+- `backend/services/walk-forward-2024-replay.service.js` (456 lines)
+- `backend/services/walk-forward-portfolio-audit.service.js` (441 lines)
+- `backend/services/winner-protection-engine.service.js` (449 lines)
+- `backend/services/wrong-decision-laboratory.service.js` (138 lines)
+
+## Scripts
+
+- `backend/scripts/run-capacity-valuation-board.js` (72 lines)
+- `backend/scripts/run-duration-compounder-backtest.js` (355 lines)
+- `backend/scripts/run-fundamental-trajectory-engine.js` (320 lines)
+- `backend/scripts/run-market-thesis-reconciliation.js` (421 lines)
+- `backend/scripts/test-data-reliability-engine.js` (253 lines)
+- `backend/scripts/test-fundamental-trajectory-engine.js` (403 lines)
+- `backend/scripts/test-market-thesis-reconciliation.js` (448 lines)
+- `backend/scripts/test-thesis-kpi-engine.js` (384 lines)
+- `backend/scripts/test-v4-duration-intelligence.js` (416 lines)
+
+## Tests
+
+- `backend/tests/capacity-normalized-valuation.test.js` (108 lines)

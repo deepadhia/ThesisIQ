@@ -23,6 +23,7 @@ import path from 'path';
 import dotenv from 'dotenv';
 dotenv.config({ path: './.env.local' });
 import { pool } from '../db/pool.js';
+import { THESIS_CONTRACT_DIR } from '../utils/thesis-contract-files.js';
 
 const OUTPUT_DIR = path.resolve('reports/thesis_board');
 
@@ -1008,7 +1009,10 @@ export async function generateDriverLevelContracts() {
   ];
 
   // Save JSON
-  const jsonPath = path.join(OUTPUT_DIR, 'driver-level-thesis-contracts.json');
+  // The JSON is a production input, so it is written to the tracked directory (reports/ is git-ignored); only the
+  // human-readable Markdown report goes to reports/.
+  fs.mkdirSync(THESIS_CONTRACT_DIR, { recursive: true });
+  const jsonPath = path.join(THESIS_CONTRACT_DIR, 'driver-level-thesis-contracts.json');
   fs.writeFileSync(jsonPath, JSON.stringify({
     timestamp: new Date().toISOString(),
     totalStocks: contracts.length,

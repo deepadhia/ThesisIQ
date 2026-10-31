@@ -85,7 +85,8 @@ export const MISPRICING_OPPORTUNITY_TIER = {
   WATCHLIST_DISLOCATION_WATCH: 'WATCHLIST_DISLOCATION_WATCH', // Dislocation runway, waiting for Buy Below trigger
   WATCHLIST_FRICTION: 'WATCHLIST_FRICTION',                 // Operational/cyclical friction under observation (Pause)
   OVERVALUED_COMPOUNDER: 'OVERVALUED_COMPOUNDER',           // Outstanding business but multiple bubble (Trim)
-  STRUCTURAL_VALUE_TRAP: 'STRUCTURAL_VALUE_TRAP'            // Broken thesis, solvency failure, or value destruction (Exit)
+  STRUCTURAL_VALUE_TRAP: 'STRUCTURAL_VALUE_TRAP',           // Broken thesis, solvency failure, or value destruction (Exit)
+  INSUFFICIENT_DATA: 'INSUFFICIENT_DATA'                    // Required price / P/E / ROCE / underwritten growth missing or stale: no verdict
 };
 
 const TIER_PRIORITY = {
@@ -94,7 +95,15 @@ const TIER_PRIORITY = {
   [MISPRICING_OPPORTUNITY_TIER.WATCHLIST_DISLOCATION_WATCH]: 3,
   [MISPRICING_OPPORTUNITY_TIER.WATCHLIST_FRICTION]: 4,
   [MISPRICING_OPPORTUNITY_TIER.OVERVALUED_COMPOUNDER]: 5,
-  [MISPRICING_OPPORTUNITY_TIER.STRUCTURAL_VALUE_TRAP]: 6
+  [MISPRICING_OPPORTUNITY_TIER.STRUCTURAL_VALUE_TRAP]: 6,
+  [MISPRICING_OPPORTUNITY_TIER.INSUFFICIENT_DATA]: 7
+};
+
+export const IMPLIED_GROWTH_STATUS = {
+  SOLVED: 'SOLVED',
+  INVALID_PE: 'INVALID_PE',         // P/E missing, zero or negative (loss-making): nothing to solve
+  BELOW_RANGE: 'BELOW_RANGE',       // Price is below the value of a -20% growth path
+  UNREACHABLE: 'UNREACHABLE'        // No growth rate at this return on capital can justify the price
 };
 
 // -----------------------------------------------------------------------------
@@ -247,28 +256,30 @@ export function classifyEconomicEngineState(equity = {}) {
   } = equity;
 
   const roce = parseFloat(financialEvidence.roce) || 20.0;
-  const cfoPat = cashFlowEvidence.cfoPatRatio !== undefined ? cashFlowEvidence.cfoPatRatio : 0.85;
-  const recDays = cashFlowEvidence.receivableDays || 75;
-  const debtEquity = cashFlowEvidence.debtToEquity || 0.0;
+  // Unknown cash conversion / working capital / leverage stay unknown (null): they cannot trigger a friction
+  // state, and they can never be assumed healthy enough to earn PROVEN.
+  const cfoPat = Number.isFinite(cashFlowEvidence.cfoPatRatio) ? cashFlowEvidence.cfoPatRatio : null;
+  const recDays = Number.isFinite(cashFlowEvidence.receivableDays) ? cashFlowEvidence.receivableDays : null;
+  const debtEquity = Number.isFinite(cashFlowEvidence.debtToEquity) ? cashFlowEvidence.debtToEquity : null;
   const hasTransformationCapex = economicEvidence.hasTransformationCapex || false;
 
   if (thesisHealth === 'BROKEN' || thesisHealth === 'WEAKENING') {
     return ECONOMIC_ENGINE_STATE.BROKEN;
   }
 
-  if (cfoPat < 0.65 && recDays > 100 && !hasTransformationCapex) {
+  if (cfoPat !== null && recDays !== null && cfoPat < 0.65 && recDays > 100 && !hasTransformationCapex) {
     return ECONOMIC_ENGINE_STATE.UNDER_REVALIDATION;
   }
 
-  if (hasTransformationCapex && cfoPat < 0.70) {
+  if (hasTransformationCapex && cfoPat !== null && cfoPat < 0.70) {
     return ECONOMIC_ENGINE_STATE.UNDER_CONSTRUCTION;
   }
 
-  if (roce >= 22.0 && cfoPat >= 0.75 && debtEquity <= 0.30) {
+  if (roce >= 22.0 && cfoPat !== null && cfoPat >= 0.75 && debtEquity !== null && debtEquity <= 0.30) {
     return ECONOMIC_ENGINE_STATE.PROVEN;
   }
 
-  if (roce >= 16.0 && debtEquity <= 0.50) {
+  if (roce >= 16.0 && (debtEquity === null || debtEquity <= 0.50)) {
     return ECONOMIC_ENGINE_STATE.EMERGING;
   }
 
@@ -397,7 +408,7 @@ export function classifyMarketExpectationsRegime(options = {}) {
     reinvestmentRatePct = 50.0,
     modeledFcffConversionPct = 50.0,
     fcffConversionStatus = FCFF_CONVERSION_STATUS.POSITIVE_CASH_COMPOUNDER,
-    marketImpliedFcffCagr = 15.0,
+    marketImpliedFcffCagr,
     marketImpliedCagr, // Backward compatibility alias
     effectiveIroic = 20.0,
     waccPct = 11.5,
@@ -407,8 +418,9 @@ export function classifyMarketExpectationsRegime(options = {}) {
     thesisHealth = 'INTACT'
   } = options;
 
-  const impliedFcff = marketImpliedFcffCagr !== undefined ? marketImpliedFcffCagr : (marketImpliedCagr || 15.0);
-  const expectationGapPct = parseFloat((underwrittenNopatCagr - impliedFcff).toFixed(1));
+  // null = the solver could not explain the price at this return on capital; never substitute a made-up rate.
+  const impliedFcff = marketImpliedFcffCagr !== undefined ? marketImpliedFcffCagr : (marketImpliedCagr ?? null);
+  const expectationGapPct = impliedFcff === null ? null : parseFloat((underwrittenNopatCagr - impliedFcff).toFixed(1));
   
   // FCFF conversion drag is mathematically defined only when FCFF CAGR is valid
   const resolvedFcffDragPct = (underwrittenFcffCagr !== null && fcffConversionDragPct !== null)
@@ -446,6 +458,17 @@ export function classifyMarketExpectationsRegime(options = {}) {
     benchmark7Yr5xCagrPct,
     isValueAccretive
   };
+
+  // Gate 0: The price is not reachable by any growth rate at this return on capital
+  if (impliedFcff === null) {
+    return {
+      ...baseDetails,
+      regime: EXPECTATIONS_REGIME.MARKET_EXPECTATIONS_ABOVE_THESIS,
+      isValueAccretive: false,
+      priceExceedsReachableValue: true,
+      narrative: `The current price cannot be justified by any growth rate at a ${effectiveIroic}% return on capital (WACC ${waccPct}%). Priced beyond what this business model can earn.`
+    };
+  }
 
   // Gate 1: Broken Thesis or Destroying Capital
   if (isBroken) {
@@ -667,11 +690,45 @@ export function resolveTerminalGrowthRate(sector = '', businessQuality = 'QUALIT
  * In every forecast year: FCFF_t = NOPAT_t - dNOA_t = NOPAT_t * (1 - ReinvestmentRate_t)
  * where ReinvestmentRate_t = g_t / EffectiveForwardiROIC and dNOA_t = Capex_t - D&A_t + dNWC_t.
  */
+/**
+ * THE valuation model (one function, used by both the DCF and the reverse-DCF solver so they can never disagree).
+ * Present value of the 10-year FCFF stream per rupee of current EPS:
+ *   years 1-5 grow at g, years 6-10 fade linearly to the terminal rate, then a Gordon terminal value.
+ * Reinvestment each year = growth / iROIC, NOT capped: growth faster than the business can fund from its own
+ * earnings (growth > iROIC) shows up as negative free cash flow that must be financed, so it earns no free value.
+ * iROIC is floored at 12% (about WACC) so growth is never credited with value it cannot create.
+ */
+export function fcffValuePerEps(g, options = {}) {
+  const wacc = options.wacc || 0.115;
+  const gt = options.terminalGrowth ?? 0.035;
+  const iroic = Math.max(0.12, Number(options.effectiveIroic) / 100.0);
+  const multipleDeratePct = options.multipleDeratePct || 0.0;
+  const rr = (growth) => Math.max(0.0, growth / iroic);
+
+  let pv = 0;
+  let eps = 1.0;
+
+  for (let t = 1; t <= 5; t++) {
+    eps *= (1 + g);
+    pv += (eps * (1 - rr(g))) / Math.pow(1 + wacc, t);
+  }
+  for (let t = 6; t <= 10; t++) {
+    const fadeG = g - ((t - 5) / 5.0) * (g - gt);
+    eps *= (1 + fadeG);
+    pv += (eps * (1 - rr(fadeG))) / Math.pow(1 + wacc, t);
+  }
+
+  let terminalValue = (eps * (1 + gt) * (1 - rr(gt))) / Math.max(0.02, (wacc - gt));
+  if (multipleDeratePct > 0) terminalValue *= (1.0 - multipleDeratePct);
+  pv += terminalValue / Math.pow(1 + wacc, 10);
+  return pv;
+}
+
 export function calculateInstitutionalFcffDcf(options = {}) {
   const currentPrice = options.currentPrice || 100.0;
   const pe = options.currentPE || 20.0;
-  const underwrittenCagr = (options.underwrittenCagr || 20.0) / 100.0;
-  const effectiveIroic = Math.max(0.12, (options.effectiveIroic || options.roce || 20.0) / 100.0);
+  const underwrittenCagr = (options.underwrittenCagr ?? 20.0) / 100.0;
+  const effectiveIroic = options.effectiveIroic || options.roce || 20.0;
   const wacc = options.wacc || 0.115; // 11.5% default WACC
   const gt = options.terminalGrowth || 0.035; // 3.5% default terminal growth
   const multipleDeratePct = options.multipleDeratePct || 0.0;
@@ -679,34 +736,7 @@ export function calculateInstitutionalFcffDcf(options = {}) {
   const marketCapCr = options.marketCapCr || (currentPrice * 10.0);
 
   const baselineEps = pe > 0 ? (currentPrice / pe) : 1.0;
-  let pv = 0;
-  let eps = baselineEps;
-
-  // Stage 1: Years 1-5 (Explicit Underwritten Growth)
-  const rr1 = Math.min(0.85, Math.max(0.10, underwrittenCagr / effectiveIroic));
-  for (let t = 1; t <= 5; t++) {
-    eps *= (1 + underwrittenCagr);
-    const fcff = eps * (1 - rr1);
-    pv += fcff / Math.pow(1 + wacc, t);
-  }
-
-  // Stage 2: Years 6-10 (Linear Competitive Fade to gt)
-  for (let t = 6; t <= 10; t++) {
-    const fadeG = underwrittenCagr - ((t - 5) / 5.0) * (underwrittenCagr - gt);
-    const rr_t = Math.min(0.85, Math.max(0.10, fadeG / effectiveIroic));
-    eps *= (1 + fadeG);
-    const fcff = eps * (1 - rr_t);
-    pv += fcff / Math.pow(1 + wacc, t);
-  }
-
-  // Stage 3: Terminal Value at Year 10
-  const terminalRr = Math.min(0.85, Math.max(0.10, gt / effectiveIroic));
-  const terminalFcff = eps * (1 + gt) * (1 - terminalRr);
-  let terminalValue = terminalFcff / Math.max(0.02, (wacc - gt));
-  if (multipleDeratePct > 0) {
-    terminalValue *= (1.0 - multipleDeratePct);
-  }
-  pv += terminalValue / Math.pow(1 + wacc, 10);
+  const pv = baselineEps * fcffValuePerEps(underwrittenCagr, { wacc, terminalGrowth: gt, effectiveIroic, multipleDeratePct });
 
   // Net Debt / Cash Bridge Adjustment
   let perShareAdjustment = 0;
@@ -728,60 +758,54 @@ export function calculateInstitutionalFcffDcf(options = {}) {
 /**
  * Solves market-implied growth rate using the 2-Stage FCFF / WACC model.
  */
-export function solveTwoStageFcfImpliedGrowth(pe, options = {}) {
+export function solveImpliedGrowth(pe, options = {}) {
   const wacc = options.wacc || options.discountRate || 0.115;
-  const gt = options.terminalGrowth || 0.035;
-  const effectiveIroic = Math.max(0.12, (options.effectiveIroic || options.roce || 20.0) / 100.0);
+  // `gt` is accepted as an alias: the scorecard passes the sector's terminal growth under that name, and ignoring it made
+  // the implied growth come from a different model (always 3.5%) than the fair value.
+  const gt = options.terminalGrowth ?? options.gt ?? 0.035;
+  const effectiveIroic = options.effectiveIroic ?? options.roce;
   const isForward = options.isForwardEstimate || false;
   const forwardYears = options.forwardHorizonYears || 2;
 
-  if (!pe || pe <= 0 || isNaN(pe)) return 15.0;
-
-  let low = -0.20;
-  let high = 0.80;
-  let bestG = 0.10;
-
-  for (let iter = 0; iter < 45; iter++) {
-    const g1 = (low + high) / 2;
-    let pv = 0;
-    let eps = 1.0;
-
-    // Stage 1: Years 1-5 (Explicit Growth g1)
-    const rr1 = Math.min(0.85, Math.max(0.10, g1 / effectiveIroic));
-    for (let t = 1; t <= 5; t++) {
-      eps *= (1 + g1);
-      const fcff = eps * (1 - rr1);
-      pv += fcff / Math.pow(1 + wacc, t);
-    }
-
-    // Stage 2: Years 6-10 (Linear Competitive Fade to gt)
-    for (let t = 6; t <= 10; t++) {
-      const fadeG = g1 - ((t - 5) / 5.0) * (g1 - gt);
-      const rr_t = Math.min(0.85, Math.max(0.10, fadeG / effectiveIroic));
-      eps *= (1 + fadeG);
-      const fcff = eps * (1 - rr_t);
-      pv += fcff / Math.pow(1 + wacc, t);
-    }
-
-    // Stage 3: Terminal Value at Year 10
-    const terminalRr = Math.min(0.85, Math.max(0.10, gt / effectiveIroic));
-    const terminalFcff = eps * (1 + gt) * (1 - terminalRr);
-    const terminalValue = terminalFcff / Math.max(0.02, (wacc - gt));
-    pv += terminalValue / Math.pow(1 + wacc, 10);
-
-    if (isForward) {
-      pv = pv / Math.pow(1 + g1, forwardYears);
-    }
-
-    if (pv >= pe) {
-      bestG = g1;
-      high = g1;
-    } else {
-      low = g1;
-    }
+  const peNum = typeof pe === 'number' ? pe : parseFloat(pe);
+  if (!Number.isFinite(peNum) || peNum <= 0) {
+    return { status: IMPLIED_GROWTH_STATUS.INVALID_PE, growthPct: null };
+  }
+  if (!Number.isFinite(Number(effectiveIroic)) || Number(effectiveIroic) <= 0) {
+    return { status: IMPLIED_GROWTH_STATUS.INVALID_PE, growthPct: null, reason: 'MISSING_IROIC' };
   }
 
-  return parseFloat((bestG * 100).toFixed(1));
+  const valueAt = (g) => {
+    const pv = fcffValuePerEps(g, { wacc, terminalGrowth: gt, effectiveIroic });
+    return isForward ? pv / Math.pow(1 + g, forwardYears) : pv;
+  };
+
+  // Scan the growth range once. Value is not monotone when iROIC is near WACC (growth stops creating value),
+  // so find the best reachable value first and the LOWEST growth rate that reaches the price.
+  const STEP = 0.005;
+  const G_MIN = -0.20;
+  const G_MAX = 0.80;
+  const grid = [];
+  for (let g = G_MIN; g <= G_MAX + 1e-9; g += STEP) grid.push({ g, v: valueAt(g) });
+
+  const maxValue = Math.max(...grid.map((p) => p.v));
+  if (peNum > maxValue) return { status: IMPLIED_GROWTH_STATUS.UNREACHABLE, growthPct: null };
+  if (peNum <= grid[0].v) return { status: IMPLIED_GROWTH_STATUS.BELOW_RANGE, growthPct: parseFloat((G_MIN * 100).toFixed(1)) };
+
+  const idx = grid.findIndex((p) => p.v >= peNum);
+  let low = grid[idx - 1].g;
+  let high = grid[idx].g;
+  for (let iter = 0; iter < 45; iter++) {
+    const mid = (low + high) / 2;
+    if (valueAt(mid) >= peNum) high = mid; else low = mid;
+  }
+  return { status: IMPLIED_GROWTH_STATUS.SOLVED, growthPct: parseFloat((high * 100).toFixed(1)) };
+}
+
+/** Number-or-null convenience wrapper: null whenever the price cannot be explained by this model. */
+export function solveTwoStageFcfImpliedGrowth(pe, options = {}) {
+  const r = solveImpliedGrowth(pe, options);
+  return r.status === IMPLIED_GROWTH_STATUS.SOLVED || r.status === IMPLIED_GROWTH_STATUS.BELOW_RANGE ? r.growthPct : null;
 }
 
 /**
@@ -893,6 +917,10 @@ export function calculateDualBearFloor(options = {}) {
  */
 export function evaluateDebtHealth(equity = {}) {
   const { cashFlowEvidence = {}, financialEvidence = {} } = equity;
+  const hasDebtData = Number.isFinite(parseFloat(cashFlowEvidence.debtToEquity)) || Number.isFinite(parseFloat(cashFlowEvidence.netDebtCr));
+  if (!hasDebtData) {
+    return { status: 'UNVERIFIED', score: 50, isFailure: false, narrative: 'Balance sheet leverage not verified: no debt or net-cash figure supplied.' };
+  }
   const debtEquity = parseFloat(cashFlowEvidence.debtToEquity) || 0.0;
   const interestCoverage = parseFloat(financialEvidence.interestCoverage !== undefined ? financialEvidence.interestCoverage : 15.0);
   const netDebtCr = parseFloat(cashFlowEvidence.netDebtCr) || 0.0;
@@ -922,29 +950,6 @@ export function evaluateDebtHealth(equity = {}) {
  */
 export function generateThesisBreakerMetric(equity = {}) {
   const sec = (equity.sector || '').toLowerCase();
-  const tick = (equity.ticker || '').toUpperCase();
-
-  if (tick === 'HBLENGINE') {
-    return 'KAVACH order inflow drops < ₹300 Cr/yr OR Train Collision Avoidance contract execution stalls > 2 quarters';
-  } else if (tick === 'TIMETECHNO') {
-    return 'Type-IV Composite Cylinder margin contribution drops < 18% OR Debt/Equity exceeds 0.35x';
-  } else if (tick === 'SKIPPER') {
-    return 'T&D EPC execution order book falls below 2.0x trailing revenue OR CFO/PAT drops below 0.50';
-  } else if (tick === 'ANANTRAJ') {
-    return 'Data Center leasing ARR drops < ₹150 Cr/MW OR residential collection rate falls below 80%';
-  } else if (tick === 'HSCL') {
-    return 'Synthetic Anode plant commissioning delayed beyond Q4 FY27 OR Gross Spread contracts > 350 bps';
-  } else if (tick === 'GRAVITA') {
-    return 'Lead/Aluminium scrap volume growth drops < 15% YoY OR Battery Waste Management compliance stalls';
-  } else if (tick === 'SJS') {
-    return 'Automotive aesthetic value-added content per vehicle drops OR EBITDA margin falls below 22%';
-  } else if (tick === 'SHAKTIPUMP') {
-    return 'PM-KUSUM subsidy receivables exceed 150 days OR Net Profit margin falls below 8%';
-  } else if (tick === 'ELECON') {
-    return 'Industrial Gear order book intake declines > 15% YoY OR MHI overseas revenue growth stalls';
-  } else if (tick === 'TRANSRAILL') {
-    return 'Receivable days remain above 115 days for 2 consecutive quarters OR EBITDA margin drops below 11%';
-  }
 
   if (sec.includes('auto') || sec.includes('industrial')) {
     return 'EBITDA margin contracts < 14.0% OR CFO/PAT falls below 0.60 for 2 consecutive quarters';
@@ -982,7 +987,8 @@ export function calculateThesisIqScorecard(equity = {}) {
   });
 
   // 2. Evidence Freshness & Effective Forward iROIC (Layer 2)
-  const forwardIroic = parseFloat(equity.economicEvidence?.forwardIroic) || (roce * 1.15);
+  // No forward iROIC on file means no forward credit: fall back to the historical ROCE (no invented +15% uplift)
+  const forwardIroic = parseFloat(equity.economicEvidence?.forwardIroic) || roce;
   const confidence = equity.economicEvidence?.forwardIroicConfidence || 'MEDIUM';
   const recency = equity.economicEvidence?.evidenceRecency || 'CURRENT_QUARTER';
   const effectiveIroic = calculateEffectiveForwardIroic(roce, forwardIroic, confidence, recency, equity.cashFlowEvidence);
@@ -991,7 +997,8 @@ export function calculateThesisIqScorecard(equity = {}) {
   const economicEngineState = classifyEconomicEngineState({
     ...equity,
     financialEvidence: { ...equity.financialEvidence, roce },
-    cashFlowEvidence: { ...equity.cashFlowEvidence, cfoPatRatio: cfoPat, debtToEquity: debtEquity }
+    // Pass the evidence as given: filling in 0.85 / 0.0 here would let unverified inputs earn PROVEN
+    cashFlowEvidence: equity.cashFlowEvidence || {}
   });
 
   // 4. 5x Economic Pathway Feasibility (Layer 3 - Standard 7-Year Horizon)
@@ -1122,7 +1129,9 @@ export function calculateThesisIqScorecard(equity = {}) {
     sector,
     forwardIroicConfidence: confidence
   });
-  const bearFloorPrice = dualBear.bearFloorPrice;
+  // A bear case above the price means "no modelled downside", which would clamp the downside to a rupee and inflate the
+  // asymmetry ratio to hundreds-to-one. The bear floor is therefore never above 90% of the price (downside >= 10%).
+  const bearFloorPrice = parseFloat(Math.min(dualBear.bearFloorPrice, currentPrice * 0.90).toFixed(2));
 
   // 9. Model-Derived Buy Below Price: Entry ceiling where BOTH >= 25% MoS AND >= 3.0:1 Asymmetry are met
   const buyBelowPrice = parseFloat(Math.min(
@@ -1232,48 +1241,6 @@ export function calculateThesisIqScorecard(equity = {}) {
 // Layer 8: Deterministic Decision Engine & Universe Evaluation
 // -----------------------------------------------------------------------------
 
-/**
- * Solves for market-implied growth rate using a standard 10-year Reverse-DCF model.
- */
-export function solveImpliedGrowthFromPE(pe, options = {}) {
-  const r = options.discountRate || 0.12;      // 12% Cost of Capital
-  const gt = options.terminalGrowth || 0.05;   // 5% Terminal Growth
-  const years = options.holdingYears || 10;
-  const isForward = options.isForwardEstimate || false;
-  const forwardYears = options.forwardHorizonYears || 2;
-
-  if (!pe || pe <= 0 || isNaN(pe)) return 15.0;
-
-  let low = -0.20;
-  let high = 0.80;
-  let bestG = 0.10;
-
-  for (let iter = 0; iter < 40; iter++) {
-    const mid = (low + high) / 2;
-    let pv = 0;
-    let eps_t = 1;
-    for (let t = 1; t <= years; t++) {
-      eps_t *= (1 + mid);
-      pv += eps_t / Math.pow(1 + r, t);
-    }
-    const terminalValue = (eps_t * (1 + gt)) / (r - gt);
-    pv += terminalValue / Math.pow(1 + r, years);
-
-    if (isForward) {
-      pv = pv / Math.pow(1 + mid, forwardYears);
-    }
-
-    if (pv >= pe) {
-      bestG = mid;
-      high = mid;
-    } else {
-      low = mid;
-    }
-  }
-
-  return parseFloat((bestG * 100).toFixed(1));
-}
-
 export function calculateTwoStageFcfIntrinsicValue(options = {}) {
   return calculateInstitutionalFcffDcf(options);
 }
@@ -1303,32 +1270,83 @@ export function evaluateEquityMispricing(auditedEquity) {
     capitalAction,
     financialEvidence = {},
     cashFlowEvidence = {},
-    currentPrice = 100.0,
-    currentPE = 20.0,
-    expectedGrowthTrajectory = '20% CAGR',
+    currentPrice,
+    currentPE,
+    marketCap,
+    expectedGrowthTrajectory,
     impliedGrowthRate: inputImpliedGrowthRate,
     expectationGap: inputExpectationGap
   } = auditedEquity;
 
-  const expectedCagr = parseFloat(String(expectedGrowthTrajectory).replace(/[^0-9.]/g, '')) || 20.0;
-  
+  // No verdict without real inputs: never substitute a default price, P/E, ROCE or growth.
+  const missingInputs = new Set(auditedEquity.inputGaps || []);
+  if (!(parseFloat(currentPrice) > 0)) missingInputs.add('MISSING_PRICE');
+  if (!(parseFloat(currentPE) > 0)) missingInputs.add('MISSING_PE');
+  if (!(parseFloat(financialEvidence.roce) > 0)) missingInputs.add('MISSING_ROCE');
+  const parsedGrowth = expectedGrowthTrajectory === undefined || expectedGrowthTrajectory === null
+    ? NaN
+    : parseFloat(String(expectedGrowthTrajectory).replace(/[^0-9.]/g, ''));
+  if (!(parsedGrowth > 0)) missingInputs.add('NO_UNDERWRITTEN_GROWTH');
+
+  if (missingInputs.size > 0) {
+    const reasons = [...missingInputs];
+    return {
+      ticker,
+      companyName,
+      sector,
+      price: currentPrice ?? null,
+      pe: currentPE ?? null,
+      thesisHealth,
+      currentConviction,
+      evidenceSufficiency,
+      valuationState: null,
+      capitalAction,
+      opportunityTier: MISPRICING_OPPORTUNITY_TIER.INSUFFICIENT_DATA,
+      mispricingScore: 0.0,
+      dataComplete: false,
+      missingInputs: reasons,
+      metrics: {
+        expectationGap: null,
+        impliedGrowth: null,
+        expectedCagr: Number.isFinite(parsedGrowth) ? parsedGrowth : null,
+        stressTestedExpectationGap: null,
+        thesisRobustness: null,
+        marketCap: marketCap ?? null,
+        roce: null,
+        cfoPatRatio: null,
+        receivableDays: null,
+        debtToEquity: null
+      },
+      thesisIqScorecard: null,
+      hedgeFundScorecard: null,
+      strategicActionNarrative: `INSUFFICIENT DATA (${reasons.join(', ')}): no valuation verdict is issued until these inputs are supplied or refreshed.`
+    };
+  }
+
+  const expectedCagr = parsedGrowth;
+
   // 1. Synthesize 8-Layer Scorecard
   const scorecard = calculateThesisIqScorecard(auditedEquity);
 
   // 2. Implied Growth and Expectations Gap from 2-Stage FCFF Reverse DCF
+  //    (null when the price cannot be explained at this return on capital)
   const impliedGrowth = (inputImpliedGrowthRate !== undefined && inputImpliedGrowthRate !== null)
     ? parseFloat(String(inputImpliedGrowthRate).replace(/[^0-9.]/g, ''))
     : scorecard.expectationsLayer.marketImpliedCagr;
+  const priceExceedsReachableValue = impliedGrowth === null || impliedGrowth === undefined;
 
   const expectationGap = (inputExpectationGap !== undefined && inputExpectationGap !== null)
     ? inputExpectationGap
-    : parseFloat((expectedCagr - impliedGrowth).toFixed(1));
+    : (priceExceedsReachableValue ? null : parseFloat((expectedCagr - impliedGrowth).toFixed(1)));
 
   const stressTestedEvidenceGrowth = parseFloat((expectedCagr * 0.80).toFixed(1));
-  const stressTestedExpectationGap = parseFloat((stressTestedEvidenceGrowth - impliedGrowth).toFixed(1));
+  const stressTestedExpectationGap = priceExceedsReachableValue
+    ? null
+    : parseFloat((stressTestedEvidenceGrowth - impliedGrowth).toFixed(1));
 
   let thesisRobustness = 'MODERATE';
-  if (stressTestedExpectationGap >= 10.0) thesisRobustness = 'HIGHLY_RESILIENT';
+  if (priceExceedsReachableValue) thesisRobustness = 'VULNERABLE';
+  else if (stressTestedExpectationGap >= 10.0) thesisRobustness = 'HIGHLY_RESILIENT';
   else if (stressTestedExpectationGap >= 5.0) thesisRobustness = 'RESILIENT';
   else if (stressTestedExpectationGap >= 0.0) thesisRobustness = 'SENSITIVE';
   else thesisRobustness = 'VULNERABLE';
@@ -1366,7 +1384,7 @@ export function evaluateEquityMispricing(auditedEquity) {
 
   const isSolvencyFailure = scorecard.debtHealth.isFailure;
   const isThesisBroken = (thesisHealth === 'BROKEN' || thesisHealth === 'WEAKENING' || capitalAction === 'SYSTEMATIC_EXIT');
-  const isExtremeValuation = (valuationState === 'EXTREME' || (currentPE > 60.0 && expectationGap < 0));
+  const isExtremeValuation = (valuationState === 'EXTREME' || priceExceedsReachableValue || (currentPE > 60.0 && expectationGap !== null && expectationGap < 0));
 
   // Gate 1: Solvency Failure or Value Destruction
   if (isSolvencyFailure) {
@@ -1419,7 +1437,9 @@ export function evaluateEquityMispricing(auditedEquity) {
     (scorecard.economicEngineState === ECONOMIC_ENGINE_STATE.PROVEN || scorecard.economicEngineState === ECONOMIC_ENGINE_STATE.EMERGING) &&
     (thesisHealth === 'STRENGTHENING' || thesisHealth === 'INTACT') &&
     scorecard.evidenceRecency !== EVIDENCE_RECENCY.STALE &&
-    (cashFlowEvidence.cfoPatRatio === undefined || cashFlowEvidence.cfoPatRatio >= 0.70 || cashFlowEvidence.netDebtCr <= 0) &&
+    // Cash conversion must be VERIFIED (known CFO/PAT >= 0.70 or a known net-cash balance sheet); unknown never passes.
+    ((Number.isFinite(cashFlowEvidence.cfoPatRatio) && cashFlowEvidence.cfoPatRatio >= 0.70) ||
+      (Number.isFinite(cashFlowEvidence.netDebtCr) && cashFlowEvidence.netDebtCr <= 0)) &&
     (
       // Top Conviction Dislocation Gate:
       // Option 1: Price is strictly in the Buy Below zone with favorable asymmetry (>= 1.5:1 point-in-time)
@@ -1454,6 +1474,8 @@ export function evaluateEquityMispricing(auditedEquity) {
     capitalAction,
     opportunityTier,
     mispricingScore: finalScore,
+    dataComplete: true,
+    missingInputs: [],
     metrics: {
       expectationGap,
       pricingHurdle5Yr: scorecard.pricingHurdle5Yr,
@@ -1473,10 +1495,13 @@ export function evaluateEquityMispricing(auditedEquity) {
       stressTestedExpectationGap,
       thesisRobustness,
       roceRegimeClassification,
-      roce: parseFloat(financialEvidence.roce) || 20.0,
-      cfoPatRatio: cashFlowEvidence.cfoPatRatio !== undefined ? cashFlowEvidence.cfoPatRatio : 0.85,
-      receivableDays: cashFlowEvidence.receivableDays || 75,
-      debtToEquity: cashFlowEvidence.debtToEquity || 0.0
+      marketCap: marketCap ?? null,
+      roce: parseFloat(financialEvidence.roce),
+      // null = not verified (never a stand-in value)
+      cfoPatRatio: Number.isFinite(cashFlowEvidence.cfoPatRatio) ? cashFlowEvidence.cfoPatRatio : null,
+      receivableDays: Number.isFinite(cashFlowEvidence.receivableDays) ? cashFlowEvidence.receivableDays : null,
+      debtToEquity: Number.isFinite(cashFlowEvidence.debtToEquity) ? cashFlowEvidence.debtToEquity : null,
+      priceExceedsReachableValue
     },
     thesisIqScorecard: scorecard,
     hedgeFundScorecard: calculateHedgeFundScorecard(auditedEquity),

@@ -26,7 +26,9 @@ const runUrl        = process.env.WORKFLOW_RUN_URL || null;
 // Fail fast with actionable error messages rather than deep stack traces.
 const missing = [];
 if (!process.env.DATABASE_URL)       missing.push("DATABASE_URL");
-if (!process.env.NVIDIA_API_KEY)     missing.push("NVIDIA_API_KEY");
+// At least one LLM provider is required (the chain is Groq -> Gemini -> NVIDIA NIM); any single key is enough to run.
+const groqKeyPresent = Boolean((process.env.GROQ_API_KEY || "").trim() || (process.env.GROK_API_KEY || "").trim().startsWith("gsk_"));
+if (!process.env.NVIDIA_API_KEY && !groqKeyPresent && !process.env.GEMINI_API_KEY) missing.push("GROQ_API_KEY (or GEMINI_API_KEY / NVIDIA_API_KEY)");
 if (!process.env.TELEGRAM_BOT_TOKEN) missing.push("TELEGRAM_BOT_TOKEN");
 if (!process.env.TELEGRAM_CHAT_ID)   missing.push("TELEGRAM_CHAT_ID");
 

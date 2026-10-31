@@ -39,6 +39,7 @@
   1. The agent **MUST** verify that live trailing market data (`market_data_snapshots`) is synchronized and up-to-date in PostgreSQL for all evaluated equities.
   2. If data is stale or missing, the agent **MUST** execute the audited synchronization runner (`node backend/scripts/sync-portfolio-market-data.js --force`) to programmatically ingest verified consolidated trailing metrics (CMP, Trailing P/E = CMP / TTM EPS, Mcap, ROCE) before emitting analysis.
   3. All valuation analysis presented to the user **MUST** be explicitly grounded in the freshly verified database snapshot.
+- The valuation engine never defaults an input: price, P/E, ROCE and market cap come only from `market_data_snapshots` (age is computed from `market_data_as_of`; the `freshness_status` label is not trusted); underwritten growth and other analyst assumptions come only from `backend/config/underwriting-assumptions.json`. Anything missing or stale yields `INSUFFICIENT_DATA`, never an invented number. No ticker-specific logic in valuation code (`backend/tests/valuation-model.test.js` enforces this).
 
 ---
 
@@ -69,7 +70,7 @@ Rules:
 - Node's `fetch` (undici) rejects BSE PDF response headers → `downloadBinary()` falls back to `https` with `insecureHTTPParser`.
 - **All exchange timestamps are IST wall-clock with no zone.** Always use `parseExchangeTimestamp()`; never `new Date(rawString)`.
 - NSE and BSE publish the SAME PDF under different ids/titles → de-duplicate by content (`findContentDuplicate`), not by title.
-- LLM = NVIDIA NIM (`meta/llama-3.2-*`), calls can be slow/429. Keep per-call timeouts short (scanner 40 s, worker 90 s) and retries ≤ 3.
+- LLM = ONE shared chain, `runLlm()` in `llm.service.js` (Groq and Gemini first, NVIDIA NIM strictly last as the fallback). **Never hard-code a model name in a call site, and never add a provider call that bypasses `runLlm`.** The models are DISCOVERED (`model-discovery.service.js`): each provider's `/models` list is filtered to text-chat models, ranked, and every candidate is probed with a real call (the lists still contain retired models, e.g. NIM's llama-3.2 which answers 404). The result is cached in `system_settings.llm_model_registry`, refreshed every 6 h in the background and immediately when a model answers 404/410/401/403 at runtime. `SEED_MODELS` in `llm-failover.service.js` is only the fallback when no discovered list exists. Calls are bounded by time budgets (scanner 45 s, worker chunks 75 s) and an AI outage never consumes a filing's attempts (`retry-policy.service.js`). The `llama-3.2` models this section used to name are retired.
 
 ## 10. Hard invariants (each one is a real bug that happened). Never break them.
 
@@ -131,7 +132,8 @@ Known layout traps: heading printed AFTER its table; a standalone mini-table ins
 - Report faithfully: say what you ran, what passed, what you did NOT verify, and anything you changed outside the request. If a rule here conflicts with a user request, stop and ask.
 
 ## 15. Known open items (do not "discover" these again, and do not silently change them)
-- The 4-stage financial model / reverse DCF audit is pending (user asked for it AFTER the alert pipeline).
+- The reverse-DCF / valuation audit was done 2026-10-31 (one shared model, no defaults, inputs from DB + `backend/config/underwriting-assumptions.json`; see `docs/handoff-2026-10-31.md`). The 4-stage financial model audit is still pending.
+- ASTRAMICRO and MOREPENLAB have no underwritten growth and no thesis status, so the valuation engine reports them INSUFFICIENT_DATA until the analyst supplies a figure.
 - `MOREPENLAB` uses a provisional contract (repo-derived); needs analyst review.
 - GitHub Actions needs the `GEMINI_API_KEY` secret (scanned-PDF OCR, audio).
 - `reports/thesis_board/driver-level-thesis-contracts.json` "currentEvidence" is a Q1 FY27 baseline and is not updated automatically.

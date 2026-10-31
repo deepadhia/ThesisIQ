@@ -323,6 +323,20 @@ function isValidBullet(bullet) {
   return true;
 }
 
+/**
+ * Shortens text to at most `max` characters WITHOUT cutting mid-word: prefers the end of a sentence, otherwise the
+ * last whole word followed by an ellipsis.
+ */
+function truncateAtBoundary(text, max) {
+  const s = String(text || "").trim();
+  if (s.length <= max) return s;
+  const window = s.slice(0, max);
+  const sentenceEnd = Math.max(window.lastIndexOf(". "), window.lastIndexOf("! "), window.lastIndexOf("? "));
+  if (sentenceEnd >= max * 0.5) return window.slice(0, sentenceEnd + 1);
+  const lastSpace = window.lastIndexOf(" ");
+  return `${(lastSpace > 0 ? window.slice(0, lastSpace) : window).replace(/[\s,;:(–-]+$/, "")}…`;
+}
+
 function cleanBullet(text) {
   if (!text) return "";
   return String(text).replace(/^•\s*/, "").trim();
@@ -459,10 +473,7 @@ export function formatAnnouncementMessage(params) {
     if (Array.isArray(data.qa_highlights) && data.qa_highlights.length > 0) {
       const qaItems = data.qa_highlights.slice(0, 3).map(qa => {
         const who = qa.analyst_or_shareholder ? ` (${qa.analyst_or_shareholder})` : "";
-        let ans = cleanReaderFriendlyText(cleanBullet(qa.management_answer));
-        if (ans.length > 280) {
-          ans = ans.slice(0, 277) + "...";
-        }
+        const ans = truncateAtBoundary(cleanReaderFriendlyText(cleanBullet(qa.management_answer)), 600);
         return `• *Q${who}:* ${cleanReaderFriendlyText(cleanBullet(qa.question))}\n  *A:* ${ans}`;
       });
       message += `💬 *Key Management Q&A Insights:*\n${qaItems.join("\n")}\n\n`;
@@ -851,7 +862,7 @@ export function formatConcallScheduleMessage({ ticker, companyName, schedule = {
   msg += `🗓️ *When:* ${when}\n`;
   if (schedule.link) msg += `🔗 *Join:* ${schedule.link}\n`;
   if (resultDate) msg += `📊 *Results date:* ${resultDate}\n`;
-  if (summary) msg += `• ${cleanReaderFriendlyText(cleanBullet(summary)).slice(0, 220)}\n`;
+  if (summary) msg += `• ${truncateAtBoundary(cleanReaderFriendlyText(cleanBullet(summary)), 220)}\n`;
   msg += `──────────────────────────────\n`;
   msg += docUrl ? `📄 [View Official Intimation →](${docUrl}) • 🕐 ${getIstTimestamp()}\n` : `🕐 ${getIstTimestamp()}\n`;
   msg += `_Transcript & thesis-driver audit will follow when the call is filed._`;

@@ -16,6 +16,7 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { summarizeDriverAssessment } from './thesis-driver-context.service.js';
+import { findThesisContractFile } from '../utils/thesis-contract-files.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -26,12 +27,7 @@ let cachedContracts = null;
 function loadThesisContracts() {
   if (cachedContracts) return cachedContracts;
   try {
-    const candidatePaths = [
-      path.resolve(process.cwd(), 'reports/thesis_board/driver-level-thesis-contracts.json'),
-      path.resolve(process.cwd(), '../reports/thesis_board/driver-level-thesis-contracts.json'),
-      path.resolve(__dirname, '../../reports/thesis_board/driver-level-thesis-contracts.json')
-    ];
-    const contractsPath = candidatePaths.find(p => fs.existsSync(p));
+    const contractsPath = findThesisContractFile('driver-level-thesis-contracts.json');
     if (contractsPath) {
       const raw = fs.readFileSync(contractsPath, 'utf8');
       const parsed = JSON.parse(raw);

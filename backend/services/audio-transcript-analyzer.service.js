@@ -2,6 +2,7 @@ import fs from "fs";
 import path from "path";
 import { execFile } from "child_process";
 import { promisify } from "util";
+import { getGeminiModelNames } from "./llm.service.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -181,15 +182,20 @@ async function uploadToGeminiFileApi(mp3Path, apiKey) {
 /**
  * Executes a Gemini prompt with production model fallbacks.
  */
-async function callGemini(contents, apiKey) {
-  // Use active 2026 high-throughput production models
-  const models = ["gemini-flash-latest", "gemini-3.6-flash", "gemini-3.5-flash", "gemini-flash-lite-latest"];
+async function callGemini(contents, apiKey, { perModelMs = 45000, totalMs = 120000 } = {}) {
+  // Models come from the discovered registry (fast models first), never a hard-coded list.
+  // Every attempt is time-boxed: this analysis is optional follow-up work and must never hold the pipeline for minutes.
+  const models = getGeminiModelNames();
   let lastErr = null;
+  const deadline = Date.now() + totalMs;
 
   for (const model of models) {
+    const msLeft = deadline - Date.now();
+    if (msLeft < 5000) break;
     try {
       const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`, {
         method: "POST",
+        signal: AbortSignal.timeout(Math.min(perModelMs, msLeft)),
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           contents,
@@ -245,9 +251,9 @@ Return ONLY a valid JSON object with the following schema:
     {
       "statement": "Verbatim or precise paraphrased management guidance or commitment",
       "metric": "Revenue | EBITDA Margin | Volume | CapEx | Debt Reduction | Timeline",
-      "target_value": "Explicit numeric target (e.g. '₹10,000 Cr', '80-85% utilization', 'Zero net debt')",
+      "target_value": "The target exactly as the speaker states it, with its unit (an amount, a percentage or range, or a stated qualitative commitment). Never invent a figure.",
       "guidance_scope": "QUARTERLY | ANNUAL | MULTI_YEAR | CAPEX_MILESTONE",
-      "timeline": "Explicit target quarter or fiscal year (e.g. 'Q2 FY27' for quarterly, 'FY27' for annual, 'FY31' for multi-year)",
+      "timeline": "The target quarter, fiscal year or year range exactly as the speaker states it (a single quarter for quarterly, one fiscal year for annual, a range of years for multi-year)",
       "status": "Pending"
     }
   ],
@@ -280,7 +286,7 @@ Return ONLY a valid JSON object with the following schema:
   ];
 
   console.log(`[AUDIO ANALYZER] Generating institutional audio audit for ${ticker}...`);
-  const { text } = await callGemini(contents, apiKey);
+  const { text } = await callGemini(contents, apiKey, { perModelMs: 90000, totalMs: 180000 }); // audio is the heavy case
 
   const cleanJson = text.replace(/^```json\s*|\s*```$/gi, "").trim();
   try {

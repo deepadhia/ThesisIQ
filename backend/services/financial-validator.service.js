@@ -29,31 +29,151 @@ const MONTHS = {
   sep: 8, sept: 8, september: 8, oct: 9, october: 9, nov: 10, november: 10, dec: 11, december: 11
 };
 
-const NUMERIC_TOKEN = /^\(?-?[\d,]+\.?\d*\)?$/;
+// Deliberately loose: a PDF text layer splits, glues and mis-punctuates numbers ("2,511 .60", "1.41 ,693.28", "2,18.236.50").
+// canonicalNumber() decides whether a token really is a number and what it is; dates are never numbers.
+const NUMERIC_TOKEN = /^\(?-?[\d,.]*\d[\d,.]*\)?$/;
+const DATE_TOKEN = /^\(?\d{1,2}[./]\d{1,2}[./]\d{2,}\)?$/;
 const DASH_TOKEN = /^[-–—]$/;
+// Table rules and brackets that OCR/text layers glue onto cells: "786.91|", "860,13}", "[2,190.98".
+const TABLE_JUNK = /[|{}[\]_~`]/g;
+const LINE_FORMULA = /\(\s*\d{1,2}(?:\s*[-+–×x]\s*\d{1,2})+\s*\)/g;
 
 const REVENUE_ROW = /(?:revenue\s+from\s+operations?|sales\s*\/\s*income\s+from\s+operations?|income\s+from\s+operations?|net\s+sales|revenue\s+from\s+sale)/i;
 const TOTAL_INCOME_ROW = /^\W*(?:[ivx]+\.?\s+|\d+\.?\s+|[a-z]\)\s+)?total\s+income\b/i;
-const PBT_ROW = /profit\s*(?:\/\s*\(?\s*loss\s*\)?\s*)?\(?(?:loss\)?\s*)?before\s+(?:tax|share\s+of)/i;
-const PBT_BEFORE_EXC_ROW = /profit\s*(?:\/\s*\(?\s*loss\s*\)?\s*)?before\s+exceptional/i;
-const PAT_ROW = /(?:net\s+)?profit\s*(?:\/\s*\(?\s*loss\s*\)?\s*)?(?:\(\s*loss\s*\)\s*)?(?:after\s+tax\s+)?for\s+the\s+(?:period|quarter|year|half)|(?:net\s+)?profit\s+after\s+tax|^\W*(?:[ivx]+\.?\s+|\d+\.?\s+)?profit\s*(?:\/\s*\(?\s*loss\s*\)?)?\s*(?:\(\s*loss\s*\)\s*)?for\s+the/i;
+// "Profit / (Loss)": OCR reads the slash as I, l, 1 or | ("Profit I (Loss) before tax").
+const PBT_ROW = /profit\s*(?:[/Il1|]\s*\(?\s*loss\s*\)?\s*)?\(?(?:loss\)?\s*)?before\s+(?:tax|share\s+of)/i;
+const PBT_BEFORE_EXC_ROW = /profit\s*(?:[/Il1|]\s*\(?\s*loss\s*\)?\s*)?before\s+exceptional/i;
+const PAT_ROW = /(?:net\s+)?profit\s*(?:[/Il1|]\s*\(?\s*loss\s*\)?\s*)?(?:\(\s*loss\s*\)\s*)?(?:after\s+tax\s+)?for\s+the\s+(?:period|quarter|year|half)|(?:net\s+)?profit\s+after\s+tax|^\W*(?:[ivx]+\.?\s+|\d+\.?\s+)?profit\s*(?:[/Il1|]\s*\(?\s*loss\s*\)?)?\s*(?:\(\s*loss\s*\)\s*)?for\s+the/i;
 const PAT_EXCLUDE = /before|comprehensive|attributable|per\s+share|margin|from\s+discontinued|share\s+of/i;
-const FIN_ROW = /^\W*(?:\S{1,3}\s+)?(?:finance\s+costs?|interest\s+expenses?|interest\s+and\s+finance|interest\s+cost)/i;
+// "Fi nance costs": a stray space inside the word is a common PDF text-layer glitch.
+const FIN_ROW = /^\W*(?:\S{1,3}\s+)?(?:fi\s?nance\s+costs?|interest\s+expenses?|interest\s+and\s+finance|interest\s+cost)/i;
 const DEP_ROW = /^\W*(?:\S{1,3}\s+)?(?:depreciation|amortisation|amortization)/i;
 const EXC_ROW = /exceptional\s+(?:item|gain|loss|income|expense)s?/i;
 const OWNERS_ROW = /(?:owners|equity\s+holders|shareholders)\s+of\s+the|owners\s+of\s+[a-z]/i;
 
 const SEGMENT_EXCLUDE_LABEL = /total|less|inter|unallocable|unallocated|eliminat|capital\s+employed|assets|liabilit|tax|interest|finance|other\s+income|profit|net\b|exceptional|depreciation|expenses?|income\b|revenue\s+from\s+operations|segment\s+(?:results?|revenue|information)/i;
 
-function toNumber(token) {
+const digitCount = (t) => t.replace(/\D/g, "").length;
+const hasTwoDecimals = (t) => /\.\d{2}\)?$/.test(t);
+
+/**
+ * Reads one numeric cell whose punctuation may be damaged. The LAST separator is the decimal point when it is followed by
+ * 1-2 digits (whatever character it is: "860,13" is 860.13); every earlier separator is a grouping mark and is dropped, so a
+ * dot used as a thousands separator ("2,18.236.50") reads the same as the proper form. Nothing here is company-specific.
+ * Returns { value, decimals, hasPoint, digits } or null when the token is not a number.
+ */
+function canonicalNumber(token) {
   if (token === null || token === undefined) return null;
   const t = String(token).trim();
-  if (!t || DASH_TOKEN.test(t)) return null;
+  if (!t) return null;
+  if (DASH_TOKEN.test(t)) return { value: null, decimals: 0, hasPoint: false, digits: 0 };
+  if (!NUMERIC_TOKEN.test(t) || DATE_TOKEN.test(t)) return null;
   const negative = /^\(.*\)$/.test(t) || t.startsWith("-");
-  const cleaned = t.replace(/[(),]/g, "").replace(/^-/, "").replace(/\.$/, "");
-  const n = parseFloat(cleaned);
+  const body = t.replace(/[()\-]/g, "").replace(/[,.]+$/, "");
+  if (!/\d/.test(body)) return null;
+  const lastSep = Math.max(body.lastIndexOf(","), body.lastIndexOf("."));
+  let intPart = body;
+  let frac = "";
+  if (lastSep >= 0) {
+    const tail = body.slice(lastSep + 1);
+    const head = body.slice(0, lastSep);
+    const lastCh = body[lastSep];
+    const earlierDot = head.includes(".");
+    const decimalPoint = lastCh === "."
+      ? (!earlierDot || tail.length <= 2)     // a normal decimal point; with an earlier dot it must look like decimals
+      : tail.length >= 1 && tail.length <= 2;  // a comma that is really the decimal point
+    if (decimalPoint) { intPart = head; frac = tail; }
+  }
+  const digits = intPart.replace(/\D/g, "");
+  const n = parseFloat(`${digits || "0"}${frac ? "." + frac : ""}`);
   if (isNaN(n)) return null;
-  return negative ? -n : n;
+  return { value: negative ? -n : n, decimals: frac.length, hasPoint: frac.length > 0, digits: digits.length };
+}
+
+function toNumber(token) {
+  const c = canonicalNumber(token);
+  return c ? c.value : null;
+}
+
+/** Cells that are plain numbers with proper two-decimal form (the row's evidence for how it prints). */
+const isCleanDecimal = (c) => c && c.value !== null && c.hasPoint && c.decimals === 2;
+
+/**
+ * Digits the text layer dropped punctuation from. When a row prints with two decimals, a cell that has none but carries at
+ * least two more digits than any proper cell is the same number with its decimal point lost ("348137" among "1,702.98" is
+ * 3,481.37). Rows that print whole numbers, and cells that are plausible as printed, are left alone. In a whole-number row, a
+ * dot with exactly three digits after it is a thousands separator that came out as a dot ("2.609" is 2,609).
+ */
+function restoreLostPunctuation(cells) {
+  const real = cells.filter(c => c && c.value !== null);
+  const clean = real.filter(isCleanDecimal);
+  if (clean.length >= 2 && clean.length >= real.filter(c => c.hasPoint && c.decimals !== 2).length) {
+    const widest = Math.max(...clean.map(c => c.digits));
+    return cells.map(c => (c && c.value !== null && !c.hasPoint && c.digits >= widest + 2 && c.digits >= 3)
+      ? { ...c, value: c.value / 100, decimals: 2, hasPoint: true, digits: c.digits - 2 }
+      : c);
+  }
+  if (real.length >= 2 && !real.some(c => c.hasPoint && c.decimals !== 3)) {
+    const plain = real.filter(c => !c.hasPoint);
+    if (plain.length >= 2) {
+      return cells.map(c => (c && c.value !== null && c.hasPoint && c.decimals === 3)
+        ? { ...c, value: Math.round(c.value * 1000), decimals: 0, hasPoint: false, digits: c.digits + 3 }
+        : c);
+    }
+  }
+  return cells;
+}
+
+/**
+ * Joins the pieces of numbers the text layer split apart.
+ *   always:                    a piece that starts with a separator belongs to the cell before it  ("39" ",824", "1.41" ",693.28")
+ *   when there are too many:   "15,072." "32" / "1,871.3" "6" join; then a short, unfinished cell absorbs the piece after it
+ *                              ("74" "65" "0.19" -> 74650.19, "41" "8.06" -> 418.06), leftmost first, until the count is right.
+ * Counts only ever shrink towards the column count the clean rows of the same statement agree on; a row that already has
+ * that many cells is never touched.
+ */
+function joinFragments(tokens, expectedCols) {
+  let toks = [];
+  let pendingSep = null;   // a separator the text layer left standing alone between two pieces ("8,811 . 51")
+  for (const cur of tokens) {
+    if (/^[,.]$/.test(cur)) {
+      if (toks.length && /\d$/.test(toks[toks.length - 1])) pendingSep = cur;
+      continue;
+    }
+    const prev = toks[toks.length - 1];
+    if (pendingSep && prev !== undefined && /^\d/.test(cur)) toks[toks.length - 1] = prev + pendingSep + cur;
+    else if (prev !== undefined && !DASH_TOKEN.test(prev) && /^[,.]\d/.test(cur) && /\d$/.test(prev)) toks[toks.length - 1] = prev + cur;
+    // "4," "141" (a thousands group the text layer separated), but not "59.64," "84.47" (two cells and a stray comma)
+    else if (prev !== undefined && /^\d{1,3}(?:,\d{2,3})*,$/.test(prev) && /^\d{3}(?:\.\d+)?$/.test(cur)) toks[toks.length - 1] = prev + cur;
+    else toks.push(cur);
+    pendingSep = null;
+  }
+  const finish = (arr) => arr.map(t => t.replace(/,+$/, ""));
+  if (!expectedCols || toks.length <= expectedCols) return finish(toks);
+  toks = finish(toks);
+
+  const stitched = [];
+  for (const cur of toks) {
+    const prev = stitched[stitched.length - 1];
+    if (prev !== undefined && ((/\.$/.test(prev) && /^\d{1,2}$/.test(cur)) || (/\.\d$/.test(prev) && /^\d$/.test(cur)))) {
+      stitched[stitched.length - 1] = prev + cur;
+    } else stitched.push(cur);
+  }
+  toks = stitched;
+
+  // Note-reference integers trailing the cells ("... 2,680.48 5 5") are not cells.
+  while (toks.length > expectedCols && /^\d{1,2}$/.test(toks[toks.length - 1])) toks = toks.slice(0, -1);
+  // A leading small integer in front of a full set of cells is a note reference ("9 746.03 858.67 666.35 1,604.70").
+  if (toks.length === expectedCols + 1 && /^\d{1,2}$/.test(toks[0]) && Number(toks[0]) < 15 && hasTwoDecimals(toks[1])) toks = toks.slice(1);
+
+  const prints2 = toks.filter(hasTwoDecimals).length >= 2;
+  const unfinished = (t) => !DASH_TOKEN.test(t) && digitCount(t) <= 5 && (prints2 ? !hasTwoDecimals(t) : /,\d{1,2}$/.test(t));
+  while (toks.length > expectedCols) {
+    const k = toks.findIndex((t, idx) => idx < toks.length - 1 && unfinished(t) && !DASH_TOKEN.test(toks[idx + 1]) && digitCount(toks[idx + 1]) <= 4);
+    if (k < 0) break;
+    toks = [...toks.slice(0, k), toks[k] + toks[k + 1], ...toks.slice(k + 2)];
+  }
+  return toks;
 }
 
 /**
@@ -62,40 +182,20 @@ function toNumber(token) {
  */
 function parseRow(line, expectedCols = null) {
   if (!line || line.length > 400) return null;
-  const tokens = line.trim().split(/\s+/);
+  // "Profit before tax (1 - 2)", "(3+4)", "(5-6)": a formula over line numbers in the label is not a column of figures.
+  const tokens = line.replace(TABLE_JUNK, " ").replace(LINE_FORMULA, " ").trim().split(/\s+/).filter(Boolean);
   const numeric = [];
   let i = tokens.length - 1;
-  while (i >= 0 && (NUMERIC_TOKEN.test(tokens[i]) || DASH_TOKEN.test(tokens[i]))) {
+  // a lone "." or "," between two pieces of a number belongs to the run (joinFragments uses it)
+  const inRun = (k) => DASH_TOKEN.test(tokens[k]) || canonicalNumber(tokens[k]) || (/^[,.]$/.test(tokens[k]) && k > 0 && canonicalNumber(tokens[k - 1]) && k < tokens.length - 1 && canonicalNumber(tokens[k + 1]));
+  while (i >= 0 && inRun(i)) {
     numeric.unshift(tokens[i]);
     i--;
   }
   const label = tokens.slice(0, i + 1).join(" ");
   if (numeric.length === 0) return null;
 
-  let toks = numeric;
-
-  // PDF glitch repair: "15,072. 32" -> "15,072.32", "1,871.3 6" -> "1,871.36"
-  const repair = (arr) => {
-    const out = [];
-    for (let k = 0; k < arr.length; k++) {
-      const cur = arr[k];
-      const next = arr[k + 1];
-      if (next !== undefined && /\.$/.test(cur) && /^\d{1,2}$/.test(next)) {
-        out.push(cur + next);
-        k++;
-      } else if (next !== undefined && /\.\d$/.test(cur) && /^\d$/.test(next)) {
-        out.push(cur + next);
-        k++;
-      } else {
-        out.push(cur);
-      }
-    }
-    return out;
-  };
-
-  if (expectedCols && toks.length > expectedCols) {
-    toks = repair(toks);
-  }
+  let toks = joinFragments(numeric, expectedCols);
 
   // Drop trailing note-reference integers ("... 2,680.48 5 5") when there are surplus columns.
   const cap = expectedCols || 6;
@@ -104,7 +204,8 @@ function parseRow(line, expectedCols = null) {
   }
   if (toks.length > cap) toks = toks.slice(0, cap);
 
-  const values = toks.map(toNumber);
+  const cells = restoreLostPunctuation(toks.map(canonicalNumber));
+  const values = cells.map(c => (c ? c.value : null));
   // A leading single-digit note reference in front of real columns (e.g. "9 746.03 858.67 666.35")
   if (!expectedCols && values.length >= 4 && values[0] !== null && Number.isInteger(values[0]) && Math.abs(values[0]) < 15 && values[1] !== null && Math.abs(values[1]) > 15) {
     values.shift();
@@ -117,7 +218,8 @@ function parseDatesFromText(text) {
   const patterns = [
     { re: /\b(January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sept|Sep|Oct|Nov|Dec)\.?\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})\b/gi, build: (m) => new Date(Date.UTC(+m[3], MONTHS[m[1].toLowerCase()], +m[2])) },
     { re: /\b(\d{1,2})(?:st|nd|rd|th)?\s+(January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sept|Sep|Oct|Nov|Dec)\.?,?\s+(\d{4})\b/gi, build: (m) => new Date(Date.UTC(+m[3], MONTHS[m[2].toLowerCase()], +m[1])) },
-    { re: /\b(\d{1,2})[\/\.\-](\d{1,2})[\/\.\-](\d{4})\b/g, build: (m) => (+m[2] >= 1 && +m[2] <= 12 && +m[1] <= 31) ? new Date(Date.UTC(+m[3], +m[2] - 1, +m[1])) : null }
+    // Tolerates a space the text layer put before a separator ("31.03 .2026") and a stray footnote digit after the year ("30.09.20261").
+    { re: /\b(\d{1,2})(?:\s?[\/.]\s?|-)(\d{1,2})(?:\s?[\/.]\s?|-)(\d{4})\d?\b/g, build: (m) => (+m[2] >= 1 && +m[2] <= 12 && +m[1] <= 31) ? new Date(Date.UTC(+m[3], +m[2] - 1, +m[1])) : null }
   ];
   for (const { re, build } of patterns) {
     let m;
@@ -138,8 +240,20 @@ function daysBetween(a, b) {
  */
 function mapColumns(lines, anchorIdx, cols) {
   const regionStart = Math.max(0, anchorIdx - 40);
-  const headerText = lines.slice(regionStart, anchorIdx + 1).join("\n");
-  const all = parseDatesFromText(headerText);
+  const region = lines.slice(regionStart, anchorIdx + 1);
+  // The column-header row carries several dates on one line; a date in the statement title or a note ("...ended 30th
+  // September, 2026") is not a column. When the header's dates cannot be lined up with the columns (an unreadable date such as
+  // "30 Sap 2025" shifts everything), do not guess: keep the standard layout (current quarter, previous quarter, year-ago quarter).
+  const perLine = region.map(parseDatesFromText);
+  const headerRows = perLine.filter(d => d.length >= 2);
+  let all;
+  if (headerRows.length) {
+    all = [];
+    for (let k = headerRows.length - 1; k >= 0 && all.length < cols; k--) all = [...headerRows[k], ...all];
+    if (all.length !== cols) all = [];
+  } else {
+    all = parseDatesFromText(region.join("\n"));
+  }
   let yoyIdx = cols >= 3 ? 2 : null;
   let qoqIdx = cols >= 2 ? 1 : null;
   let dates = null;
@@ -263,7 +377,10 @@ function locateBlocks(lines) {
         const l = lines[i];
         if (!regex.test(l)) continue;
         if (exclude && exclude.test(l)) continue;
-        const row = parseRow(l, cols);
+        let row = parseRow(l, cols);
+        // A long row label often wraps ("Profit before tax, share of profit in associates and jointly" / "controlled
+        // entities (3+4) 187.78 ..."): when the label line carries no numbers, its figures are on the next line.
+        if (!row && i + 1 < end) row = parseRow(lines[i + 1], cols);
         if (row && row.values.length === cols) return { idx: i, row };
       }
       return null;
@@ -311,18 +428,36 @@ function locateBlocks(lines) {
       }
     }
 
+    // A cell wildly out of scale with its own column's revenue is a mis-read (pieces of a number that happened to complete
+    // the column count): blank it so it is neither used nor trusted. The owners' row must also sit near the profit row it splits.
+    const inScale = (row) => (row ? row.values.map((v, i) => {
+      const r = revRowFixed.values[i];
+      return (v === null || r === null || r === undefined || Math.abs(v) <= 2 * Math.abs(r)) ? v : null;
+    }) : null);
+    const patValues = inScale(pat?.row);
+    let ownersValues = inScale(owners?.row);
+    if (ownersValues && patValues) {
+      const sameScale = ownersValues.slice(0, 3).every((v, i) => {
+        const p = patValues[i];
+        if (v === null || p === null || v === 0 || p === 0) return true;
+        const ratio = Math.abs(v) / Math.abs(p);
+        return ratio > 0.1 && ratio < 3;
+      });
+      if (!sameScale) ownersValues = null;
+    }
+
     const isFull = Boolean(dep || fin) && Boolean(pat || pbt);
     blocks.push({
       anchorIdx: idx,
       cols,
       revenue: revRowFixed.values,
       totalIncome: totalIncome?.row.values || null,
-      pbt: pbt?.row.values || null,
-      pbtBefore: pbtBefore?.row.values || null,
-      pat: pat?.row.values || null,
-      owners: owners?.row.values || null,
-      fin: fin?.row.values || null,
-      dep: dep?.row.values || null,
+      pbt: inScale(pbt?.row),
+      pbtBefore: inScale(pbtBefore?.row),
+      pat: patValues,
+      owners: ownersValues,
+      fin: inScale(fin?.row),
+      dep: inScale(dep?.row),
       exc: exc?.row || null,
       isFull,
       hasStatement: Boolean(pbt || pat),
@@ -335,16 +470,31 @@ function locateBlocks(lines) {
   return blocks.filter(b => b.hasStatement && (b.scope !== "UNKNOWN" || (b.colMap.dates && b.isFull)));
 }
 
+const blockRevenue = (b) => (b.revenue[0] || 0) * b.unit.factor;
+const blockRank = (b) => (b.isFull ? 0 : 10) + (b.scope === "CONSOLIDATED" ? 0 : b.scope === "UNKNOWN" ? 1 : 2);
+
+/** Blocks in the order they should be tried: full statements first, consolidated before standalone, larger revenue first. */
+function orderBlocks(blocks) {
+  // Digits can be lost from a damaged text layer but never invented: when another statement of the same filing (same scope)
+  // carries the same revenue 100 times smaller, the larger figure is the same number with its decimal point lost. It is tried last.
+  const lostDecimals = (b) => blocks.some(o => o !== b && o.scope === b.scope && blockRevenue(o) > 0 && (() => {
+    const ratio = blockRevenue(b) / blockRevenue(o);
+    return ratio > 90 && ratio < 110;
+  })());
+  const rank = (b) => blockRank(b) + (lostDecimals(b) ? 20 : 0);
+  return [...blocks].sort((a, b) => rank(a) - rank(b) || blockRevenue(b) - blockRevenue(a));
+}
+
+function standaloneFor(primary, blocks) {
+  return blocks
+    .filter(b => b !== primary && b.scope === "STANDALONE" && b.isFull)
+    .sort((a, b) => blockRevenue(b) - blockRevenue(a))[0] || (primary.scope === "STANDALONE" ? primary : null);
+}
+
 function pickBlocks(blocks) {
   if (blocks.length === 0) return { primary: null, standalone: null };
-  const rank = (b) => (b.isFull ? 0 : 10) + (b.scope === "CONSOLIDATED" ? 0 : b.scope === "UNKNOWN" ? 1 : 2);
-  const revenueOf = (b) => (b.revenue[0] || 0) * b.unit.factor;
-  const sorted = [...blocks].sort((a, b) => rank(a) - rank(b) || revenueOf(b) - revenueOf(a));
-  const primary = sorted[0];
-  const standalone = blocks
-    .filter(b => b !== primary && b.scope === "STANDALONE" && b.isFull)
-    .sort((a, b) => revenueOf(b) - revenueOf(a))[0] || (primary.scope === "STANDALONE" ? primary : null);
-  return { primary, standalone };
+  const primary = orderBlocks(blocks)[0];
+  return { primary, standalone: standaloneFor(primary, blocks) };
 }
 
 const round2 = (n) => parseFloat(n.toFixed(2));
@@ -398,9 +548,16 @@ export function extractDeterministicFinancials(pdfText = "") {
     return null;
   }
 
-  const { primary, standalone } = pickBlocks(blocks);
-  if (!primary) return null;
+  // A block whose figures fail the plausibility checks (a corrupted consolidated table) must not hide a good one
+  // (the standalone table of the same filing): try the blocks in order and return the first that holds up.
+  for (const primary of orderBlocks(blocks)) {
+    const result = buildResult(primary, standaloneFor(primary, blocks), lines);
+    if (result) return result;
+  }
+  return null;
+}
 
+function buildResult(primary, standalone, lines) {
   const f = primary.unit.factor;
   const { yoyIdx, qoqIdx } = primary.colMap;
 
@@ -587,3 +744,6 @@ export function extractDeterministicFinancials(pdfText = "") {
 
   return result;
 }
+
+/** Test-only access to the row tokenizer and block locator (used by the real-layout regression tests). */
+export const __testing = { parseRow, locateBlocks, pickBlocks };

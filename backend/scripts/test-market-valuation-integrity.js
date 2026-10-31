@@ -13,13 +13,14 @@
  */
 
 import { parseScreenerValuationData } from '../services/portfolio-market-valuation.service.js';
-import { 
-  solveImpliedGrowthFromPE, 
-  evaluateEquityMispricing, 
+import {
+  solveImpliedGrowth,
+  IMPLIED_GROWTH_STATUS,
+  evaluateEquityMispricing,
   rankUniverseByMispricing,
-  MISPRICING_OPPORTUNITY_TIER 
+  MISPRICING_OPPORTUNITY_TIER
 } from '../services/asymmetric-mispricing-ranking.service.js';
-import { loadAuditedPortfolioFromDatabase } from './run-asymmetric-mispricing-ranking.js';
+import { loadAuditedPortfolioFromDatabase } from '../services/valuation-inputs.service.js';
 import { pool } from '../db/pool.js';
 
 let totalTests = 0;
@@ -105,19 +106,16 @@ async function runValuationIntegrityTestSuite() {
   // -------------------------------------------------------------------------
   console.log('\n--- 2. Testing Trailing vs. Forward P/E Reverse-DCF Resolution ---');
 
-  // Trailing P/E = 42.0 (HSCL Actual Trailing)
-  const trailingGrowth = solveImpliedGrowthFromPE(42.0, { isForwardEstimate: false });
-  assert(trailingGrowth >= 18.5 && trailingGrowth <= 19.5, `Trailing P/E 42.0x solves to ~19.1% implied growth (Actual: ${trailingGrowth}%)`);
+  // One shared FCFF model (11.5% WACC); the solver is a pure function of P/E and return on capital.
+  const trailing = solveImpliedGrowth(42.0, { effectiveIroic: 24.5, isForwardEstimate: false });
+  const lowPe = solveImpliedGrowth(16.0, { effectiveIroic: 24.5, isForwardEstimate: false });
+  assert(trailing.status === IMPLIED_GROWTH_STATUS.SOLVED && lowPe.status === IMPLIED_GROWTH_STATUS.SOLVED, `Both P/Es solve at a 24.5% return on capital (42x: ${trailing.growthPct}%, 16x: ${lowPe.growthPct}%)`);
+  assert(trailing.growthPct > lowPe.growthPct, `A higher trailing P/E implies more growth (42x: ${trailing.growthPct}% > 16x: ${lowPe.growthPct}%)`);
 
-  // Low trailing P/E = 16.0 (HBL Power)
-  const lowPeGrowth = solveImpliedGrowthFromPE(16.0, { isForwardEstimate: false });
-  assert(lowPeGrowth >= 5.0 && lowPeGrowth <= 6.0, `Trailing P/E 16.0x solves to ~5.3% implied growth (Actual: ${lowPeGrowth}%)`);
-
-  // Forward P/E = 21.5x with 2-year forward horizon
-  // An unadjusted 21.5x would imply ~11.2% growth. But if that multiple is ALREADY 2 years forward,
-  // discounted back it implies higher growth expectation from today's perspective.
-  const forwardDiscountedGrowth = solveImpliedGrowthFromPE(21.5, { isForwardEstimate: true, forwardHorizonYears: 2 });
-  assert(forwardDiscountedGrowth > 11.2, `Forward discounted 21.5x accounts for forward discount (${forwardDiscountedGrowth}% vs unadjusted 11.2%)`);
+  // A multiple that is ALREADY 2 years forward, discounted back, implies more growth from today's perspective.
+  const unadjusted = solveImpliedGrowth(21.5, { effectiveIroic: 24.5, isForwardEstimate: false });
+  const forwardDiscounted = solveImpliedGrowth(21.5, { effectiveIroic: 24.5, isForwardEstimate: true, forwardHorizonYears: 2 });
+  assert(forwardDiscounted.growthPct > unadjusted.growthPct, `Forward-discounted 21.5x accounts for the forward discount (${forwardDiscounted.growthPct}% vs unadjusted ${unadjusted.growthPct}%)`);
 
   // HSCL Full Mispricing Evaluation on Trailing 42.0x P/E
   const hsclEvaluated = evaluateEquityMispricing({
@@ -146,7 +144,7 @@ async function runValuationIntegrityTestSuite() {
 
   const cohort = await loadAuditedPortfolioFromDatabase(pool);
   assert(Array.isArray(cohort), 'Database query returns an array');
-  assert(cohort.length === 18, `Audited cohort contains exactly 18 holdings (Actual: ${cohort.length})`);
+  assert(cohort.length === 20, `Audited cohort is the Core + Watchlist stocks (Actual: ${cohort.length})`);
 
   let allHavePrices = true;
   let allHaveValidPE = true;
@@ -173,7 +171,8 @@ async function runValuationIntegrityTestSuite() {
   // Verify HSCL specifically in database loaded cohort
   const hsclDb = cohort.find(s => s.ticker === 'HSCL');
   assert(hsclDb !== undefined, 'HSCL is present in the database cohort');
-  assert(hsclDb.currentPE >= 40.0 && hsclDb.currentPE <= 44.0, `HSCL in DB has verified trailing P/E ~42.0x (Actual: ${hsclDb.currentPE}x)`);
+  // (A pinned market P/E is not an invariant: the live price moves daily. Check it is a sane trailing multiple.)
+  assert(hsclDb.currentPE >= 3.0 && hsclDb.currentPE <= 200.0, `HSCL in DB has a sane trailing P/E (Actual: ${hsclDb.currentPE}x)`);
 
   // Verify CCL is present in accumulation
   const cclDb = cohort.find(s => s.ticker === 'CCL');
@@ -182,9 +181,9 @@ async function runValuationIntegrityTestSuite() {
 
   // Verify Full Ranking Pipeline with Database Cohort
   const rankedUniverse = rankUniverseByMispricing(cohort);
-  assert(rankedUniverse.length === 18, 'Universe ranking produces exactly 18 ranked entries');
+  assert(rankedUniverse.length === cohort.length, 'Universe ranking produces one entry per cohort stock');
   assert(rankedUniverse[0].universeRank === 1, 'Top ranked stock has universeRank = 1');
-  assert(rankedUniverse[17].universeRank === 18, 'Bottom ranked stock has universeRank = 18');
+  assert(rankedUniverse[rankedUniverse.length - 1].universeRank === cohort.length, 'Bottom ranked stock has the last universeRank');
 
   // Verify Shakti Pumps is gated into STRUCTURAL_VALUE_TRAP
   const shaktiRanked = rankedUniverse.find(s => s.ticker === 'SHAKTIPUMP');
@@ -192,12 +191,19 @@ async function runValuationIntegrityTestSuite() {
   assert(shaktiRanked.opportunityTier === MISPRICING_OPPORTUNITY_TIER.STRUCTURAL_VALUE_TRAP, 'Shakti Pumps is gated into STRUCTURAL_VALUE_TRAP');
 
   // Verify Compounding / Dislocation Opportunity Classification
-  const compounders = rankedUniverse.filter(s => 
-    s.opportunityTier === MISPRICING_OPPORTUNITY_TIER.COMPOUNDING_AT_FAIR_PRICE ||
-    s.opportunityTier === MISPRICING_OPPORTUNITY_TIER.TOP_CONVICTION_DISLOCATION
-  );
-  assert(compounders.length >= 10, `At least 10 stocks qualify as COMPOUNDING_AT_FAIR_PRICE / DISLOCATION (Found: ${compounders.length})`);
-  
+  // Structural guarantees (instead of an arbitrary count of "good" stocks):
+  const insufficient = rankedUniverse.filter(s => s.opportunityTier === MISPRICING_OPPORTUNITY_TIER.INSUFFICIENT_DATA);
+  assert(insufficient.every(s => s.missingInputs.length > 0), 'Every INSUFFICIENT_DATA stock names the inputs it is missing');
+  const firstInsufficient = rankedUniverse.findIndex(s => s.opportunityTier === MISPRICING_OPPORTUNITY_TIER.INSUFFICIENT_DATA);
+  assert(firstInsufficient === -1 || rankedUniverse.slice(firstInsufficient).every(s => s.opportunityTier === MISPRICING_OPPORTUNITY_TIER.INSUFFICIENT_DATA), 'INSUFFICIENT_DATA stocks are ranked last');
+  const topConviction = rankedUniverse.filter(s => s.opportunityTier === MISPRICING_OPPORTUNITY_TIER.TOP_CONVICTION_DISLOCATION);
+  const verifiedCash = (ticker) => {
+    const cf = cohort.find(c => c.ticker === ticker).cashFlowEvidence;
+    return (Number.isFinite(cf.cfoPatRatio) && cf.cfoPatRatio >= 0.70) || (Number.isFinite(cf.netDebtCr) && cf.netDebtCr <= 0);
+  };
+  assert(topConviction.every(s => verifiedCash(s.ticker)), 'No TOP_CONVICTION stock has unverified cash conversion');
+  assert(cohort.every(s => s.expectedGrowthTrajectory !== undefined), 'Underwritten growth is always explicit (a figure or null), never defaulted');
+
   const hblRanked = rankedUniverse.find(s => s.ticker === 'HBLENGINE');
   assert(hblRanked !== undefined, 'HBLENGINE is present in ranked universe');
   assert(hblRanked.opportunityTier === MISPRICING_OPPORTUNITY_TIER.COMPOUNDING_AT_FAIR_PRICE || hblRanked.opportunityTier === MISPRICING_OPPORTUNITY_TIER.TOP_CONVICTION_DISLOCATION, `HBL is classified as COMPOUNDING_AT_FAIR_PRICE / DISLOCATION (Actual: ${hblRanked.opportunityTier})`);

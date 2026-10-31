@@ -1,0 +1,46 @@
+### Statement of Unaudited Consolidated Financial Results for the quarter and half year ended September 30, 2026
+*(Rs. in crores)*
+
+| Particulars | 3 months ended September 30, 2026 (Unaudited) | Preceding 3 months ended June 30, 2026 (Unaudited) | Corresponding 3 months ended September 30, 2025 (Unaudited) | Half year ended September 30, 2026 (Unaudited) | Corresponding half year ended September 30, 2025 (Unaudited) | Previous year ended March 31, 2026 (Audited) |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **I Income** | | | | | | |
+| Revenue from operations | 1,427.35 | 1,475.06 | 1,035.50 | 2,902.41 | 2,075.44 | 4,265.27 |
+| Other income | 18.00 | 47.54 | 26.32 | 65.54 | 56.38 | 76.93 |
+| **Total Income** | **1,445.35** | **1,522.60** | **1,061.82** | **2,967.95** | **2,131.82** | **4,342.20** |
+| **II Expenses** | | | | | | |
+| Cost of materials consumed | 1,259.25 | 1,153.99 | 938.32 | 2,413.24 | 1,776.34 | 3,582.65 |
+| Purchase of stock-in-trade | 0.64 | 1.37 | 0.01 | 2.01 | 0.02 | 9.22 |
+| Changes in inventories of finished goods, work-in-progress and stock-in-trade | (93.20) | 65.87 | (97.58) | (27.33) | (94.72) | (173.92) |
+| Employee benefits expense | 53.70 | 61.04 | 39.63 | 114.74 | 84.14 | 161.77 |
+| Finance costs | 13.88 | 11.48 | 7.82 | 25.36 | 13.87 | 24.78 |
+| Depreciation and amortisation expense | 13.89 | 14.49 | 9.23 | 28.38 | 17.94 | 38.83 |
+| Other expenses | 72.98 | 83.08 | 53.11 | 156.06 | 107.02 | 230.62 |
+| **Total expenses** | **1,321.14** | **1,391.32** | **950.54** | **2,712.46** | **1,904.61** | **3,893.95** |
+| **III Profit before tax (I - II)** | **124.21** | **131.28** | **111.28** | **255.49** | **227.21** | **448.25** |
+| **IV Tax expenses** | | | | | | |
+| Current tax | 15.18 | 27.24 | 16.95 | 42.42 | 36.82 | 69.46 |
+| Deferred tax charge/(credit) | 7.00 | (2.33) | (1.64) | 4.67 | 1.36 | 0.46 |
+| **Total tax expenses** | **22.18** | **24.91** | **15.31** | **47.09** | **38.18** | **69.92** |
+| **V Profit for the period/ year (III - IV)** | **102.03** | **106.37** | **95.97** | **208.40** | **189.03** | **378.33** |
+| **VI Other comprehensive income/ (loss)** | | | | | | |
+| **Items that will not be reclassified to profit or loss** | | | | | | |
+| Remeasurements of the defined benefit liabilities | 0.56 | 1.13 | (0.85) | 1.69 | (1.70) | 2.41 |
+| Income tax on above items | (0.19) | (0.40) | 0.30 | (0.59) | 0.60 | (0.84) |
+| **Items that will be reclassified to profit or loss** | | | | | | |
+| Foreign currency translation reserve | (4.97) | (11.89) | 1.95 | (16.86) | 38.38 | 38.88 |
+| **Total other comprehensive (loss)/income, net of tax** | **(4.60)** | **(11.16)** | **1.40** | **(15.76)** | **37.28** | **40.45** |
+| **VII Total comprehensive income for the period/ year (V + VI)** | **97.43** | **95.21** | **97.37** | **192.64** | **226.31** | **418.78** |
+| **Profit for the period/ year attributable to:** | | | | | | |
+| Owners of the Holding Company | 102.01 | 106.39 | 95.99 | 208.40 | 189.25 | 378.80 |
+| Non-controlling interests | 0.02 | (0.02) | (0.02) | 0.00 | (0.22) | (0.47) |
+| **Total other comprehensive (loss)/income for the period/ year attributable to:** | | | | | | |
+| Owners of the Holding Company | (4.61) | (11.09) | 1.22 | (15.70) | 36.57 | 39.62 |
+| Non-controlling interests | 0.01 | (0.07) | 0.18 | (0.06) | 0.71 | 0.83 |
+| **Total comprehensive income for the period/ year attributable to:** | | | | | | |
+| Owners of the Holding Company | 97.40 | 95.30 | 97.21 | 192.70 | 225.82 | 418.42 |
+| Non-controlling interests | 0.03 | (0.09) | 0.16 | (0.06) | 0.49 | 0.36 |
+| **VIII Paid-up equity share capital (face value of Rs. 2/- each)** | **14.76** | **14.76** | **14.76** | **14.76** | **14.76** | **14.76** |
+| **IX Other equity** | | | | | | **2,436.87** |
+| **X Earnings per share \* (in Rs.)** | | | | | | |
+| Basic | 14.01 | 14.60 | 13.18 | 28.61 | 25.99 | 52.02 |
+| Diluted | 14.01 | 14.60 | 13.18 | 28.61 | 25.99 | 52.02 |

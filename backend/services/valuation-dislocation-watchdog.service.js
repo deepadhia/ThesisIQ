@@ -15,7 +15,7 @@
  */
 
 import { pool as defaultPool } from '../db/pool.js';
-import { loadAuditedPortfolioFromDatabase } from '../scripts/run-asymmetric-mispricing-ranking.js';
+import { loadAuditedPortfolioFromDatabase } from './valuation-inputs.service.js';
 import { rankUniverseByMispricing, MISPRICING_OPPORTUNITY_TIER } from './asymmetric-mispricing-ranking.service.js';
 import { sendTelegramMessage } from './telegram.service.js';
 import { isMarketOpenDay, getMarketHolidayDetails, getIstDateYmd } from './market-holidays.service.js';
@@ -66,7 +66,10 @@ export async function resolveStateTransitionTrigger(equity, pool = defaultPool) 
   let triggerReason = 'ASYMMETRIC_UNDERWRITING_QUALIFICATION';
   let triggerMechanics = `Meets all 6 risk controls with +${metrics.expectationGap}% expectation gap and +${metrics.stressTestedExpectationGap}% stressed cushion.`;
   let whatChanged = 'Candidate entered asymmetric dislocation tier under institutional dual-lens underwriting.';
-  let actionableJustification = `Underwritten growth trajectory of ${metrics.expectedCagr}% CAGR substantially exceeds market-implied ${metrics.impliedGrowth}% growth while maintaining pristine cash conversion (CFO/PAT ${metrics.cfoPatRatio.toFixed(2)}).`;
+  const cashEvidenceText = Number.isFinite(metrics.cfoPatRatio)
+    ? `pristine cash conversion (CFO/PAT ${metrics.cfoPatRatio.toFixed(2)})`
+    : 'a verified net-cash balance sheet';
+  let actionableJustification = `Underwritten growth trajectory of ${metrics.expectedCagr}% CAGR substantially exceeds market-implied ${metrics.impliedGrowth}% growth while maintaining ${cashEvidenceText}.`;
 
   try {
     // 1. Check if an alert was previously dispatched for this ticker
@@ -74,6 +77,7 @@ export async function resolveStateTransitionTrigger(equity, pool = defaultPool) 
       SELECT share_price, pe_ratio, expectation_gap, stress_gap, cfo_pat_ratio, sent_at, trigger_reason
       FROM valuation_dislocation_alerts
       WHERE ticker = $1
+        AND notification_status = 'SENT'
       ORDER BY sent_at DESC
       LIMIT 1;
     `, [ticker]);
@@ -93,16 +97,16 @@ export async function resolveStateTransitionTrigger(equity, pool = defaultPool) 
       if (prevPrice > 0 && price <= prevPrice * 0.96) {
         // Price corrected while thesis & earnings intact
         const absDrop = Math.abs(parseFloat(priceDeltaPct));
-        triggerReason = 'PRICE_CORRECTION_EARNINGS_INTACT';
-        triggerMechanics = `Share price corrected ${absDrop}% (from ₹${prevPrice.toFixed(1)} to ₹${price.toFixed(1)}) while trailing earnings remained intact with pristine cash conversion.`;
-        whatChanged = `Price pulled back ${absDrop}% over the last ${daysSince} days while trailing TTM earnings and cash conversion held steady.`;
-        actionableJustification = `Correction widens stressed growth cushion by ${stressDelta > 0 ? '+' + stressDelta : stressDelta}% to +${metrics.stressTestedExpectationGap}%, creating an enhanced risk-adjusted entry point.`;
+        triggerReason = 'PRICE_CORRECTION';
+        triggerMechanics = `Share price corrected ${absDrop}% (from ₹${prevPrice.toFixed(1)} to ₹${price.toFixed(1)}) since the last delivered alert; the thesis health gate still reads ${thesisHealth}.`;
+        whatChanged = `Price pulled back ${absDrop}% over the last ${daysSince} days.`;
+        actionableJustification = `The correction moves the stressed growth cushion by ${stressDelta > 0 ? '+' + stressDelta : stressDelta}% to ${metrics.stressTestedExpectationGap}%.`;
       } else if (prevPe > 0 && pe <= prevPe * 0.90) {
         // Multiple compression without deterioration
         triggerReason = 'MULTIPLE_COMPRESSION_WITHOUT_DETERIORATION';
         triggerMechanics = `Valuation multiple compressed from ${prevPe.toFixed(1)}x to ${pe.toFixed(1)}x without deterioration in operating thesis.`;
-        whatChanged = `Trailing P/E contracted by ${Math.abs(peDelta)} turns since last alert (${prevPe.toFixed(1)}x → ${pe.toFixed(1)}x) while operations continued compounding.`;
-        actionableJustification = `Market de-rating provides an expanded margin of safety without fundamental thesis degradation.`;
+        whatChanged = `Trailing P/E contracted by ${Math.abs(peDelta)} turns since the last delivered alert (${prevPe.toFixed(1)}x → ${pe.toFixed(1)}x).`;
+        actionableJustification = `The de-rating widens the margin of safety to the model fair value; the thesis health gate still reads ${thesisHealth}.`;
       } else if (prevCfoPat < 0.70 && metrics.cfoPatRatio >= 0.70) {
         // Cash conversion inflection
         triggerReason = 'CASH_CONVERSION_INFLECTION';
@@ -138,15 +142,15 @@ export async function resolveStateTransitionTrigger(equity, pool = defaultPool) 
 
         if (prevPrice > 0 && price <= prevPrice * 0.96) {
           const pctDrop = (((prevPrice - price) / prevPrice) * 100).toFixed(1);
-          triggerReason = 'PRICE_CORRECTION_EARNINGS_INTACT';
-          triggerMechanics = `Share price corrected ${pctDrop}% (from ₹${prevPrice.toFixed(1)} to ₹${price.toFixed(1)}) while trailing earnings remained intact with pristine cash conversion.`;
-          whatChanged = `Share price corrected ${pctDrop}% from recent snapshot while earnings compounding remained intact.`;
-          actionableJustification = `Price pullback drives implied growth down to ${metrics.impliedGrowth}%, opening an attractive +${metrics.stressTestedExpectationGap}% stressed cushion.`;
+          triggerReason = 'PRICE_CORRECTION';
+          triggerMechanics = `Share price corrected ${pctDrop}% (from ₹${prevPrice.toFixed(1)} to ₹${price.toFixed(1)}) since the previous market-data snapshot; the thesis health gate reads ${thesisHealth}.`;
+          whatChanged = `Share price corrected ${pctDrop}% from the previous snapshot.`;
+          actionableJustification = `The pullback lowers the market-implied growth to ${metrics.impliedGrowth}% and leaves a ${metrics.stressTestedExpectationGap}% stressed cushion.`;
         } else if (prevPe > 0 && pe <= prevPe * 0.90) {
           triggerReason = 'MULTIPLE_COMPRESSION_WITHOUT_DETERIORATION';
           triggerMechanics = `Valuation multiple compressed from ${prevPe.toFixed(1)}x to ${pe.toFixed(1)}x without deterioration in operating thesis.`;
-          whatChanged = `Valuation compressed from ${prevPe.toFixed(1)}x to ${pe.toFixed(1)}x without operational degradation.`;
-          actionableJustification = `Multiple de-rating increases margin of safety relative to underwritten growth of ${metrics.expectedCagr}%.`;
+          whatChanged = `Valuation compressed from ${prevPe.toFixed(1)}x to ${pe.toFixed(1)}x since the previous snapshot.`;
+          actionableJustification = `The lower multiple increases the margin of safety relative to underwritten growth of ${metrics.expectedCagr}%.`;
         }
       }
 
@@ -155,10 +159,10 @@ export async function resolveStateTransitionTrigger(equity, pool = defaultPool) 
         : (metrics.marginOfSafetyPct || 0);
 
       if (triggerReason === 'ASYMMETRIC_UNDERWRITING_QUALIFICATION' && mos >= 20.0) {
-        triggerReason = '200_EMA_PULLBACK_HIGH_CONVICTION';
-        triggerMechanics = `Testing structural 200 EMA support floor at a ${mos.toFixed(1)}% discount to DCF Fair Value (₹${equity.hedgeFundScorecard?.fairValuePrice || price}).`;
-        whatChanged = `Price pulled back to major institutional support band while underwritten growth trajectory (${metrics.expectedCagr}% CAGR) and cash flow conversion remain intact.`;
-        actionableJustification = `Offers +${metrics.stressTestedExpectationGap}% stressed expectation cushion and attractive asymmetric compounding entry point.`;
+        triggerReason = 'DEEP_DISCOUNT_TO_FAIR_VALUE';
+        triggerMechanics = `Price is at a ${mos.toFixed(1)}% discount to the model fair value (₹${equity.hedgeFundScorecard?.fairValuePrice || price}).`;
+        whatChanged = `First qualification at a ${mos.toFixed(1)}% discount to model fair value, with the underwritten growth of ${metrics.expectedCagr}% CAGR above the market-implied ${metrics.impliedGrowth}%.`;
+        actionableJustification = `The stressed expectation cushion is ${metrics.stressTestedExpectationGap}% after a 20% haircut to underwritten growth.`;
       } else if (triggerReason === 'ASYMMETRIC_UNDERWRITING_QUALIFICATION' && thesisHealth === 'STRENGTHENING') {
         triggerReason = 'THESIS_STRENGTHENING_CONFIRMED';
         triggerMechanics = `Quarterly audit confirmed STRENGTHENING thesis state; operational growth trajectory of ${metrics.expectedCagr}% CAGR significantly exceeds market-implied ${metrics.impliedGrowth}% growth.`;
@@ -271,8 +275,15 @@ export function formatDislocationTelegramMessage(equity, triggerInfo = {}) {
 
   msg += `🛡️ *RISK CONTROLS & CASH CONVERSION (PASSED)*\n`;
   msg += `• ROCE: *${metrics.roce}%* (\`${metrics.roceRegimeClassification}\`)\n`;
-  msg += `• Debt/Equity: *${metrics.debtToEquity.toFixed(2)}*\n`;
-  msg += `• Cash Flow: *CFO/PAT ${metrics.cfoPatRatio.toFixed(2)}* | *Rec Days: ${metrics.receivableDays}*\n`;
+  const debtToEquityText = Number.isFinite(metrics.debtToEquity) ? metrics.debtToEquity.toFixed(2) : 'not verified';
+  const cfoPatText = Number.isFinite(metrics.cfoPatRatio) ? metrics.cfoPatRatio.toFixed(2) : 'not verified';
+  const receivableDaysText = Number.isFinite(metrics.receivableDays) ? metrics.receivableDays : 'not verified';
+  msg += `• Debt/Equity: *${debtToEquityText}*\n`;
+  if (Number.isFinite(metrics.cfoPatRatio)) {
+    msg += `• Cash Flow: *CFO/PAT ${cfoPatText}* | *Rec Days: ${receivableDaysText}*\n`;
+  } else {
+    msg += `• Cash Flow: *CFO/PAT not verified*; qualified on a verified net-cash balance sheet\n`;
+  }
   if (hasHf && hf.thesisBreakerMetric) {
     msg += `• 🚨 *Thesis-Breaker Red Line*: \`${hf.thesisBreakerMetric}\`\n`;
   }
@@ -356,22 +367,43 @@ export async function evaluateAndDispatchDislocationAlerts(options = {}) {
   const cohort = await loadAuditedPortfolioFromDatabase(pool);
   const ranked = rankUniverseByMispricing(cohort);
 
-  // 2. Identify Top Conviction Dislocations
-  const dislocations = ranked.filter(
-    s => s.opportunityTier === MISPRICING_OPPORTUNITY_TIER.TOP_CONVICTION_DISLOCATION
+  // 2. Identify Top Conviction Dislocations (only stocks with complete, fresh inputs can qualify)
+  const evaluable = ranked.filter(s => s.dataComplete);
+  const notEvaluated = ranked.filter(s => !s.dataComplete);
+  // The alert says underwritten growth exceeds what the price implies, so only a positive expectation gap may alert.
+  const dislocations = evaluable.filter(
+    s => s.opportunityTier === MISPRICING_OPPORTUNITY_TIER.TOP_CONVICTION_DISLOCATION &&
+         Number.isFinite(s.metrics.expectationGap) && s.metrics.expectationGap > 0
   );
 
   const results = {
-    evaluatedCount: ranked.length,
+    evaluatedCount: evaluable.length,
+    notEvaluatedCount: notEvaluated.length,
+    notEvaluatedTickers: notEvaluated.map(s => ({ ticker: s.ticker, missing: s.missingInputs })),
     dislocationsFound: dislocations.length,
     alertsDispatched: 0,
+    alertsFailed: 0,
     alertsSuppressed: 0,
     dispatchedTickers: [],
+    failedTickers: [],
     suppressedTickers: []
   };
 
-  console.log(`\n🔍 Valuation Dislocation Watchdog: Evaluated ${ranked.length} stocks.`);
+  console.log(`\n🔍 Valuation Dislocation Watchdog: Evaluated ${evaluable.length} of ${ranked.length} stocks.`);
+  for (const s of notEvaluated) {
+    console.log(`   ⚠️ ${s.ticker}: not evaluated (${s.missingInputs.join(', ')})`);
+  }
   console.log(`Found ${dislocations.length} candidates in TOP_CONVICTION_DISLOCATION tier.\n`);
+
+  // A watchdog that silently evaluates nothing is a silent failure (e.g. the market-data sync died): say so.
+  if (!isDryRun && ranked.length > 0 && evaluable.length === 0) {
+    const reasons = [...new Set(notEvaluated.flatMap(s => s.missingInputs))].join(', ');
+    try {
+      await sendTelegramMessage(`⚠️ Valuation watchdog could not evaluate any of ${ranked.length} stocks (${reasons}). No valuation alerts were possible today. Check the market-data sync and the underwriting file.`);
+    } catch (err) {
+      console.error('❌ [TELEGRAM ERROR] Failed to deliver watchdog health warning:', err.message);
+    }
+  }
 
   for (const equity of dislocations) {
     const ticker = equity.ticker;
@@ -412,7 +444,9 @@ export async function evaluateAndDispatchDislocationAlerts(options = {}) {
       console.log(`ℹ️ [DRY RUN] Skipped real Telegram delivery for ${ticker}. Status recorded as DRY_RUN_EMITTED.`);
     }
 
-    // Record into database
+    // Record into database. A recording failure must not escape: the alert is already out, and an escaping error would
+    // skip the daily "ran today" marker and the cooldown row, so the same alert would be re-sent every scan cycle.
+    try {
     await pool.query(`
       INSERT INTO valuation_dislocation_alerts (
         ticker, share_price, pe_ratio, market_cap, expected_cagr,
@@ -423,7 +457,7 @@ export async function evaluateAndDispatchDislocationAlerts(options = {}) {
       ticker,
       equity.price,
       equity.pe,
-      equity.metrics.marketCap || (equity.price * 25), // fallback if needed
+      equity.metrics.marketCap ?? null,
       equity.metrics.expectedCagr,
       equity.metrics.impliedGrowth,
       equity.metrics.expectationGap,
@@ -431,12 +465,22 @@ export async function evaluateAndDispatchDislocationAlerts(options = {}) {
       equity.mispricingScore,
       equity.metrics.roce,
       equity.metrics.cfoPatRatio,
-      equity.metrics.receivableDays,
+      Number.isFinite(equity.metrics.receivableDays) ? Math.round(equity.metrics.receivableDays) : null,
       triggerInfo.triggerReason,
       triggerInfo.triggerMechanics,
       triggerInfo.stateChangeSummary,
       notificationStatus
     ]);
+    } catch (recordErr) {
+      console.error(`❌ [DB ERROR] Could not record the ${notificationStatus} alert for ${ticker}:`, recordErr.message);
+    }
+
+    // A failed send is not a dispatched alert: report it so the caller does not mark the day as done and retries.
+    if (notificationStatus === 'FAILED') {
+      results.alertsFailed++;
+      results.failedTickers.push(ticker);
+      continue;
+    }
 
     results.alertsDispatched++;
     results.dispatchedTickers.push(ticker);

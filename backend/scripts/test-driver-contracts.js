@@ -16,6 +16,7 @@ import dotenv from 'dotenv';
 dotenv.config({ path: './.env.local' });
 import { pool } from '../db/pool.js';
 import { generateDriverLevelContracts } from './generate-driver-level-contracts.js';
+import { THESIS_CONTRACT_DIR } from '../utils/thesis-contract-files.js';
 
 async function runDriverContractsTest() {
   console.log('\n========================================================================');
@@ -25,7 +26,7 @@ async function runDriverContractsTest() {
   // 1. Generate contracts
   await generateDriverLevelContracts();
 
-  const jsonPath = path.resolve('reports/thesis_board/driver-level-thesis-contracts.json');
+  const jsonPath = path.join(THESIS_CONTRACT_DIR, 'driver-level-thesis-contracts.json');
   assert(fs.existsSync(jsonPath), 'JSON contracts file must exist');
 
   const data = JSON.parse(fs.readFileSync(jsonPath, 'utf-8'));

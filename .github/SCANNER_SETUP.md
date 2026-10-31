@@ -5,13 +5,15 @@
 Go to your repo on GitHub:
 **Settings → Secrets and variables → Actions → New repository secret**
 
-Add all 5 of these:
+Add these (the three LLM keys are all free; at least one is required, all three give the best reliability):
 
 | Secret Name | Where to find it |
 |---|---|
 | `DATABASE_URL` | Your Supabase/Neon/Railway connection string (same as `.env.local`) |
 | `JWT_SECRET` | Same as `.env.local` — any hex string works |
-| `NVIDIA_API_KEY` | [platform.nvidia.com](https://platform.nvidia.com) — NIM API key |
+| `GROQ_API_KEY` | [console.groq.com](https://console.groq.com/keys) — free key (`gsk_…`); first in the LLM failover chain |
+| `GEMINI_API_KEY` | [aistudio.google.com](https://aistudio.google.com/apikey) — free key; LLM failover + scanned-PDF OCR + concall audio |
+| `NVIDIA_API_KEY` | [platform.nvidia.com](https://platform.nvidia.com) — NIM API key (last-resort provider; any ONE of the three LLM keys is enough to run) |
 | `TELEGRAM_BOT_TOKEN` | From @BotFather on Telegram |
 | `TELEGRAM_CHAT_ID` | Your personal or group chat ID |
 

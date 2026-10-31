@@ -436,6 +436,10 @@ export function reconcileGuidanceVsActual({
         if (targetFyParsed.fiscalYear > 0 && targetFyParsed.fiscalYear < currentQParsed.fiscalYear) {
           continue; // Target is for an earlier completed fiscal year
         }
+        // A target more than one fiscal year ahead is a multi-year vision, not something one quarter can "pace" against
+        if (targetFyParsed.fiscalYear > currentQParsed.fiscalYear + 1) {
+          continue;
+        }
       }
 
       // If targetFY is not explicit, verify origin quarter was not in an earlier fiscal year
@@ -471,6 +475,7 @@ export function reconcileGuidanceVsActual({
         const maxPct = classification.rangeMax !== null ? classification.rangeMax : classification.targetNumericValue;
         const isAhead = actualRevGrowth >= maxPct;
         const targetFY = classification.targetFY || "Full-Year";
+        const band = minPct === maxPct ? `${minPct}%` : `${minPct}–${maxPct}%`; // a single target is not a range
 
         bestAnnualMatch = {
           scope: 'ANNUAL',
@@ -481,8 +486,8 @@ export function reconcileGuidanceVsActual({
           guidedValue: classification.isRange ? `${minPct}%–${maxPct}% YoY (${targetFY} Target)` : `${minPct}% YoY (${targetFY} Target)`,
           actualValue: `${actualRevGrowth >= 0 ? '+' : ''}${actualRevGrowth}% YoY (${currentQuarter})`,
           verdictBadge: isAhead
-            ? `🟢 *ANNUAL PACING AHEAD:* Running at ${actualRevGrowth}% YoY vs ${minPct}–${maxPct}% full-year target`
-            : `⏳ *ANNUAL PACING ACTIVE:* Running at ${actualRevGrowth}% YoY vs ${minPct}–${maxPct}% full-year target`
+            ? `🟢 *ANNUAL PACING AHEAD:* Running at ${actualRevGrowth}% YoY vs ${band} full-year target`
+            : `⏳ *ANNUAL PACING ACTIVE:* Running at ${actualRevGrowth}% YoY vs ${band} full-year target`
         };
       }
     }

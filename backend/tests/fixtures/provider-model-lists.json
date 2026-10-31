@@ -1,0 +1,37 @@
+{
+  "_note": "Real /models responses (ids only) captured 2026-10-31. They are noisy on purpose: embeddings, speech, image, safety, vision and already-retired chat models are all listed.",
+  "groq": [
+    { "id": "openai/gpt-oss-safeguard-20b", "active": true, "output_modalities": ["text"] },
+    { "id": "meta-llama/llama-prompt-guard-2-86m", "active": true, "output_modalities": ["text"] },
+    { "id": "qwen/qwen3.8-27b", "active": true, "output_modalities": ["text"] },
+    { "id": "canopylabs/orpheus-v1-english", "active": true, "output_modalities": ["audio"] },
+    { "id": "openai/gpt-oss-120b", "active": true, "output_modalities": ["text"] },
+    { "id": "whisper-large-v3", "active": true, "output_modalities": ["text"] },
+    { "id": "whisper-large-v3-turbo", "active": true, "output_modalities": ["text"] },
+    { "id": "allam-2-7b", "active": true, "output_modalities": ["text"] },
+    { "id": "openai/gpt-oss-20b", "active": true, "output_modalities": ["text"] },
+    { "id": "some/retired-chat-70b", "active": false, "output_modalities": ["text"] }
+  ],
+  "gemini": [
+    "models/gemini-2.5-flash", "models/gemini-2.5-pro", "models/gemini-2.5-flash-preview-tts", "models/gemma-4-31b-it",
+    "models/gemini-flash-latest", "models/gemini-flash-lite-latest", "models/gemini-pro-latest", "models/gemini-2.5-flash-lite",
+    "models/gemini-2.5-flash-image", "models/gemini-3-flash-preview", "models/gemini-3.1-pro-preview", "models/gemini-3.1-flash-lite-preview",
+    "models/gemini-3.1-flash-lite", "models/gemini-3-pro-image", "models/gemini-3.1-flash-image", "models/gemini-3.1-flash-lite-image",
+    "models/gemini-3.5-flash", "models/gemini-3.5-flash-lite", "models/gemini-omni-flash-preview", "models/gemini-3.5-transcribe",
+    "models/gemini-3.6-flash", "models/gemini-3.7-flash", "models/gemini-3.8-flash", "models/gemini-4-argon",
+    "models/gemini-3.8-flash-tts", "models/gemini-3.8-flash-lite-tts", "models/gemini-robotics-er-2-preview",
+    "models/gemini-2.5-computer-use-preview-10-2025", "models/antigravity-preview-latest", "models/deep-research-preview-04-2026",
+    "models/gemini-embedding-001", "models/aqa", "models/gemini-3.5-transcribe-live", "models/gemini-2.5-flash-native-audio-latest",
+    "models/gemini-3.1-flash-live-preview", "models/gemini-3.8-live", "models/lyria-3.5", "models/gemini-nano-banana-2.1"
+  ],
+  "nim": [
+    "01-ai/yi-large", "adept/fuyu-8b", "bigcode/starcoder2-15b", "deepseek-ai/deepseek-coder-6.7b-instruct", "deepseek-ai/deepseek-v4.1-flash",
+    "google/codegemma-7b", "google/deplot", "google/gemma-3-4b-it", "google/gemma-4-31b-it", "meta/llama-3.2-11b-vision-instruct",
+    "meta/llama-3.2-90b-vision-instruct", "meta/llama-guard-4-12b", "microsoft/phi-3-vision-128k-instruct", "minimaxai/minimax-m3.1-flash",
+    "mistralai/mistral-large-4-1t-a52b", "moonshotai/kimi-k2.6", "nvidia/embed-qa-4", "nvidia/llama-3.1-nemoguard-8b-content-safety",
+    "nvidia/llama-3.1-nemotron-70b-instruct", "nvidia/llama-3.2-nv-embedqa-1b-v2", "nvidia/nemotron-3-embed-1b", "nvidia/nemotron-3-super-120b-a12b",
+    "nvidia/nemotron-3.5-content-safety", "nvidia/nemotron-3.5-lightning-30b-a3b", "nvidia/nemotron-3.5-super-vl-120b-a12b", "nvidia/nemotron-4-340b-reward",
+    "nvidia/nemotron-nano-3-30b-a3b", "nvidia/nemotron-parse", "nvidia/riva-translate-4b-instruct", "nvidia/vila", "openai/gpt-oss-20b",
+    "snowflake/arctic-embed-l", "writer/palmyra-med-70b", "z-ai/glm-5.3-flash"
+  ]
+}

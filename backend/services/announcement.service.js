@@ -4,6 +4,8 @@ import { pool } from "../db/pool.js";
 import { PDFParse } from "pdf-parse";
 import { sendTelegramMessage } from "./telegram.service.js";
 import { GEMINI_API_KEY } from "../config/env.js";
+import { backoffDelayMs } from "./retry-policy.service.js";
+import { getGeminiModelNames } from "./llm.service.js";
 
 const HIGH_KEYWORDS = [
   "order", "contract", "work order", "order win", "loa", "letter of award",
@@ -697,14 +699,49 @@ export function generateAnnouncementHash(ticker, title, timestamp, discriminator
  */
 export async function isAnnouncementProcessed(ticker, sourceId, titleHash) {
   const cleanSourceId = sourceId && String(sourceId).trim().length > 0 ? String(sourceId).trim() : null;
+  // A 'failed' row (classification could not run) counts as "already handled" only while its backoff timer is running;
+  // once the timer passes (or if none was recorded) it is picked up again.
   const result = await pool.query(
-    `SELECT id FROM corporate_announcements 
-     WHERE ticker = $1 
+    `SELECT id FROM corporate_announcements
+     WHERE ticker = $1
      AND (($2::text IS NOT NULL AND source_id = $2) OR title_hash = $3)
-     AND status != 'failed'`,
+     AND (status != 'failed'
+          OR (status = 'failed' AND (event_analysis->>'scan_next_retry_at')::timestamptz > NOW()))`,
     [ticker, cleanSourceId, titleHash]
   );
   return result.rows.length > 0;
+}
+
+/**
+ * Records one more failed classification of a saved 'failed' row and schedules its next retry with growing delay
+ * (5, 10, 20, 30, 60 minutes) so a provider outage is not hammered every scan cycle.
+ * @returns {{failures: number, nextRetryAt: Date|null}}
+ */
+export async function recordClassificationFailure(ticker, sourceId, titleHash) {
+  const cleanSourceId = sourceId && String(sourceId).trim().length > 0 ? String(sourceId).trim() : null;
+  const { rows } = await pool.query(
+    `UPDATE corporate_announcements
+     SET event_analysis = COALESCE(event_analysis, '{}'::jsonb) || jsonb_build_object(
+           'scan_failures', COALESCE((event_analysis->>'scan_failures')::int, 0) + 1,
+           'scan_first_failed_at', COALESCE(event_analysis->>'scan_first_failed_at', NOW()::text))
+     WHERE ticker = $1
+       AND (($2::text IS NOT NULL AND source_id = $2) OR title_hash = $3)
+       AND status = 'failed'
+     RETURNING (event_analysis->>'scan_failures')::int AS failures`,
+    [ticker, cleanSourceId, titleHash]
+  );
+  if (!rows[0]) return { failures: 0, nextRetryAt: null };
+  const failures = rows[0].failures || 1;
+  const nextRetryAt = new Date(Date.now() + backoffDelayMs(failures));
+  await pool.query(
+    `UPDATE corporate_announcements
+     SET event_analysis = COALESCE(event_analysis, '{}'::jsonb) || jsonb_build_object('scan_next_retry_at', $1::text)
+     WHERE ticker = $2
+       AND (($3::text IS NOT NULL AND source_id = $3) OR title_hash = $4)
+       AND status = 'failed'`,
+    [nextRetryAt.toISOString(), ticker, cleanSourceId, titleHash]
+  );
+  return { failures, nextRetryAt };
 }
 
 /**
@@ -1152,6 +1189,26 @@ export function isValidDate(dateStr) {
 }
 
 /**
+ * A "results date" must be a plausible board-meeting date for the filing it came from. Models often return the
+ * reporting-period end ("2026-09-30") instead; fiscal quarter-ends and dates far before the filing are rejected.
+ * @returns {string|null} YYYY-MM-DD or null
+ */
+export function sanitizeResultDate(resultDate, filingTimestamp = null) {
+  if (!isValidDate(resultDate)) return null;
+  const [y, m, d] = resultDate.split("-").map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  if (isNaN(dt.getTime()) || dt.getUTCMonth() !== m - 1) return null;
+  const mmdd = resultDate.slice(5);
+  if (["03-31", "06-30", "09-30", "12-31"].includes(mmdd)) return null;
+  const filedAt = filingTimestamp ? new Date(filingTimestamp) : null;
+  if (filedAt && !isNaN(filedAt.getTime())) {
+    const daysBeforeFiling = (filedAt.getTime() - dt.getTime()) / 86400000;
+    if (daysBeforeFiling > 21) return null;
+  }
+  return resultDate;
+}
+
+/**
  * Updates the result date for a specific stock with validation guards.
  */
 export async function updateStockResultDate(stockId, resultDate, confidence) {
@@ -1458,10 +1515,25 @@ export async function recordScannerFailure(error, options = {}) {
 }
 
 
+/** Gemini likes markdown; the deterministic statement parser reads plain statement text. */
+export function stripOcrMarkdown(text) {
+  return String(text || "")
+    .replace(/^\s*\|?\s*:?-{2,}:?\s*(?:\|\s*:?-{2,}:?\s*)*\|?\s*$/gm, "")   // table separator rows
+    .replace(/\*\*|__/g, "")                                              // bold
+    .replace(/^#{1,6}\s*/gm, "")                                           // headings
+    .replace(/[^\S\r\n]*\|[^\S\r\n]*/g, " ");                                          // column separators -> plain spacing (the statement parser tokenises on whitespace)
+}
+
+const TABLE_FIDELITY_RULES = "Output plain text only: no markdown, no bold, no headings, no separator rows. Keep every row label and keep the column order and column headings exactly as printed (Quarter Ended, Preceding Quarter, Corresponding Quarter, Half Year Ended, Year Ended). Write each table row on one line with its numbers separated by ' | ', and state the unit printed in the table heading (Rs. in crores / lakhs). Preserve exact numbers and parentheses for negatives; never estimate or fill in a figure you cannot read.";
+// Re-reading only the statements keeps the call to ~20 s (a full 15-page transcription takes ~90 s, longer than the pipeline may block before an alert).
+const STATEMENTS_OCR_PROMPT = `Transcribe ONLY the financial results statements in this filing: the Standalone statement and the Consolidated statement of profit and loss (revenue, expenses, profit before tax, tax, profit for the period, other comprehensive income, profit attributable to owners, earnings per share) and the segment results table if present. Skip auditor reports, notes, balance sheets and cash-flow statements. ${TABLE_FIDELITY_RULES}`;
+const FULL_OCR_PROMPT = `Transcribe the text of this corporate filing verbatim. Reproduce every financial results table row by row. ${TABLE_FIDELITY_RULES}`;
+
 /**
  * Multimodal Gemini Vision OCR fallback for scanned zero-text PDFs.
+ * @param {{statementsOnly?: boolean}} [opts] statementsOnly: transcribe just the results statements (fast re-read)
  */
-async function ocrPdfWithGemini(uint8Buffer, apiKey) {
+export async function ocrPdfWithGemini(uint8Buffer, apiKey, { statementsOnly = false, accept = null, totalMs = 80000, perModelMs = 35000, minMs = 5000 } = {}) {
   if (!apiKey || !uint8Buffer || uint8Buffer.length === 0) return null;
   // Guard: max 20MB inline base64
   if (uint8Buffer.length > 20 * 1024 * 1024) {
@@ -1470,12 +1542,25 @@ async function ocrPdfWithGemini(uint8Buffer, apiKey) {
   }
 
   const base64Data = Buffer.from(uint8Buffer).toString("base64");
-  const models = ["gemini-3.5-flash", "gemini-3.6-flash", "gemini-flash-latest"];
+  // Models come from the discovered registry (fast lite models first, then newer flash models), never a hard-coded list: on
+  // 2026-10-31 a measured list was already out of date (newer models appeared, 2.5 was retired). Measured on the 10.8 MB
+  // scanned GRAVITA PDF: lite models 11-25 s, flash models 37-50 s, all reading the statements correctly.
+  const models = getGeminiModelNames();
+
+  // The pipeline is restarted every 5 minutes, so OCR gets one bounded budget across all model attempts. Each model
+  // is also capped to its own slice: a model that answers "503 high demand" only after ~60 s used to consume the whole
+  // budget and leave the fallback 5-24 s, so scanned results PDFs could not be read at all.
+  const ocrDeadline = Date.now() + totalMs;
 
   for (const model of models) {
+    const msLeft = ocrDeadline - Date.now();
+    if (msLeft < minMs) break;
+    const sliceMs = Math.min(msLeft, perModelMs);
+    console.log(`[GEMINI OCR] ${statementsOnly ? "Statements" : "Full-document"} transcription with ${model} (${Math.round(uint8Buffer.length / 1024)} KB, ${Math.round(sliceMs / 1000)}s slice, ${Math.round(msLeft / 1000)}s total left)...`);
     try {
       const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`, {
         method: "POST",
+        signal: AbortSignal.timeout(sliceMs),
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           contents: [{
@@ -1487,13 +1572,13 @@ async function ocrPdfWithGemini(uint8Buffer, apiKey) {
                 }
               },
               {
-                text: "Extract and transcribe all text from this corporate filing document verbatim. Pay particular attention to all financial results tables, row labels (Revenue from operations, Total Income, PBT, Profit for the Period / PAT), and column figures (Quarter Ended, Half Year Ended, Year Ended). Preserve exact numbers."
+                text: statementsOnly ? STATEMENTS_OCR_PROMPT : FULL_OCR_PROMPT
               }
             ]
           }],
           generationConfig: {
             temperature: 0.1,
-            maxOutputTokens: 8192
+            maxOutputTokens: statementsOnly ? 12288 : 16384
           }
         })
       });
@@ -1505,14 +1590,26 @@ async function ocrPdfWithGemini(uint8Buffer, apiKey) {
       }
 
       const data = await res.json();
-      const extractedText = data.candidates?.[0]?.content?.parts?.[0]?.text;
+      const candidate = data.candidates?.[0];
+      // Join every part: a long transcription can arrive split across several parts.
+      const extractedText = (candidate?.content?.parts || []).map(p => p.text || "").join("");
+      if (!extractedText || extractedText.length <= 50) {
+        console.warn(`[GEMINI OCR] Model ${model} returned no usable text (finish=${candidate?.finishReason || "none"}, blocked=${data.promptFeedback?.blockReason || "no"}).`);
+      }
       if (extractedText && extractedText.length > 50) {
-        return extractedText
+        const cleaned = stripOcrMarkdown(extractedText)
           .replace(/[^\S\r\n]+/g, ' ')
           .replace(/\r\n/g, '\n')
           .replace(/\n{3,}/g, '\n\n')
           .trim()
           .substring(0, 60000);
+        // The caller decides what a usable transcription is (e.g. "parses into financial statements"); a fragment
+        // from one model must not stop the next model from trying.
+        if (typeof accept === "function" && !accept(cleaned)) {
+          console.warn(`[GEMINI OCR] Model ${model} returned ${cleaned.length} chars that failed the caller's acceptance check; trying next model.`);
+          continue;
+        }
+        return cleaned;
       }
     } catch (err) {
       console.warn(`[GEMINI OCR] Attempt with ${model} failed: ${err.message}`);
@@ -1577,6 +1674,20 @@ function httpsDownload(url, signal, redirectsLeft = 3) {
  * @returns {Promise<string>}
  */
 export async function extractTextFromPdfUrl(url) {
+  return (await extractPdfTextDetailed(url)).text;
+}
+
+/**
+ * Same as extractTextFromPdfUrl but says WHY nothing came back, so callers can tell a CDN/download problem
+ * (worth retrying for hours) from a scanned PDF (needs OCR), and can force the vision-OCR re-read of a PDF whose
+ * embedded text layer is garbled.
+ *
+ * @param {string} url
+ * @param {{forceOcr?: boolean, acceptOcr?: (text: string) => boolean}} [opts] forceOcr: read the results statements
+ *   with Gemini vision even when a text layer exists; acceptOcr: a transcription is only taken when this returns true
+ * @returns {Promise<{text: string, reason: null|"FETCH_FAILED"|"NO_TEXT", detail: string, ocrUsed: boolean}>}
+ */
+export async function extractPdfTextDetailed(url, { forceOcr = false, acceptOcr = null } = {}) {
   let downloadUrl = url;
   if (downloadUrl.includes("drive.google.com/file/d/")) {
     const match = downloadUrl.match(/\/file\/d\/([^\/]+)/);
@@ -1587,8 +1698,10 @@ export async function extractTextFromPdfUrl(url) {
 
   const MAX_ATTEMPTS = 2;
   let lastErr = null;
+  let failureStage = "fetch";
 
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    failureStage = "fetch";
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 60000); // 60s timeout for PDF download (presentations can be 10MB+)
 
@@ -1603,6 +1716,7 @@ export async function extractTextFromPdfUrl(url) {
       clearTimeout(timeoutId);
 
       console.log(`[PDF] Parsing...`);
+      failureStage = "parse";
       const uint8 = new Uint8Array(bytes);
 
       // Suppress noisy pdf.js standardFontDataUrl / TT bytecode / getHexString warnings from stdout
@@ -1638,11 +1752,17 @@ export async function extractTextFromPdfUrl(url) {
 
       // OCR Fallback: If native parse threw or extracted < 100 characters (scanned image or compressed xref), fallback to Gemini Vision
       const activeGeminiKey = GEMINI_API_KEY || process.env.GEMINI_API_KEY;
-      if (cleanText.length < 100 && activeGeminiKey) {
+      let ocrUsed = false;
+      if (forceOcr && !activeGeminiKey) {
+        console.warn(`[PDF OCR] Vision OCR requested but GEMINI_API_KEY is not configured; keeping the embedded text layer.`);
+      }
+      if ((forceOcr || cleanText.length < 100) && activeGeminiKey) {
         try {
-          console.log(`[PDF OCR] Native parse yielded ${cleanText.length} chars. Invoking Gemini Multimodal Document OCR...`);
-          const ocrText = await ocrPdfWithGemini(uint8, activeGeminiKey);
+          console.log(`[PDF OCR] ${forceOcr ? "Forced re-read of" : "Native parse yielded"} ${cleanText.length} chars. Invoking Gemini Multimodal Document OCR...`);
+          // `bytes` (the download buffer), NOT `uint8`: pdf.js takes ownership of the array it parses and leaves it empty.
+          const ocrText = await ocrPdfWithGemini(bytes, activeGeminiKey, { statementsOnly: forceOcr, accept: acceptOcr });
           if (ocrText && ocrText.length > 50) {
+            ocrUsed = true;
             cleanText = ocrText
               .replace(/[^\S\r\n]+/g, ' ')
               .replace(/\r\n/g, '\n')
@@ -1658,9 +1778,11 @@ export async function extractTextFromPdfUrl(url) {
 
       if (cleanText.length > 0) {
         console.log(`[PDF] Extracted ${cleanText.length} characters.`);
-        return cleanText;
+        return { text: cleanText, reason: null, detail: "", ocrUsed };
       }
-      throw new Error("Unable to extract readable text from PDF via native parser or OCR");
+      throw new Error(activeGeminiKey
+        ? "Unable to extract readable text from PDF via native parser or OCR"
+        : "Unable to extract readable text from PDF (no text layer, and GEMINI_API_KEY is not configured for OCR)");
     } catch (err) {
       clearTimeout(timeoutId);
       lastErr = err;
@@ -1676,7 +1798,13 @@ export async function extractTextFromPdfUrl(url) {
   } else {
     console.error(`[PDF ERROR] Failed to extract text from ${url}:`, lastErr?.message || "Unknown error");
   }
-  return "";
+  const timedOut = lastErr?.name === "AbortError";
+  return {
+    text: "",
+    reason: failureStage === "fetch" ? "FETCH_FAILED" : "NO_TEXT",
+    detail: timedOut ? "download timed out" : String(lastErr?.message || "unknown error").slice(0, 200),
+    ocrUsed: false
+  };
 }
 
 /**

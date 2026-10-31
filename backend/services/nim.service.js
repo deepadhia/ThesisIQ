@@ -1,14 +1,14 @@
 /**
- * NVIDIA NIM Service (Geforce Now API)
- * Uses OpenSource models (Llama 3.1) for intelligence classification.
+ * LLM classification service (file name is historical)
+ * Scanner-side AI classification. It no longer calls NIM directly: it uses the shared provider chain in llm.service.js
+ * (Groq / Gemini / NIM with failover and a circuit breaker).
  */
 
-import { NVIDIA_API_KEY } from "../config/env.js";
+import { runLlm, hasLlmProvider } from "./llm.service.js";
 import { extractDeterministicFinancials } from "./financial-validator.service.js";
 import { applyInstitutionalGuard } from "./institutional-guard.service.js";
 import { buildThesisContext } from "./thesis-driver-context.service.js";
 
-const NIM_BASE_URL = "https://integrate.api.nvidia.com/v1/chat/completions";
 
 /**
  * Robust fallback parser when NIM models output markdown key-values instead of strict JSON.
@@ -60,15 +60,15 @@ function parseMarkdownKvFallback(text) {
 }
 
 /**
- * Classifies a corporate announcement using NVIDIA NIM.
+ * Classifies a corporate announcement with the shared LLM failover chain.
  * @param {string} ticker
  * @param {string} announcementText
  * @param {string} title
  * @returns {Promise<object>}
  */
 export async function classifyAnnouncementWithNim(ticker, announcementText, title, investmentThesis = null) {
-  if (!NVIDIA_API_KEY) {
-    throw new Error("NVIDIA_API_KEY not configured.");
+  if (!hasLlmProvider()) {
+    throw new Error("No LLM provider configured (set GROQ_API_KEY, GEMINI_API_KEY and/or NVIDIA_API_KEY).");
   }
 
   // Thesis + driver contract (what must be true / what would falsify it) so even the first-pass classification
@@ -162,109 +162,43 @@ ${thesisCtx.text}
     ${cappedText}
   `;
 
-  const ACTIVE_MODELS = [
-    "meta/llama-3.2-11b-vision-instruct",
-    "meta/llama-3.2-90b-vision-instruct"
-  ];
-  const MAX_RETRIES = 3;
-  const BASE_DELAY_MS = 1500;
+  // Shared failover chain (Groq / Gemini / NIM): see llm-failover.service.js. 45 s total because the daemon is restarted
+  // every 5 minutes: one slow filing must not eat the cycle.
+  const systemPrompt = "You are a highly rigorous, institutional-grade Indian equity research analyst. Your summaries must begin with a clear, high-level qualitative verdict of whether the results/news are overall good (strong/expansion), flat/neutral, or bad (weak/contraction) relative to expectations or thesis, followed by the key supporting metrics. Completely avoid generic boilerplate advice.";
+  const STRICT_JSON_SUFFIX = "\n\nYour previous reply was not valid JSON. Reply again with ONLY the JSON object described above: no prose, no markdown.";
+  const MAX_ATTEMPTS = 2;
   let lastError;
 
-  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-    const currentModel = ACTIVE_MODELS[(attempt - 1) % ACTIVE_MODELS.length];
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 40000); // 40s per attempt: the daemon is restarted every 5 minutes, one slow filing must not eat the cycle
-
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    let content;
     try {
-      const response = await fetch(NIM_BASE_URL, {
-        method: "POST",
-        headers: {
-          "Authorization": `Bearer ${NVIDIA_API_KEY}`,
-          "Content-Type": "application/json",
-        },
-        signal: controller.signal,
-        body: JSON.stringify({
-          model: currentModel,
-          messages: [
-            {
-              role: "system",
-              content: "You are a highly rigorous, institutional-grade Indian equity research analyst. Your summaries must begin with a clear, high-level qualitative verdict of whether the results/news are overall good (strong/expansion), flat/neutral, or bad (weak/contraction) relative to expectations or thesis, followed by the key supporting metrics. Completely avoid generic boilerplate advice.",
-            },
-            {
-              role: "user",
-              content: prompt,
-            },
-          ],
-          temperature: 0.1,
-          max_tokens: 1800,
-          response_format: { type: "json_object" },
-        }),
-      });
-
-      clearTimeout(timeoutId);
-
-      if (!response.ok) {
-        let errorData = {};
-        try {
-          errorData = await response.json();
-        } catch (_) {}
-        console.error(`[AI ERROR] NVIDIA NIM model ${currentModel} failed (attempt ${attempt}/${MAX_RETRIES}):`, errorData);
-        
-        lastError = new Error(`NVIDIA NIM API error (${currentModel}): ${errorData.title || response.statusText || response.status}`);
-        if (attempt < MAX_RETRIES) {
-          const delay = BASE_DELAY_MS * attempt;
-          console.warn(`[NIM] Falling back to next model in ${delay}ms...`);
-          await new Promise(r => setTimeout(r, delay));
-          continue;
-        }
-        throw lastError;
-      }
-
-      const data = await response.json();
-      const content = data.choices[0].message.content;
-
-      try {
-        let cleanJson = content.replace(/```json\n?/, "").replace(/\n?```/, "").trim();
-        const jsonMatch = cleanJson.match(/\{[\s\S]*\}/);
-        if (jsonMatch) {
-          cleanJson = jsonMatch[0];
-        }
-        let parsed;
-        try {
-          parsed = JSON.parse(cleanJson);
-        } catch (jsonErr) {
-          parsed = parseMarkdownKvFallback(content);
-          if (!parsed) throw jsonErr;
-        }
-
-        // Apply Deterministic Financial Extractor & Post-Processing Guard Layer
-        const finData = extractDeterministicFinancials(announcementText);
-        parsed._raw_text = announcementText;
-        return applyInstitutionalGuard(parsed, finData, title, ticker);
-      } catch (err) {
-        console.error(`Failed to parse NIM response as JSON (attempt ${attempt}/${MAX_RETRIES}):`, content);
-        if (attempt < MAX_RETRIES) {
-          console.warn(`[NIM] Invalid JSON response, retrying...`);
-          continue;
-        }
-        throw new Error("AI output was not valid JSON.");
-      }
+      content = await runLlm(systemPrompt, attempt === 1 ? prompt : prompt + STRICT_JSON_SUFFIX, { temperature: 0.1, maxTotalMs: 45000 });
     } catch (err) {
-      clearTimeout(timeoutId);
-      lastError = err;
-      if (err.name === "AbortError") {
-        lastError = new Error("NVIDIA NIM API request timed out (40s)");
-      }
-
-      const isNetworkOrTimeout = err.name === "TypeError" || err.name === "AbortError" || err.message.includes("fetch");
-      if (isNetworkOrTimeout && attempt < MAX_RETRIES) {
-        const delay = BASE_DELAY_MS * attempt;
-        console.warn(`[RETRY] NIM classification attempt ${attempt} failed. Retrying in ${delay}ms: ${lastError.message}`);
-        await new Promise(r => setTimeout(r, delay));
-        continue;
-      }
-      throw lastError;
+      // Every provider failed (or the budget ran out): the scanner records the filing as failed and retries next scan.
+      throw new Error(`AI classification unavailable on every provider: ${err.message}`);
     }
+
+    let parsed;
+    try {
+      let cleanJson = content.replace(/```json\n?/, "").replace(/\n?```/, "").trim();
+      const jsonMatch = cleanJson.match(/\{[\s\S]*\}/);
+      if (jsonMatch) cleanJson = jsonMatch[0];
+      try {
+        parsed = JSON.parse(cleanJson);
+      } catch (jsonErr) {
+        parsed = parseMarkdownKvFallback(content);
+        if (!parsed) throw jsonErr;
+      }
+    } catch (parseErr) {
+      lastError = new Error("AI output was not valid JSON.");
+      console.warn(`[LLM] Classification reply was not valid JSON (attempt ${attempt}/${MAX_ATTEMPTS})`);
+      continue;
+    }
+
+    // Apply Deterministic Financial Extractor & Post-Processing Guard Layer
+    const finData = extractDeterministicFinancials(announcementText);
+    parsed._raw_text = announcementText;
+    return applyInstitutionalGuard(parsed, finData, title, ticker);
   }
 
   throw lastError;

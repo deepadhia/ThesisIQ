@@ -10,17 +10,29 @@ import path from "path";
 import { pool } from "../db/pool.js";
 import { compareFiscalQuartersDesc, parseFiscalQuarter } from "../utils/fiscal-quarter.js";
 import { reconcileGuidanceVsActual, classifyGuidanceScope } from "../utils/guidance-scope.js";
-import { extractTextFromPdfUrl } from "../services/announcement.service.js";
+import { extractPdfTextDetailed } from "../services/announcement.service.js";
 import { sendTelegramMessage, formatAnnouncementMessage, sendConcallDiscrepancyAlert, sendPipelineFailureAlert } from "../services/telegram.service.js";
 import { classifyFilingForWorker } from "../services/filing-classifier.service.js";
-import { NVIDIA_API_KEY } from "../config/env.js";
+import { runLlm } from "../services/llm.service.js";
+import { decideLlmFailureAction, backoffDelayMs, quotaPauseMs, isQuotaPaused, batchSizeAfterPause } from "../services/retry-policy.service.js";
+import { dbStore } from "../services/llm-health.service.js";
 import { extractDeterministicFinancials } from "../services/financial-validator.service.js";
-import { applyInstitutionalGuard } from "../services/institutional-guard.service.js";
+import { applyInstitutionalGuard, sanitizeConcallHighlights } from "../services/institutional-guard.service.js";
 import { getVerifiedGroundTruth } from "../services/verified-data-layer.service.js";
 import { evaluateDualLayerActionGate } from "../services/thesis-gate-evaluator.service.js";
 import { extractFinancialsViaLlm } from "../services/financial-table-fallback.service.js";
 import {
+  routeAlert,
+  buildDigestItem,
+  isContentFreeDigestItem,
+  buildThesisStatusBoard,
+  overallThesisStatus,
+  shouldSendDigest,
+  formatThesisDigestMessage
+} from "../services/thesis-digest.service.js";
+import {
   buildThesisContext,
+  getThesisContract,
   DRIVER_ASSESSMENT_PROMPT_RULES,
   normalizeDriverAssessment,
   mergeDriverAssessments,
@@ -36,7 +48,6 @@ import {
   auditDiscrepancies 
 } from "../services/audio-transcript-analyzer.service.js";
 
-const NIM_BASE_URL = "https://integrate.api.nvidia.com/v1/chat/completions";
 
 /**
  * Truncates text safely to 22,000 characters to prevent 504 gateway timeouts.
@@ -127,76 +138,19 @@ export function isProceduralNoise(statement = "", metric = "") {
 }
 
 /**
- * Executes a single NIM prompt with retry backoff.
+ * Runs one LLM prompt for the worker (verdicts, concall highlights, table fallback, syntheses).
+ * Provider failover (Groq / Gemini / NIM), circuit breaker, Retry-After handling, a hard per-call time budget and a
+ * process-wide concurrency cap live in llm-failover.service.js. (The name is historical: NIM is no longer first.)
  */
-async function runNimPrompt(systemPrompt, userPrompt, temperature = 0.05) {
-  if (!NVIDIA_API_KEY) {
-    throw new Error("NVIDIA_API_KEY not configured.");
-  }
-
-  const MAX_RETRIES = 3;
-  const BASE_DELAY_MS = 2500;
-  const MODELS = [
-    "meta/llama-3.2-11b-vision-instruct",
-    "meta/llama-3.2-90b-vision-instruct"
-  ];
-  let lastErr;
-
-  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 90000); // 90s per attempt: the daemon restarts every 5 minutes, so calls must stay short
-    const currentModel = MODELS[(attempt - 1) % MODELS.length];
-
-    try {
-      const response = await fetch(NIM_BASE_URL, {
-        method: "POST",
-        headers: {
-          "Authorization": `Bearer ${NVIDIA_API_KEY}`,
-          "Content-Type": "application/json",
-        },
-        signal: controller.signal,
-        body: JSON.stringify({
-          model: currentModel,
-          messages: [
-            { role: "system", content: systemPrompt },
-            { role: "user", content: userPrompt }
-          ],
-          temperature,
-          max_tokens: 2048
-        }),
-      });
-
-      clearTimeout(timeoutId);
-
-      if (!response.ok) {
-        throw new Error(`NIM API HTTP ${response.status}: ${response.statusText}`);
-      }
-
-      const data = await response.json();
-      return data.choices[0].message.content;
-    } catch (err) {
-      clearTimeout(timeoutId);
-      lastErr = err;
-      console.warn(`[WORKER NIM] Attempt ${attempt}/${MAX_RETRIES} failed: ${err.message}`);
-      if (attempt < MAX_RETRIES) {
-        const isRateLimited = err.message && (
-          err.message.includes("429") || 
-          err.message.includes("503") || 
-          err.message.includes("Rate") || 
-          err.message.includes("ResourceExhausted") ||
-          err.message.includes("Unavailable")
-        );
-        const delay = isRateLimited ? 6000 * attempt : BASE_DELAY_MS * attempt;
-        if (isRateLimited) {
-          console.log(`[NIM BACKOFF] HTTP 429/503 encountered. Backing off for ${delay / 1000}s before retry...`);
-        }
-        await new Promise(r => setTimeout(r, delay));
-      }
-    }
-  }
-
-  throw lastErr;
+async function runNimPrompt(systemPrompt, userPrompt, temperature = 0.05, { maxTotalMs } = {}) {
+  return runLlm(systemPrompt, userPrompt, { temperature, ...(maxTotalMs ? { maxTotalMs } : {}) });
 }
+
+/**
+ * Each verdict chunk call is bounded so a whole transcript (up to 5 chunks on 2 lanes) finishes inside the worker
+ * deadline even when providers hang; otherwise the process could be killed before the outage is recorded.
+ */
+const VERDICT_CHUNK_BUDGET_MS = 75000;
 
 /**
  * Dynamically resolves accurate stage label for alerts and prompt instructions based on filing characteristics.
@@ -337,17 +291,9 @@ Be extremely decisive, objective, and evidence-driven. Zero fluff allowed.`;
     ? `Reporting period of this filing: ${opts.periodLabel}. Treat ONLY ${opts.periodLabel} as the current quarter; never label any other quarter as current.`
     : "";
 
-  let dbPromptDirective = "";
-  try {
-    const { rows } = await pool.query(
-      `SELECT template FROM prompt_templates WHERE name IN ('strategic_accountability', 'strategic_evolution') LIMIT 1`
-    );
-    if (rows.length > 0 && rows[0].template) {
-      dbPromptDirective = `\n\nInstitutional Accountability Prompt Directive:\n${rows[0].template}`;
-    }
-  } catch (err) {
-    console.warn("[WORKER] Could not fetch DB prompt template, using default rules.");
-  }
+  // NOTE: the long-form 'strategic_accountability' / 'strategic_evolution' templates in prompt_templates are
+  // markdown-report instructions for the syntheses. They must NEVER be appended here: this prompt demands a JSON
+  // object, and the longer report template wins, so every chunk came back as prose and the filing dead-lettered.
 
   // Split long documents into overlapping 10,000-character chunks so the whole Q&A is audited (not just the head/tail)
   const fullText = text || "";
@@ -366,6 +312,10 @@ Be extremely decisive, objective, and evidence-driven. Zero fluff allowed.`;
     }
   }
 
+  let rateLimitedChunks = 0; // of those, chunks where the providers answered 429 (quota pressure)
+  const retryAfterHints = [];
+  let outageChunks = 0;   // chunks whose LLM call failed on every provider
+  let unusableChunks = 0; // chunks whose reply could not be used (prose, empty, bad JSON)
   const runChunk = async (chunkText, idx) => {
     const userPrompt = `
 Ticker: ${ticker}
@@ -387,23 +337,23 @@ ${chunkText}
 6. VERIFY EACH THESIS DRIVER listed above against this filing (see thesis driver rules below).
 
 ── Institutional Financial & Thesis Rules ──
-1. MANDATORY YOY PRECEDENCE: YoY comparison (e.g. Q1 FY27 vs Q1 FY26) is MANDATORY and MUST take precedence over QoQ sequential comparisons. If PAT contracts YoY (> -10%) or EBITDA margin contracts YoY (> -200 bps), the summary MUST lead with this YoY contraction as the headline financial result. NEVER bury a YoY profit or margin decline behind a QoQ sequential recovery framing.
+1. MANDATORY YOY PRECEDENCE: YoY comparison (the current quarter vs the same quarter of the previous year) is MANDATORY and MUST take precedence over QoQ sequential comparisons. If PAT contracts YoY (> -10%) or EBITDA margin contracts YoY (> -200 bps), the summary MUST lead with this YoY contraction as the headline financial result. NEVER bury a YoY profit or margin decline behind a QoQ sequential recovery framing.
 2. PAT PRECISION: Always extract Consolidated Net Profit (PAT) attributable to Owners of the Company. NEVER use intermediate pre-tax, pre-associate, or standalone line items when consolidated tables are present.
 3. MANDATORY EBITDA & MARGINS: Always extract/calculate EBITDA (PBT + Finance Costs + Depreciation) and EBITDA Margin % (EBITDA / Revenue * 100). Include EBITDA YoY % growth and EBITDA Margin bps expansion/contraction.
 4. SEGMENT RED FLAG DETECTION: Extract all segment-wise results (Revenue & EBIT) and explicitly highlight any segment experiencing a YoY revenue/EBIT decline > 20% as a Segment Red Flag (e.g. Segment A EBIT declining > 20% YoY). NEVER claim 'no red flags' when a major segment collapses YoY.
-5. MULTI-VERTICAL THESIS RESPECT: NEVER claim a company has single-segment operations or lacks growth catalysts when the investment thesis or filing explicitly details multiple verticals (e.g. Real Estate + Data Centers + Ashok Cloud).
-6. ANTI-HALLUCINATION: NEVER report future quarter numbers (e.g. Q2 FY27) as actual achieved performance. Label any forward figure as 'Management Target/Guidance', never actuals.
+5. MULTI-VERTICAL THESIS RESPECT: NEVER claim a company has single-segment operations or lacks growth catalysts when the investment thesis or filing explicitly details multiple business verticals.
+6. ANTI-HALLUCINATION: NEVER report future-period numbers as actual achieved performance. Label any forward figure as 'Management Target/Guidance', never actuals.
 7. ACTION SIGNAL RECALIBRATION:
    - If PAT contracts > 15% YoY or EBITDA Margin contracts > 300 bps YoY, Action Signal MUST NOT be BUY/ADD. Evaluate as HOLD (Conviction 5/10) or TRIM (Conviction 4/10).
-   - If Revenue, EBITDA (+20%+ YoY, 29% margin), and PAT (+18%+ YoY) show a clean beat alongside live structural catalysts (demerger/capex), evaluate Action Signal as ADD (Conviction 8-9/10).
+   - If Revenue, EBITDA and PAT all show a clean double-digit YoY beat with stable or expanding margin alongside live structural catalysts, evaluate Action Signal as ADD (Conviction 8-9/10).
 8. STRICT GUIDANCE DISAMBIGUATION: NEVER mix quarterly guidance with full-year annual guidance or multi-year visions.
-   - Set guidance_scope = "QUARTERLY" if the target applies strictly to a single upcoming quarter (e.g. "Q2 revenue ~₹500 Cr", "next quarter EBITDA margin 18%").
-   - Set guidance_scope = "ANNUAL" if the target is for the full fiscal year (e.g. "FY27 revenue ₹2,500 Cr", "full year growth 25-30%").
-   - Set guidance_scope = "MULTI_YEAR" if the target spans 3-5 years (e.g. "Vision 2030 ₹10,000 Cr", "5-year 25% CAGR").
+   - Set guidance_scope = "QUARTERLY" if the target applies strictly to a single upcoming quarter.
+   - Set guidance_scope = "ANNUAL" if the target is for the full fiscal year.
+   - Set guidance_scope = "MULTI_YEAR" if the target spans 3-5 years.
    - Set guidance_scope = "CAPEX_MILESTONE" for physical plant commissioning, demergers, and capacity expansions.
 9. NUMBERS: Quote only figures that appear in the filing text. Do not compute growth rates yourself — the verified numbers are injected separately.
+10. NO PLACEHOLDERS: Never output template tokens such as X, Y, Z, "₹X Cr" or "details". If the filing does not state a figure, name the item without a number or omit the item; return an empty list when the filing has nothing for a field.
 ${DRIVER_ASSESSMENT_PROMPT_RULES}
-${dbPromptDirective}
 
 Return ONLY a valid JSON object:
 {
@@ -412,10 +362,10 @@ Return ONLY a valid JSON object:
   "conviction_score": 1 to 10,
   "verdict_summary": "2-3 sentence executive summary explaining the ADD/HOLD/TRIM rating.",
   "key_drivers": ["Driver 1", "Driver 2", "Driver 3"],
-  "key_positives": ["Good thing 1: Specific growth beat or high-margin expansion in this filing", "Good thing 2: Operating leverage or contract win"],
-  "key_concerns_and_drags": ["Bad thing / drag 1: Margin compression or cost spike in this filing", "Bad thing / drag 2: Segment decline or working capital stretch"],
-  "thesis_operational_kpis": ["Specific operational metric from presentation/deck/results: e.g. Order Backlog ₹X Cr (+Y% YoY), Capacity Utilization Z%, Value-Added Mix W%, Volume MT", "Another concrete KPI from this filing"],
-  "concall_verification_points": ["Specific open question to verify in upcoming management Q&A call"],
+  "key_positives": ["<a growth beat, margin expansion, contract win or operating-leverage point that THIS filing states>"],
+  "key_concerns_and_drags": ["<a margin compression, cost spike, segment decline or working-capital point that THIS filing states>"],
+  "thesis_operational_kpis": ["<KPI name>: <figure and unit exactly as printed in THIS filing>"],
+  "concall_verification_points": ["<specific open question to verify in the management Q&A>"],
   "thesis_driver_assessment": [
     { "driver": "<exact driver name from the list>", "status": "CONFIRMED" | "ON_TRACK" | "AT_RISK" | "BROKEN" | "NO_EVIDENCE", "evidence": "<=200 chars with facts from THIS filing" }
   ],
@@ -423,9 +373,9 @@ Return ONLY a valid JSON object:
     {
       "statement": "Commitment text",
       "metric": "Metric name (e.g. Revenue, EBITDA Margin, Plant Commissioning, Receivables Days)",
-      "target_value": "Target figure with unit",
+      "target_value": "Target figure with unit, as stated in the filing",
       "guidance_scope": "QUARTERLY" | "ANNUAL" | "MULTI_YEAR" | "CAPEX_MILESTONE",
-      "timeline": "Target quarter or year (e.g. 'Q2 FY27' for quarterly, 'FY27' for annual, 'FY28-FY30' for multi-year)",
+      "timeline": "Target quarter, fiscal year or year range exactly as stated in the filing",
       "status": "Pending" | "Achieved" | "Partially Achieved" | "Missed",
       "status_rule": "CRITICAL: For multi-stage regulatory processes (e.g. Demergers, NCLT approvals, QIP allotments, Plant Commissioning), initial Board approval MUST be marked status 'Pending' (In Progress). Mark 'Achieved' ONLY when final operational completion or regulatory clearance is explicitly documented in the evidence.",
       "blockers_and_risks": "If Delayed or Missed, specify the exact reason given by management in concall (e.g. 'Equipment lead time & customs clearance delay by 2 quarters')",
@@ -433,11 +383,27 @@ Return ONLY a valid JSON object:
     }
   ]
 }
+
+Respond with the JSON object only. The first character of your reply must be { (no markdown, no headings).
 `;
     try {
-      const resText = await runNimPrompt(systemPrompt, userPrompt, 0.05);
-      return parseVerdictJson(resText);
+      const resText = await runNimPrompt(systemPrompt, userPrompt, 0.05, { maxTotalMs: VERDICT_CHUNK_BUDGET_MS });
+      const parsed = parseVerdictJson(resText);
+      if (parsed) return parsed;
+      if (!resText) { unusableChunks += 1; return null; }
+      // The model answered in prose. Re-ask once with a strict JSON-only instruction; a prose reply is not an outage.
+      console.warn(`[WORKER CHUNK WARN] Part ${idx + 1} reply was not valid JSON; re-asking once for JSON only.`);
+      const strictPrompt = `${userPrompt}
+Your previous reply was not valid JSON. Reply again with ONLY the JSON object described above: no markdown, no headings, no commentary. The first character of your reply must be { and the last must be }.`;
+      const second = parseVerdictJson(await runNimPrompt(systemPrompt, strictPrompt, 0.05, { maxTotalMs: VERDICT_CHUNK_BUDGET_MS }));
+      if (!second) unusableChunks += 1;
+      return second;
     } catch (err) {
+      // chainExhausted: every provider failed for this call (AI outage), as opposed to a reply we could not use
+      if (err?.chainExhausted) {
+        outageChunks += 1;
+        if (err.rateLimited) { rateLimitedChunks += 1; if (Number.isFinite(err.retryAfterMs)) retryAfterHints.push(err.retryAfterMs); }
+      } else unusableChunks += 1;
       console.warn(`[WORKER CHUNK WARN] Part ${idx + 1} extraction failed:`, err.message);
     }
     return null;
@@ -462,6 +428,10 @@ Return ONLY a valid JSON object:
     // Never fabricate a verdict: flag the failure so the worker can retry / degrade honestly.
     const failed = {
       _llm_failed: true,
+      // true only when EVERY failed chunk was a provider outage: that is waited out, not blamed on the filing
+      _llm_outage: outageChunks > 0 && unusableChunks === 0,
+      _llm_rate_limited: rateLimitedChunks > 0 && unusableChunks === 0,
+      _llm_retry_after_ms: retryAfterHints.length ? Math.min(...retryAfterHints) : null,
       credibility_tier: "Tier 2",
       action_signal: "HOLD",
       conviction_score: 5,
@@ -570,6 +540,14 @@ export async function reconcilePriorGuidanceVsActual(ticker, currentQuarter, cur
 }
 
 const MAX_DEEP_DIVE_ATTEMPTS = 3;
+// A filing whose PDF could not be DOWNLOADED (exchange CDN not replicated yet, 404/5xx, timeout) is not broken:
+// the scanner waits for the CDN the same way. At one attempt per 5-minute cycle this is roughly an hour of patience.
+const MAX_FETCH_ATTEMPTS = 12;
+// A results statement that stays unreadable after OCR is usually an overloaded OCR/LLM provider, not a hopeless PDF:
+// about 30 minutes of patience (one attempt per 5-minute cycle) before a failure alert replaces the narrative.
+const MAX_UNREADABLE_STATEMENT_ATTEMPTS = 6;
+// A concall recording that is not downloadable yet: same backoff, about two hours of patience.
+const MAX_AUDIO_ATTEMPTS = 6;
 
 /**
  * Maps a statement period-end date (YYYY-MM-DD) to the Indian fiscal quarter label (e.g. 2026-09-30 -> "Q2 FY27").
@@ -596,18 +574,105 @@ function resolveReportingQuarter(item, fin) {
 /**
  * Records a failed processing attempt; returns the new attempt count.
  */
-async function recordDeepDiveAttempt(itemId, message) {
+// One counter per failure stage, so retries spent on one problem (e.g. nine download attempts while the exchange CDN
+// lagged) never shorten the budget of an unrelated one (an unusable AI reply).
+const ATTEMPT_COUNTERS = {
+  error: "deep_dive_attempts",
+  fetch: "fetch_attempts",
+  notext: "notext_attempts",
+  unreadable: "unreadable_attempts",
+  llm: "llm_attempts",
+  audio: "audio_attempts"
+};
+export const ATTEMPT_COUNTER_KEYS = Object.values(ATTEMPT_COUNTERS);
+
+async function recordDeepDiveAttempt(itemId, message, kind = "error") {
+  const key = ATTEMPT_COUNTERS[kind] || ATTEMPT_COUNTERS.error;
   const { rows } = await pool.query(
     `UPDATE corporate_announcements
      SET event_analysis = COALESCE(event_analysis, '{}'::jsonb) || jsonb_build_object(
            'pipeline_error', $1::text,
            'failed_at', NOW(),
-           'deep_dive_attempts', COALESCE((event_analysis->>'deep_dive_attempts')::int, 0) + 1)
+           $3::text, COALESCE((event_analysis->>$3)::int, 0) + 1)
      WHERE id = $2
-     RETURNING (event_analysis->>'deep_dive_attempts')::int AS attempts`,
-    [String(message || "unknown error").slice(0, 500), itemId]
+     RETURNING (event_analysis->>$3)::int AS attempts`,
+    [String(message || "unknown error").slice(0, 500), itemId, key]
   );
   return rows[0]?.attempts || 1;
+}
+
+// ── Free-tier rate limits (HTTP 429) ──
+// When every provider rate-limits a call, hammering on with parallel filings only burns time on an exhausted quota. The whole
+// queue pauses instead (10, 30, 60, 120, 180 minutes, never less than the provider asked for), then works ONE filing at a
+// time, results first, until a success clears the pause. State lives in system_settings so it survives the 5-minute restarts
+// and is shared with the GitHub Actions failover.
+const QUOTA_PAUSE_KEY = "llm_quota_pause";
+const QUOTA_ESCALATION_WINDOW_MS = 6 * 60 * 60 * 1000;
+
+async function readQuotaPause() {
+  try {
+    const v = await dbStore(pool).get(QUOTA_PAUSE_KEY);
+    return v && typeof v === "object" && Number.isFinite(v.until) ? v : null;
+  } catch (err) {
+    console.warn("[WORKER] Could not read the quota pause:", err.message);
+    return null;
+  }
+}
+
+async function writeQuotaPause(pause) {
+  try {
+    await dbStore(pool).set(QUOTA_PAUSE_KEY, pause);
+  } catch (err) {
+    console.warn("[WORKER] Could not record the quota pause:", err.message);
+  }
+}
+
+/** Records that the AI providers rate-limited us. A pause already running (set by a sibling filing) is left alone; an expired one escalates. */
+async function recordQuotaPressure(providerRetryAfterMs) {
+  const now = Date.now();
+  const previous = await readQuotaPause();
+  if (isQuotaPaused(previous, now)) return previous;
+  const recent = previous && now - previous.until < QUOTA_ESCALATION_WINDOW_MS;
+  const count = recent ? (previous.count || 0) + 1 : 1;
+  const pause = { until: now + quotaPauseMs(count, providerRetryAfterMs), count };
+  await writeQuotaPause(pause);
+  console.warn(`[WORKER] AI providers rate-limited (429). Queue paused for ${Math.round((pause.until - now) / 60000)} min (pause #${count}); then one filing at a time.`);
+  return pause;
+}
+
+/**
+ * Holds a filing back until a later time: the queue skips it until `retry_not_before` has passed, so a failing filing
+ * (or an overloaded provider) is not hit again every 5-minute cycle.
+ */
+async function deferRetry(itemId, delayMs) {
+  if (!(delayMs > 0)) return;
+  await pool.query(
+    `UPDATE corporate_announcements
+     SET event_analysis = COALESCE(event_analysis, '{}'::jsonb) || jsonb_build_object('retry_not_before', $1::text)
+     WHERE id = $2`,
+    [new Date(Date.now() + delayMs).toISOString(), itemId]
+  ).catch(e => console.warn("[WORKER] Could not record retry delay:", e.message));
+}
+
+/**
+ * Records that the AI providers were down when this filing needed them. Unlike recordDeepDiveAttempt this does NOT
+ * consume a processing attempt: an outage is not the filing's fault.
+ * @returns {{firstAtMs: number, retries: number}} when the filing first met the outage, and how many times since
+ */
+async function recordLlmOutage(itemId, message) {
+  const { rows } = await pool.query(
+    `UPDATE corporate_announcements
+     SET event_analysis = COALESCE(event_analysis, '{}'::jsonb) || jsonb_build_object(
+           'pipeline_error', $1::text,
+           'failed_at', NOW(),
+           'llm_outage_first_at', COALESCE(event_analysis->>'llm_outage_first_at', to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')),
+           'llm_outage_retries', COALESCE((event_analysis->>'llm_outage_retries')::int, 0) + 1)
+     WHERE id = $2
+     RETURNING event_analysis->>'llm_outage_first_at' AS first_at, (event_analysis->>'llm_outage_retries')::int AS retries`,
+    [String(message || "AI providers unavailable").slice(0, 500), itemId]
+  );
+  const parsed = rows[0]?.first_at ? new Date(rows[0].first_at).getTime() : NaN;
+  return { firstAtMs: Number.isFinite(parsed) ? parsed : Date.now(), retries: rows[0]?.retries || 1 };
 }
 
 async function escalateToReview(item, message, suppressTelegram) {
@@ -784,6 +849,13 @@ function actionSignalLabel(action) {
   return "🟡 *HOLD / MONITOR*";
 }
 
+/** Header line of an alert. When the AI produced no verdict there is no conviction or credibility to report. */
+function actionSignalLine(verdict) {
+  const label = actionSignalLabel(verdict.final_action || verdict.action_signal);
+  if (verdict._llm_failed) return `🎯 *ACTION SIGNAL:* ${label} (set by the thesis gate; the AI verdict was unavailable, so there is no conviction or credibility rating)`;
+  return `🎯 *ACTION SIGNAL:* ${label} (Conviction: ${verdict.conviction_score}/10 | Credibility: ${verdict.credibility_tier})`;
+}
+
 function cleanCompanyForAlert(item) {
   return (item.company_name || item.ticker)
     .replace(/\s+share\s+price\s*$/i, "")
@@ -822,7 +894,7 @@ function buildStage1Message({ item, verdict, activeFin, finSource, carried, stag
 🏢 *${item.ticker.toUpperCase()}* | ${cleanCompanyForAlert(item)}
 ${eventLine}
 ──────────────────────────────
-🎯 *ACTION SIGNAL:* ${actionSignalLabel(verdict.final_action || verdict.action_signal)} (Conviction: ${verdict.conviction_score}/10 | Credibility: ${verdict.credibility_tier})
+${actionSignalLine(verdict)}
 ──────────────────────────────${degradedNote}${gateSec}${finBlock}${guidanceSection}${driverSec}${kpiSec}${posSec}${dragSec}${commText}${summary}${driversText}${concallSec}
 ──────────────────────────────${docLink ? `${docLink}\n` : "\n"}_Stage 1 snapshot judged against the stock's thesis drivers. Concall transcript will verify the open queries._
 `.trim();
@@ -855,7 +927,7 @@ function buildConcallMessage({ item, verdict, activeFin, finSource, carried, per
 🏢 *${item.ticker.toUpperCase()}* | ${cleanCompanyForAlert(item)}
 🎙️ *Event:* Institutional Concall Audit & Forensic Verification
 ──────────────────────────────
-🎯 *ACTION SIGNAL:* ${actionSignalLabel(verdict.final_action || verdict.action_signal)} (Conviction: ${verdict.conviction_score}/10 | Credibility: ${verdict.credibility_tier})
+${actionSignalLine(verdict)}
 ──────────────────────────────${degradedNote}${gateSec}${driverSec}${finBlock}${guidanceSection}${biz}${ops}${growth}${perf}${qG}${aG}${mY}${legacyG}${commText}${pos}${chal}${tone}${takeaway}
 ──────────────────────────────
 ${docLink ? `${docLink}\n` : ""}_Institutional Quarterly Concall Deep-Dive_
@@ -894,8 +966,11 @@ async function processOneDeepDive(item, ctx) {
 
   // ── 1. Document text ──
   let docText = "";
+  let pdfFailure = { reason: null, detail: "" };
   if (item.attachment_url) {
-    docText = await extractTextFromPdfUrl(item.attachment_url);
+    const pdf = await extractPdfTextDetailed(item.attachment_url);
+    docText = pdf.text || "";
+    pdfFailure = { reason: pdf.reason, detail: pdf.detail || "" };
   }
   const hasDocText = Boolean(docText) && docText.trim().length >= 50;
   if (!hasDocText) {
@@ -920,13 +995,20 @@ async function processOneDeepDive(item, ctx) {
   // Material document whose text could not be read. The PDF is often not on the exchange CDN yet, so retry a few
   // cycles before dead-lettering (the title alone is NEVER analysed as if it were the filing).
   if (!hasDocText && !classification.isAudio && (classification.isTranscript || classification.isResults)) {
-    const attempts = await recordDeepDiveAttempt(item.id, "Unextractable or empty PDF text");
-    if (attempts < MAX_DEEP_DIVE_ATTEMPTS) {
-      console.warn(`[WORKER RETRY] Document text unavailable for ${item.ticker} (attempt ${attempts}/${MAX_DEEP_DIVE_ATTEMPTS}). Will retry next cycle.`);
+    const downloadProblem = Boolean(item.attachment_url) && pdfFailure.reason === "FETCH_FAILED";
+    const budget = downloadProblem ? MAX_FETCH_ATTEMPTS : MAX_DEEP_DIVE_ATTEMPTS;
+    const failureMessage = !item.attachment_url
+      ? "The filing has no attachment URL, so there is no document to analyse"
+      : downloadProblem
+        ? `Could not download the filing PDF after ${budget} attempts (${pdfFailure.detail || "no response"}). The exchange file may not be published yet`
+        : `The PDF has no machine-readable text (scanned image) and OCR did not recover it (${pdfFailure.detail || "no detail"})`;
+    const attempts = await recordDeepDiveAttempt(item.id, downloadProblem ? `Download failed: ${pdfFailure.detail || "no response"}` : "Unextractable or empty PDF text", downloadProblem ? "fetch" : "notext");
+    if (attempts < budget) {
+      console.warn(`[WORKER RETRY] Document text unavailable for ${item.ticker} (${pdfFailure.reason || "NO_TEXT"}; attempt ${attempts}/${budget}). Will retry next cycle.`);
       return { success: false, retry: true };
     }
-    console.warn(`[WORKER DEAD-LETTER] Unextractable / Scanned filing text for ${item.ticker}: ${item.title}`);
-    await escalateToReview(item, "Unextractable document text (possible scanned PDF or network fetch failure)", suppressTelegram);
+    console.warn(`[WORKER DEAD-LETTER] Unextractable / unavailable filing text for ${item.ticker}: ${item.title} — ${failureMessage}`);
+    await escalateToReview(item, failureMessage, suppressTelegram);
     return { success: false, skipped: true };
   }
 
@@ -934,7 +1016,17 @@ async function processOneDeepDive(item, ctx) {
   if (classification.audioCandidate && !classification.audioUrl && item.deep_dive_status === "pending_audio") {
     // Recording announced but no parseable media link: tell the user instead of silently dropping the concall.
     const msg = `🏢 *${item.ticker.toUpperCase()}* | ${cleanCompanyForAlert(item)}\n🎙️ *Event:* Concall audio recording published\n──────────────────────────────\n• The company filed the call recording, but the media link could not be extracted automatically.\n• Transcript analysis will follow when the written transcript is filed.\n──────────────────────────────${item.attachment_url ? `\n📄 [View Official Filing →](${item.attachment_url})` : ""}`;
-    await deliverWorkerAlert(item, msg, { suppressTelegram });
+    if (suppressTelegram) {
+      await deliverWorkerAlert(item, msg, { suppressTelegram });
+    } else {
+      await queueDigestItem(item, buildDigestItem({
+        kind: "AUDIO",
+        title: item.title,
+        url: item.attachment_url,
+        filedAt: item.filing_date ? new Date(item.filing_date).toISOString() : new Date().toISOString(),
+        verdict: { verdict_summary: "Call recording filed, but the media link could not be extracted; the transcript analysis follows when it is filed." }
+      }));
+    }
     await pool.query("UPDATE corporate_announcements SET deep_dive_status = 'completed' WHERE id = $1", [item.id]);
     return { success: true, ticker: item.ticker, stage: "audio-nolink" };
   }
@@ -992,26 +1084,75 @@ async function processOneDeepDive(item, ctx) {
         forward_catalysts: audioAudit.catalysts,
         docUrl: item.attachment_url
       });
-      await deliverWorkerAlert(item, alertText, { suppressTelegram });
+      if (suppressTelegram) {
+        await deliverWorkerAlert(item, alertText, { suppressTelegram });
+      } else {
+        await queueDigestItem(item, buildDigestItem({
+          kind: "AUDIO",
+          title: item.title,
+          url: item.attachment_url,
+          filedAt: item.filing_date ? new Date(item.filing_date).toISOString() : new Date().toISOString(),
+          verdict: { verdict_summary: audioAudit.executive_summary, key_positives: audioAudit.catalysts, commitments: audioAudit.commitments }
+        }));
+      }
       await pool.query("UPDATE corporate_announcements SET deep_dive_status = 'completed' WHERE id = $1", [item.id]);
       return { success: true, ticker: item.ticker, stage: "audio" };
     } catch (audioErr) {
       console.error(`[WORKER AUDIO ERROR] Failed for ${item.ticker}:`, audioErr.message);
-      const attempts = await recordDeepDiveAttempt(item.id, `Audio ingestion failed: ${audioErr.message}`);
-      if (attempts >= MAX_DEEP_DIVE_ATTEMPTS) {
+      // A recording that is not published yet (404) or a transient download error is retried with backoff for about two
+      // hours before a person is told; it used to be dead-lettered after three back-to-back cycles (about 15 minutes).
+      const attempts = await recordDeepDiveAttempt(item.id, `Audio ingestion failed: ${audioErr.message}`, "audio");
+      if (attempts >= MAX_AUDIO_ATTEMPTS) {
         await escalateToReview(item, `Audio ingestion failed: ${audioErr.message}`, suppressTelegram);
+      } else {
+        await deferRetry(item.id, backoffDelayMs(attempts));
       }
       return { success: false, error: audioErr.message };
     }
   }
 
+  // A results STATEMENT is the filing that carries the statement tables. Decks and press releases quote results but are not
+  // statements (an investor presentation was retried for hours and then dead-lettered with a false "statements could not be
+  // machine-read" alert); they go to the thesis-status digest and are judged against the verified results of the same quarter.
+  const isDeckOrPressRelease = /presentation|investor\s+deck|press\s+release|media\s+release/i.test(`${item.title} ${item.attachment_url || ""}`);
+  const hasStatementWords = /revenue\s+from\s+operations|total\s+income|profit\s+before\s+tax/i.test(docText);
+  const mentionsFinancialResults = /financial\s+results?|un-?audited|audited\s+financial/i.test(`${item.title} ${docText.slice(0, 6000)}`);
+  // A results filing (the scanner flagged it an earnings release) whose text layer has NO statement rows at all: the statement
+  // pages are images (SKIPPER: 57,366 characters of cover letter and auditor's report, zero statement rows). It is still a
+  // statement filing, so it must be OCR-read, not judged from the cover letter.
+  const statementPagesAreImages = item.is_earnings_release === true && /outcome|results?/i.test(item.title || "") && !hasStatementWords;
   const looksLikeStatementDoc =
     !classification.isTranscript &&
-    /financial\s+results?|un-?audited|audited\s+financial/i.test(`${item.title} ${docText.slice(0, 6000)}`) &&
-    /revenue\s+from\s+operations|total\s+income|profit\s+before\s+tax/i.test(docText);
+    !classification.isAudio &&
+    !isDeckOrPressRelease &&
+    ((mentionsFinancialResults && hasStatementWords) || statementPagesAreImages);
 
   // ── 4. Verified numbers + reporting period (deterministic, from THIS filing) ──
-  const extractedFin = extractDeterministicFinancials(docText);
+  let extractedFin = extractDeterministicFinancials(docText);
+
+  // Scanned statements often carry a noisy embedded OCR text layer ("Revenue o aperstans", "Soptember") that the parser
+  // rightly refuses. Re-read the pages with vision OCR and parse that instead, so the numbers stay VERIFIED.
+  // The same applies when only the STANDALONE statement could be read although the filing prints a consolidated one:
+  // the consolidated figures are the ones that matter, so a standalone headline would be a wrong alert.
+  const filingHasConsolidatedStatement = /consolidated\s+(?:un-?audited\s+|audited\s+)?financial\s+results|statement\s+of\s+(?:un-?audited\s+|audited\s+)?consolidated/i.test(docText);
+  const onlyStandaloneParsed = Boolean(extractedFin?.revenue) && extractedFin.statementScope === "STANDALONE" && filingHasConsolidatedStatement;
+  if ((!extractedFin || !extractedFin.revenue || onlyStandaloneParsed) && looksLikeStatementDoc && item.attachment_url) {
+    const usable = (f) => Boolean(f?.revenue) && (!onlyStandaloneParsed || f.statementScope === "CONSOLIDATED");
+    // A transcription only counts when it parses into the statements we need; otherwise the next OCR model is tried.
+    const ocr = await extractPdfTextDetailed(item.attachment_url, {
+      forceOcr: true,
+      acceptOcr: (t) => usable(extractDeterministicFinancials(t))
+    });
+    if (ocr.text && ocr.text.trim().length >= 200 && ocr.text !== docText) {
+      const ocrFin = extractDeterministicFinancials(ocr.text);
+      if (usable(ocrFin)) {
+        console.log(`[PDF OCR] ${item.ticker}: embedded text layer was unreadable; vision-OCR text parsed into verified financials.`);
+        // Clean statements first (they are what the verdict and the gate read), the embedded text layer after them.
+        docText = `${ocr.text}\n\n${docText}`;
+        extractedFin = ocrFin;
+      }
+    }
+  }
   const groundTruth = getVerifiedGroundTruth(item.ticker);
   const filingQuarterByDate = getIndianFiscalQuarter(item.filing_date);
   let periodLabel = resolveReportingQuarter(item, extractedFin);
@@ -1044,14 +1185,56 @@ async function processOneDeepDive(item, ctx) {
   // The rule-based reader could not parse a results statement: let the model LOCATE the printed figures, keep only
   // those that literally appear in the filing, and run them through the same deterministic arithmetic.
   // These are shown as unverified and can never authorise a buy.
+  let tableLocateOutage = false; // the AI providers were down while the figures were being located
   if (!deterministicFin && looksLikeStatementDoc) {
-    const llmFin = await extractFinancialsViaLlm({ docText, ticker: item.ticker, runPrompt: runNimPrompt });
+    const runPrompt = async (...args) => {
+      try {
+        return await runNimPrompt(...args);
+      } catch (err) {
+        if (err?.chainExhausted) {
+          tableLocateOutage = true;
+          if (err.rateLimited) await recordQuotaPressure(err.retryAfterMs);
+        }
+        throw err;
+      }
+    };
+    const llmFin = await extractFinancialsViaLlm({ docText, ticker: item.ticker, runPrompt });
     if (llmFin && llmFin.revenue) {
       deterministicFin = llmFin;
       finSource = "LLM_GROUNDED";
       periodLabel = resolveReportingQuarter(item, llmFin);
       console.log(`[TABLE FALLBACK] ${item.ticker}: using text-grounded AI-located figures (unverified).`);
     }
+  }
+
+  // A results statement nobody could read (parser, OCR and the text-grounded fallback all failed) gets NO AI narrative:
+  // a model reading a garbled table confidently reports things like a loss for a profitable quarter, and the grounding
+  // guard cannot catch it because the garbled numbers do exist in the text. Retry (OCR/LLM providers are often just
+  // overloaded), then dead-letter with a failure alert that links the filing (AGENTS.md I5).
+  if (looksLikeStatementDoc && !deterministicFin) {
+    const failureMessage = "The results statements could not be machine-read (scanned or garbled PDF; OCR and the text-grounded fallback did not recover them). Open the filing for the numbers.";
+    if (tableLocateOutage) {
+      // Parser and OCR found nothing AND the AI that would locate the figures was unreachable: that is an outage, not a
+      // hopeless PDF. Wait it out without consuming the filing's attempts; escalate only after the give-up time.
+      const outage = await recordLlmOutage(item.id, "AI providers unavailable while locating the results figures");
+      const decision = decideLlmFailureAction({ chainDown: true, outageFirstAtMs: outage.firstAtMs, outageRetries: outage.retries, nowMs: Date.now(), hasVerifiedNumbers: false });
+      if (decision.action === "RETRY") {
+        await deferRetry(item.id, decision.delayMs);
+        console.warn(`[WORKER RETRY] ${item.ticker}: results statements unreadable while the AI providers are down (attempt not consumed). Retrying in ${Math.round(decision.delayMs / 60000)} min.`);
+        return { success: false, retry: true };
+      }
+      await escalateToReview(item, `${failureMessage} (The AI providers were unavailable for hours.)`, suppressTelegram);
+      return { success: false, skipped: true };
+    }
+    const attempts = await recordDeepDiveAttempt(item.id, "Results statements unreadable after OCR", "unreadable");
+    if (attempts < MAX_UNREADABLE_STATEMENT_ATTEMPTS) {
+      await deferRetry(item.id, backoffDelayMs(attempts));
+      console.warn(`[WORKER RETRY] ${item.ticker}: results statements unreadable (attempt ${attempts}/${MAX_UNREADABLE_STATEMENT_ATTEMPTS}). No narrative from garbled text; retrying in ${Math.round(backoffDelayMs(attempts) / 60000)} min.`);
+      return { success: false, retry: true };
+    }
+    console.warn(`[WORKER DEAD-LETTER] ${item.ticker}: ${item.title} — ${failureMessage}`);
+    await escalateToReview(item, failureMessage, suppressTelegram);
+    return { success: false, skipped: true };
   }
 
   // ── 5. Thesis-aware institutional verdict (LLM) ──
@@ -1066,13 +1249,31 @@ async function processOneDeepDive(item, ctx) {
 
   let degradedNote = "";
   if (rawVerdict._llm_failed) {
-    const attempts = await recordDeepDiveAttempt(item.id, "LLM synthesis returned no usable output");
-    if (attempts < MAX_DEEP_DIVE_ATTEMPTS) {
-      console.warn(`[WORKER RETRY] LLM synthesis failed for ${item.ticker} (attempt ${attempts}/${MAX_DEEP_DIVE_ATTEMPTS}). Will retry next cycle.`);
+    // Tell "the AI providers are down" (wait, back off, never blame the filing) from "this filing's output was unusable"
+    // (counts toward the attempt budget). Verified numbers are delivered after a grace period either way (alert first).
+    const chainDown = Boolean(rawVerdict._llm_outage);
+    const hasVerifiedNumbers = Boolean(deterministicFin);
+    let decision;
+    let quotaPause = null;
+    if (chainDown) {
+      if (rawVerdict._llm_rate_limited) quotaPause = await recordQuotaPressure(rawVerdict._llm_retry_after_ms);
+      const outage = await recordLlmOutage(item.id, rawVerdict._llm_rate_limited ? "AI providers rate-limited (429)" : "AI providers unavailable (every provider failed)");
+      decision = decideLlmFailureAction({ chainDown: true, outageFirstAtMs: outage.firstAtMs, outageRetries: outage.retries, nowMs: Date.now(), hasVerifiedNumbers });
+      // never retry before the quota is expected back
+      if (decision.action === "RETRY" && quotaPause) decision = { ...decision, delayMs: Math.max(decision.delayMs, quotaPause.until - Date.now()) };
+    } else {
+      const attempts = await recordDeepDiveAttempt(item.id, "LLM synthesis returned no usable output", "llm");
+      decision = decideLlmFailureAction({ chainDown: false, attempts, maxAttempts: MAX_DEEP_DIVE_ATTEMPTS, nowMs: Date.now(), hasVerifiedNumbers });
+    }
+    if (decision.action === "RETRY") {
+      await deferRetry(item.id, decision.delayMs);
+      console.warn(`[WORKER RETRY] LLM synthesis failed for ${item.ticker} (${chainDown ? "AI providers down; attempt not consumed" : "unusable output; attempt counted"}). Retrying in ${Math.round(decision.delayMs / 60000)} min.`);
       return { success: false, retry: true };
     }
-    if (!deterministicFin) {
-      await escalateToReview(item, "LLM synthesis failed repeatedly and no verified numbers could be parsed", suppressTelegram);
+    if (decision.action === "ESCALATE") {
+      await escalateToReview(item, chainDown
+        ? "The AI providers stayed unavailable for hours and no verified numbers could be parsed"
+        : "LLM synthesis failed repeatedly and no verified numbers could be parsed", suppressTelegram);
       return { success: false, skipped: true };
     }
     degradedNote = "\n⚠️ _AI narrative unavailable this cycle — verified numbers and thesis gates only._\n";
@@ -1123,6 +1324,9 @@ async function processOneDeepDive(item, ctx) {
   }
   if (looksLikeStatementDoc && !activeFin) {
     degradedNote += "\n⚠️ _Could not machine-verify the financial tables in this PDF — figures not shown; open the filing._\n";
+  }
+  if (onlyStandaloneParsed && activeFin?.statementScope === "STANDALONE") {
+    degradedNote += "\n⚠️ _Only the STANDALONE statement could be machine-read. This filing also prints consolidated results that could not be verified — the consolidated figures matter more; open the filing._\n";
   }
 
   console.log(`[DUAL-LAYER GATE] ${item.ticker}: ${gateResult.finalAction} (Status: ${gateResult.statusClassification}, Conviction: ${gateResult.calibratedConviction}/10). ${gateResult.decisionExplanation}`);
@@ -1195,7 +1399,8 @@ async function processOneDeepDive(item, ctx) {
         verdict.verdict_summary || verdict.summary || "Quarterly financial evaluation completed.",
         verdict.thesis_gate_result?.statusClassification || verdict.thesis_status || "STABLE",
         verdict.thesis_gate_result?.decisionExplanation || "Evaluated via Dual-Layer Quantitative Gate.",
-        verdict.conviction_score || 5,
+        // No AI verdict means no conviction: store NULL rather than a placeholder that later reads as a real rating
+        verdict._llm_failed ? null : (verdict.conviction_score || 5),
         verdict.final_action || verdict.action_signal || "HOLD",
         JSON.stringify(metricsObj),
         JSON.stringify(storable)
@@ -1215,8 +1420,12 @@ async function processOneDeepDive(item, ctx) {
 
   if (isTranscriptDoc) {
     console.log(`[WORKER] Generating concall highlights for ${item.ticker}...`);
-    const ch = await generateStructuredConcallHighlights(item.ticker, item.company_name, docText);
-    if (ch && ((ch.segment_highlights && ch.segment_highlights.length > 0) || (ch.business_performance && ch.business_performance.length > 0) || (ch.financial_performance && ch.financial_performance.length > 0))) {
+    const ch = sanitizeConcallHighlights(await generateStructuredConcallHighlights(item.ticker, item.company_name, docText), docText);
+    const hasHighlightContent = ch && [
+      "segment_highlights", "business_performance", "financial_performance", "operational_highlights", "growth_initiatives",
+      "quarterly_guidance", "annual_guidance", "multi_year_targets", "key_positives", "key_challenges"
+    ].some(k => Array.isArray(ch[k]) && ch[k].length > 0);
+    if (hasHighlightContent) {
       verdict.concall_highlights = ch;
     }
   }
@@ -1234,14 +1443,40 @@ async function processOneDeepDive(item, ctx) {
     [item.id, JSON.stringify({ institutional_verdict: storableVerdict })]
   );
 
-  await deliverWorkerAlert(item, alertText, { suppressTelegram });
+  // Verified statement filings alert immediately. Transcripts / decks / press releases are queued for ONE per-stock
+  // thesis-status digest (sent in this same cycle unless a sibling filing of the stock is still being processed).
+  const route = routeAlert({ isStatementFiling: looksLikeStatementDoc, isTranscript: isTranscriptDoc, isAudio: false });
+  if (route === "immediate" || suppressTelegram) {
+    await deliverWorkerAlert(item, alertText, { suppressTelegram });
+  } else {
+    const digestItem = buildDigestItem({
+      kind: isTranscriptDoc ? "CONCALL" : digestKindFor(item.title),
+      title: item.title,
+      url: item.attachment_url,
+      filedAt: item.filing_date ? new Date(item.filing_date).toISOString() : new Date().toISOString(),
+      verdict
+    });
+    if (isContentFreeDigestItem(digestItem)) {
+      // e.g. a call-recording intimation: nothing to judge, so no "No driver evidence yet" message
+      console.log(`[WORKER DIGEST] ${item.ticker}: "${item.title}" has no content to report; completed without a digest.`);
+    } else {
+      await queueDigestItem(item, digestItem);
+    }
+  }
   await pool.query(
     `UPDATE corporate_announcements
      SET deep_dive_status = 'completed',
-         event_analysis = (COALESCE(event_analysis, '{}'::jsonb) - 'pipeline_error')
+         event_analysis = (COALESCE(event_analysis, '{}'::jsonb) - 'pipeline_error' - 'retry_not_before' - 'llm_outage_first_at' - 'llm_outage_retries'
+                           - 'deep_dive_attempts' - 'fetch_attempts' - 'notext_attempts' - 'unreadable_attempts' - 'llm_attempts' - 'audio_attempts')
      WHERE id = $1`,
     [item.id]
   );
+
+  // The queued digest goes out NOW if this stock has nothing else waiting: the audits and syntheses below are slow
+  // (their LLM/Gemini calls can take minutes) and must never sit in front of the user's update (I1).
+  if (route !== "immediate" && !suppressTelegram) {
+    await flushThesisDigests();
+  }
 
   // ── 10. Optional follow-ups (never allowed to block or lose the alert) ──
   try {
@@ -1299,6 +1534,134 @@ async function processOneDeepDive(item, ctx) {
   return { success: true, ticker: item.ticker };
 }
 
+const DIGEST_PENDING_STATUSES = ["pending_stage1", "pending_stage2", "pending_audio"];
+
+/**
+ * Queues a processed filing for the per-stock THESIS STATUS digest. The row keeps the compact digest item, so a
+ * restart or a Telegram outage can never lose it (flushThesisDigests() re-reads the queue every cycle).
+ * A failed write throws on purpose: the filing is then retried instead of being marked completed without an alert.
+ */
+async function queueDigestItem(item, digestItem) {
+  await pool.query(
+    `UPDATE corporate_announcements
+     SET event_analysis = COALESCE(event_analysis, '{}'::jsonb) || jsonb_build_object('digest_pending', true, 'digest_item', $1::jsonb)
+     WHERE id = $2`,
+    [JSON.stringify(digestItem), item.id]
+  );
+}
+
+function digestKindFor(title) {
+  if (/presentation|investor deck|earnings deck/i.test(title)) return "DECK";
+  if (/press release/i.test(title)) return "PRESS";
+  return "OTHER";
+}
+
+/**
+ * Newest-first driver assessments already stored for a stock (feeds the thesis status board).
+ */
+async function loadAssessmentHistory(ticker) {
+  const { rows } = await pool.query(
+    `SELECT COALESCE(filing_date, created_at) AS filed_at, title,
+            event_analysis->'institutional_verdict'->'thesis_driver_assessment' AS assessment
+     FROM corporate_announcements
+     WHERE ticker = $1
+       AND event_analysis->'institutional_verdict'->'thesis_driver_assessment' IS NOT NULL
+       AND COALESCE(filing_date, created_at) > NOW() - INTERVAL '120 days'
+     ORDER BY COALESCE(filing_date, created_at) DESC
+     LIMIT 12`,
+    [ticker]
+  );
+  return rows
+    .filter(r => Array.isArray(r.assessment))
+    .map(r => ({ filedAt: new Date(r.filed_at).toISOString(), source: r.title, assessment: r.assessment }));
+}
+
+/**
+ * Sends ONE thesis-status message per stock for the queued (non-results) filings. Sent as soon as the stock has no
+ * other filing waiting for the worker, and never held beyond DIGEST_MAX_WAIT_MS. Rows are marked sent only AFTER the
+ * message went out; a failed send leaves them queued for the next cycle.
+ * @returns {Promise<number>} digests sent
+ */
+export function flushThesisDigests(opts = {}) {
+  // Serialised: the worker flushes from several places (and from parallel filings of one stock); two flushes reading the
+  // queue at the same moment would each send the same digest.
+  const run = digestFlushChain.then(() => flushThesisDigestsOnce(opts));
+  digestFlushChain = run.catch(() => {});
+  return run;
+}
+let digestFlushChain = Promise.resolve();
+
+async function flushThesisDigestsOnce({ now = Date.now() } = {}) {
+  let sent = 0;
+  try {
+    const { rows } = await pool.query(
+      `SELECT ca.id, ca.ticker, ca.filing_date, s.company_name, ca.event_analysis->'digest_item' AS digest_item
+       FROM corporate_announcements ca
+       JOIN stocks s ON s.id = ca.stock_id
+       WHERE ca.event_analysis->>'digest_pending' = 'true'
+         AND ca.created_at > NOW() - INTERVAL '10 days'
+       ORDER BY ca.ticker, ca.filing_date`
+    );
+    if (rows.length === 0) return 0;
+
+    const byTicker = new Map();
+    for (const r of rows) {
+      if (!r.digest_item || typeof r.digest_item !== "object") continue;
+      if (!byTicker.has(r.ticker)) byTicker.set(r.ticker, []);
+      byTicker.get(r.ticker).push(r);
+    }
+    const { rows: pendingRows } = await pool.query(
+      `SELECT ticker, COUNT(*)::int AS n
+       FROM corporate_announcements
+       WHERE deep_dive_status = ANY($1) AND ticker = ANY($2) AND created_at >= NOW() - INTERVAL '30 days'
+       GROUP BY ticker`,
+      [DIGEST_PENDING_STATUSES, [...byTicker.keys()]]
+    );
+    const otherPending = new Map(pendingRows.map(r => [r.ticker, r.n]));
+
+    for (const [ticker, group] of byTicker) {
+      const items = group.map(r => ({ ...r.digest_item, filedAt: r.digest_item.filedAt || new Date(r.filing_date).toISOString() }));
+      if (!shouldSendDigest({ queuedAt: items.map(i => i.queuedAt), otherPending: otherPending.get(ticker) || 0, now })) continue;
+
+      const drivers = getThesisContract(ticker)?.drivers || [];
+      let history = [];
+      try {
+        history = await loadAssessmentHistory(ticker);
+      } catch (err) {
+        console.warn(`[WORKER DIGEST] Could not load driver history for ${ticker}; board uses this batch only:`, err.message);
+      }
+      const entries = [...items.map(i => ({ filedAt: i.filedAt, source: i.title, assessment: i.assessment })), ...history];
+      const board = buildThesisStatusBoard(entries, drivers);
+
+      const carried = await loadCarriedFinancials(ticker);
+      const financialsBlock = carried
+        ? buildVerifiedFinancialsBlock(carried.fin, { carried: true, periodLabel: quarterFromPeriodEnd(carried.fin?.quarterEnded) || getIndianFiscalQuarter(carried.filingDate) })
+        : "";
+
+      const message = formatThesisDigestMessage({ ticker, companyName: group[0].company_name, items, board, overall: overallThesisStatus(board), financialsBlock });
+      try {
+        await sendTelegramMessage(message);
+      } catch (err) {
+        console.error(`[WORKER DIGEST] Telegram delivery failed for ${ticker}: ${err.message}. Digest stays queued for the next cycle.`);
+        break; // Telegram unavailable: every other stock would fail the same way
+      }
+      await pool.query(
+        `UPDATE corporate_announcements
+         SET sent_to_telegram = true,
+             event_analysis = (COALESCE(event_analysis, '{}'::jsonb) - 'digest_pending' - 'alert_pending' - 'pending_alert_text' - 'alert_error')
+                              || jsonb_build_object('alert_sent_at', NOW(), 'digest_sent_at', NOW())
+         WHERE id = ANY($1)`,
+        [group.map(r => r.id)]
+      );
+      sent++;
+      console.log(`[WORKER DIGEST] Sent thesis-status digest for ${ticker} (${items.length} filing(s)).`);
+    }
+  } catch (err) {
+    console.error("[WORKER DIGEST] Digest flush failed (items stay queued):", err.message);
+  }
+  return sent;
+}
+
 /**
  * Runs deferred institutional syntheses (one ticker per call) when the scan still has time budget.
  */
@@ -1332,13 +1695,30 @@ async function drainPendingSyntheses(deadlineAt, maxTickers = 1) {
  * @param {number} [options.deadlineAt] - epoch ms after which no new filing is started and slow follow-ups are skipped
  */
 export async function processPendingDeepDives(options = {}) {
-  const { suppressTelegram = false, tickers = null, batchSize = 4, allowHistorical = false, announcementIds = null, retryFailed = false, deadlineAt = null } = options;
-  console.log(`[WORKER] Polling for pending quarterly deep-dives (parallel batch size: ${batchSize})...`);
+  const { suppressTelegram = false, tickers = null, allowHistorical = false, announcementIds = null, retryFailed = false, deadlineAt = null } = options;
+  let batchSize = options.batchSize ?? 4;
 
   // Alerts that failed to deliver earlier go out first
   if (!suppressTelegram && !announcementIds) {
     await flushPendingAlerts();
   }
+  // Queued thesis digests whose sibling filings have finished since the last cycle (or whose send failed) go out now
+  if (!suppressTelegram) {
+    await flushThesisDigests();
+  }
+
+  // A running quota pause keeps the queue idle (everything below needs the AI): nothing is lost, filings stay queued.
+  // After it ends, work one filing at a time until a success clears it.
+  let quotaPause = null;
+  if (!announcementIds) {
+    quotaPause = await readQuotaPause();
+    if (isQuotaPaused(quotaPause)) {
+      console.log(`[WORKER] AI quota pause active until ${new Date(quotaPause.until).toISOString()}; leaving the queue for later.`);
+      return { processed: 0, failed: 0, found: 0, paused: true };
+    }
+    batchSize = batchSizeAfterPause(quotaPause, batchSize);
+  }
+  console.log(`[WORKER] Polling for pending quarterly deep-dives (parallel batch size: ${batchSize})...`);
 
   let queryText;
   let queryParams = [];
@@ -1361,7 +1741,9 @@ export async function processPendingDeepDives(options = {}) {
       FROM corporate_announcements ca
       JOIN stocks s ON s.id = ca.stock_id
       WHERE ca.deep_dive_status = ANY($1)
-        AND (s.category IN ('Core', 'Watchlist') OR s.category IS NULL)`;
+        AND (s.category IN ('Core', 'Watchlist') OR s.category IS NULL)
+        AND (ca.event_analysis->>'retry_not_before' IS NULL
+             OR (ca.event_analysis->>'retry_not_before')::timestamptz <= NOW())`;
     queryParams = [statuses];
 
     if (!allowHistorical && !suppressTelegram) {
@@ -1372,7 +1754,8 @@ export async function processPendingDeepDives(options = {}) {
       queryParams.push(tickers);
       queryText += ` AND ca.ticker = ANY($${queryParams.length})`;
     }
-    queryText += ` ORDER BY ca.filing_date DESC, ca.created_at DESC LIMIT ${Number(batchSize) || 4}`;
+    // Results first: when the AI quota is scarce the verified results alert is the one that must not wait behind decks and notices
+    queryText += ` ORDER BY (CASE WHEN ca.is_earnings_release THEN 0 ELSE 1 END), ca.filing_date DESC, ca.created_at DESC LIMIT ${Number(batchSize) || 4}`;
   }
 
   const { rows: pendingList } = await pool.query(queryText, queryParams);
@@ -1399,6 +1782,8 @@ export async function processPendingDeepDives(options = {}) {
         const attempts = await recordDeepDiveAttempt(item.id, err.message);
         if (attempts >= MAX_DEEP_DIVE_ATTEMPTS) {
           await escalateToReview(item, err.message, suppressTelegram);
+        } else {
+          await deferRetry(item.id, backoffDelayMs(attempts));
         }
       } catch (dbErr) {
         console.error("[WORKER ERROR] Could not record failure:", dbErr.message);
@@ -1412,6 +1797,13 @@ export async function processPendingDeepDives(options = {}) {
 
   const processedCount = results.filter(r => r && r.success).length;
   const failedCount = results.filter(r => r && !r.success && !r.deferred && !r.skipped).length;
+  // A filing went through the AI successfully: the quota is back, so the one-at-a-time mode ends
+  if (processedCount > 0 && quotaPause && quotaPause.count > 0) {
+    await writeQuotaPause({ until: 0, count: 0 });
+    console.log("[WORKER] AI quota recovered; back to normal batches.");
+  }
+  // Deliver this cycle's queued digests BEFORE the slow optional syntheses (alert-first, I1)
+  if (!suppressTelegram) await flushThesisDigests();
   if (!suppressTelegram) await drainPendingSyntheses(deadlineAt);
   return { processed: processedCount, failed: failedCount, found: pendingList.length };
 }
@@ -1731,7 +2123,7 @@ ${missed > 0 ? `\n🔴 Missed / Broken Guidance Breakdown (${missed}):\n${missed
 4. QUALITATIVE CONVICTION ONLY: Conviction Score MUST be qualitative ONLY ("High", "Medium", "Low"). Outputting numeric "92/100" or "85%" IS FORBIDDEN AND WILL CAUSE IMMEDIATE REPORT REJECTION.
 5. METRIC ID & LABEL LOCK:
    - Order Book / Backlog is ORDER BACKLOG ONLY. Never call it Revenue.
-   - Export Backlog is EXPORT BACKLOG ONLY. Never call it Export Revenue or LNG Business.
+   - Export Backlog is EXPORT BACKLOG ONLY. Never call it Export Revenue or the revenue of any business line.
    - Unstated metrics (e.g. Capacity Utilization) MUST be rendered as "NOT DISCLOSED".
    - Do NOT mislabel historical EBITDA growth %, order book growth %, or export mix % as Current Revenue Growth.`;
 
@@ -1787,10 +2179,10 @@ Your previous output was rejected due to the following FACT LOCK errors:
 ${validation.errors.map(e => `• ${e}`).join('\n')}
 
 YOU MUST CORRECTION THESE ERRORS IN THIS RE-PROMPT:
-1. Do NOT mislabel EXPORT_BACKLOG (₹1,140 Cr) as Export Revenue or LNG Business.
-2. Do NOT cite contradictory Revenue/PAT growth percentages. Use ONLY CANONICAL_FACTS (+8.31% Rev, +0.16% PAT).
-3. Do NOT mark annual FY targets 'Achieved' in Q1. Use ONLY 'ON_TRACK' or 'AT_RISK'.
-4. Do NOT assign numbers to Capacity Utilization if unstated. Output ONLY 'NOT DISCLOSED'.`;
+1. Do NOT present an order backlog, order book or other forward-looking figure as revenue or as a business line's revenue.
+2. Do NOT cite revenue or PAT growth percentages that differ from the CANONICAL_FACTS section given above; use only those figures.
+3. Do NOT mark a full-year target 'Achieved' before the year has ended. Use ONLY 'ON_TRACK' or 'AT_RISK'.
+4. Do NOT assign a number to capacity utilization if the filing does not state one. Output ONLY 'NOT DISCLOSED'.`;
           }
         }
 
@@ -1841,38 +2233,40 @@ export async function generateStructuredConcallHighlights(ticker, companyName, d
   }
   cleanText = capContext(cleanText, 24000);
 
-  const systemPrompt = `You are a Senior Managing Director & Chief Equity Strategist at a top-tier institutional research firm. Extract a comprehensive, highly quantitative, 8-section concall highlight report from the earnings conference call transcript. Include exact monetary values, deal sizes, margin guidance %, and operational milestone timelines.`;
+  const systemPrompt = `You are a Senior Managing Director & Chief Equity Strategist at a top-tier institutional research firm. Extract a structured concall highlight report from the earnings conference call transcript. You report ONLY what the transcript explicitly states: every figure you write must be printed in the transcript, with its unit and comparison as spoken. If the call does not give a figure or topic, return an empty list for that section. Never estimate, round up, infer, or reuse any number or name from these instructions.`;
   const userPrompt = `
 Company: ${companyName} (${ticker})
 Concall Transcript Content:
 ${cleanText}
 
-Extract the following structured sections:
-1. "financial_performance": List bullet points covering Total Income/Revenue (YoY %), EBITDA (YoY % & Margin %), PAT (YoY %), Order Book total, Export Order Book, Funds/Cash availability, and Quarterly Order Inflows.
-2. "business_performance": List contract wins, division details, specific customer orders (e.g. Aerospace orders, Semiconductor fab orders, LNG stations, CERN/ITER France, OEM contracts). Include exact monetary order sizes where available.
-3. "growth_initiatives": List new certifications, technology partnerships (e.g. Wayout Sweden), new product categories, prototype developments, and skill centers.
-4. "operational_highlights": List plant commissioning status (e.g. Savli, Kandla, Chakan), facility expansions, dealer network growth, and execution timelines.
-5. "quarterly_guidance": List explicit guidance given specifically for next upcoming quarter (e.g. Q2 revenue ₹X Cr, Q2 EBITDA Margin Y%). If none given, return [].
-6. "annual_guidance": List explicit guidance given for full fiscal year (e.g. FY27 Revenue Growth X-Y%, FY27 EBITDA Margin Z%, Capex ₹W Cr). If none given, return [].
-7. "multi_year_targets": List long-term 3-5 year roadmap or Vision 2030 targets (e.g. Vision 2030 ₹10,000 Cr, 5-yr CAGR 25%). If none given, return [].
-8. "key_positives": List 4-5 major positive execution catalysts.
-9. "key_challenges": List 3-4 operational risks (logistics, freight costs, shipment delays, commodity inflation).
-10. "management_tone": State tone in 2-3 words (e.g. "Highly Confident, Execution-Driven").
-11. "key_takeaway": Provide a 1-sentence institutional bottom line synthesis.
+Extract the following structured sections from the transcript above (and nothing else):
+1. "financial_performance": the revenue/income, EBITDA and margin, PAT, order book, export order book, cash position and order inflow figures management stated for the period, each with the comparison management gave.
+2. "business_performance": contract wins, customer orders and segment or division performance management described, with the order sizes they stated.
+3. "growth_initiatives": new certifications, technology partnerships, new product categories, prototypes and similar initiatives management announced.
+4. "operational_highlights": plant commissioning status, facility expansions, capacity and utilisation figures, network growth and execution timelines management stated.
+5. "quarterly_guidance": explicit guidance for the next quarter only. Return [] if none was given.
+6. "annual_guidance": explicit guidance for the full fiscal year. Return [] if none was given.
+7. "multi_year_targets": explicit 3-5 year roadmap or long-term targets. Return [] if none were given.
+8. "key_positives": the main positive execution points made on the call (at most 5).
+9. "key_challenges": the main risks or headwinds management or analysts raised (at most 4).
+10. "management_tone": the tone of management in 2-3 words.
+11. "key_takeaway": one sentence bottom line that uses only facts stated on the call.
 
-Return ONLY a valid JSON object:
+Rules: no placeholders (never write X, Y, Z or "details"); no figure that is not in the transcript; an empty list is the correct answer when the call is silent on a section.
+
+Return ONLY a valid JSON object with exactly these keys:
 {
-  "financial_performance": ["Revenue: ₹X Cr (+Y% YoY)", "EBITDA: ₹X Cr (+Y% YoY, Margin Z%)"],
-  "business_performance": ["Aerospace orders: details & figures", "Semiconductor Dholera: details"],
-  "growth_initiatives": ["Initiative 1", "Initiative 2"],
-  "operational_highlights": ["Plant 1 status", "Timeline 2"],
-  "quarterly_guidance": ["Next Quarter (Q2): Revenue target ₹X Cr", "Next Quarter Margin: Y%"],
-  "annual_guidance": ["FY27 Full-Year Revenue Growth: X-Y%", "FY27 Full-Year EBITDA Margin: A-B%"],
-  "multi_year_targets": ["Vision 2030 / 3-5 Year Target: Details"],
-  "key_positives": ["Positive 1", "Positive 2"],
-  "key_challenges": ["Challenge 1", "Challenge 2"],
-  "management_tone": "Highly Confident, Execution-Driven",
-  "key_takeaway": "1-sentence executive takeaway"
+  "financial_performance": ["<metric name>: <figure with unit and comparison as stated on the call>"],
+  "business_performance": ["<order or segment item as stated on the call>"],
+  "growth_initiatives": ["<initiative as stated on the call>"],
+  "operational_highlights": ["<operational item as stated on the call>"],
+  "quarterly_guidance": ["<next-quarter guidance as stated on the call>"],
+  "annual_guidance": ["<full-year guidance as stated on the call>"],
+  "multi_year_targets": ["<long-term target as stated on the call>"],
+  "key_positives": ["<positive point from the call>"],
+  "key_challenges": ["<risk or headwind from the call>"],
+  "management_tone": "<2-3 words>",
+  "key_takeaway": "<one sentence>"
 }
 `;
 

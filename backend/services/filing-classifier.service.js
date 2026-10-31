@@ -4,10 +4,26 @@
  * institutional-grade event mechanics (swap ratios, dilution %, order values, rating changes, fine amounts).
  */
 
-import { NVIDIA_API_KEY } from "../config/env.js";
+import { runLlm, hasLlmProvider } from "./llm.service.js";
 import { extractAudioUrlFromFiling } from "./audio-transcript-analyzer.service.js";
 
-const NIM_BASE_URL = "https://integrate.api.nvidia.com/v1/chat/completions";
+/**
+ * Newspaper publications (SEBI LODR Reg 47) are statutory extracts of results that were already filed in full.
+ * They must never raise a thin stand-alone alert of their own.
+ */
+export function isNewspaperPublicationFiling(title = "", attachmentUrl = "") {
+  const titleLower = (title || "").toLowerCase();
+  const attachLower = (attachmentUrl || "").toLowerCase();
+  return (
+    titleLower.includes("newspaper publication") ||
+    titleLower.includes("newspaper advertisement") ||
+    titleLower.includes("newspaper advt") ||
+    titleLower.includes("newspaper clipping") ||
+    attachLower.includes("newspaperadvt") ||
+    attachLower.includes("newspaper_advt") ||
+    attachLower.includes("newspaper")
+  );
+}
 
 /**
  * Deterministic keyword classification into one of 8 filing categories.
@@ -79,16 +95,7 @@ export function classifyFilingCategory(title = "", text = "", attachmentUrl = ""
   }
 
   // Newspaper publications under SEBI LODR Reg 47 are legal statutory extracts; the official results are already published in the BM outcome.
-  const isNewspaperPublication = 
-    titleLower.includes("newspaper publication") || 
-    titleLower.includes("newspaper advertisement") || 
-    titleLower.includes("newspaper advt") || 
-    titleLower.includes("newspaper clipping") ||
-    attachLower.includes("newspaperadvt") ||
-    attachLower.includes("newspaper_advt") ||
-    attachLower.includes("newspaper");
-
-  if (isNewspaperPublication) {
+  if (isNewspaperPublicationFiling(title, attachmentUrl)) {
     return "ROUTINE_COMPLIANCE";
   }
 
@@ -136,6 +143,18 @@ export function classifyFilingCategory(title = "", text = "", attachmentUrl = ""
     attachLower.includes("investorpresentation") ||
     attachLower.includes("investor_presentation");
   if (isInvestorDeck) {
+    return "QUARTERLY_EARNINGS";
+  }
+
+  // 0e. A board outcome that approves quarterly/annual financial results is an earnings filing even when the filing
+  // title is generic ("Updates") and the cover letter incidentally mentions a scheme of arrangement or a credit rating.
+  // Only a title that itself names a restructuring keeps it out of the earnings pipeline.
+  const titleNamesRestructuring = /scheme of arrangement|demerger|amalgamation|spin-?off|slump sale|merger/.test(titleLower);
+  const approvesResults =
+    /(?:un-?audited|audited)\s+financial\s+results/.test(textSnippet) &&
+    /(?:quarter|half[\s-]?year|year)\s+ended/.test(textSnippet) &&
+    /considered\s+and\s+approved|approved\s+the|took\s+on\s+record|taken\s+on\s+record/.test(textSnippet);
+  if (approvesResults && !titleNamesRestructuring) {
     return "QUARTERLY_EARNINGS";
   }
 
@@ -644,88 +663,33 @@ If any metric is not disclosed in the text, use null. NEVER output filler string
  * Executes specialized NIM extraction for corporate actions.
  */
 export async function extractCorporateActionDetails(category, ticker, announcementText, investmentThesis = "") {
-  if (category === "GENERAL" || !NVIDIA_API_KEY) {
+  if (category === "GENERAL" || !hasLlmProvider()) {
     return null;
   }
 
-  // Cap text to 32,000 chars for comprehensive full-document NIM processing
+  // Cap text to 32,000 chars for comprehensive full-document processing
   let cappedText = announcementText || "";
   if (cappedText.length > 32000) {
     const half = 15000;
-    cappedText = `${cappedText.substring(0, half)}\n\n[... TRUNCATED MIDDLE CONTENT FOR FAST NIM LATENCY ...]\n\n${cappedText.substring(cappedText.length - half)}`;
+    cappedText = `${cappedText.substring(0, half)}\n\n[... TRUNCATED MIDDLE CONTENT FOR FAST LLM LATENCY ...]\n\n${cappedText.substring(cappedText.length - half)}`;
   }
 
   const prompt = getCategoryPrompt(category, ticker, cappedText, investmentThesis);
-  const ACTIVE_MODELS = [
-    "meta/llama-3.2-11b-vision-instruct",
-    "openai/gpt-oss-20b",
-    "nvidia/nemotron-3-super-120b-a12b"
-  ];
-  const MAX_RETRIES = 4;
-  const BASE_DELAY_MS = 2000;
+  const systemPrompt = "You are a quantitative corporate action parser for Indian financial filings. Extract precise numeric mechanics and facts with zero fluff.";
 
-  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-    const currentModel = ACTIVE_MODELS[(attempt - 1) % ACTIVE_MODELS.length];
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 90000); // 90s timeout
-
-    try {
-      const response = await fetch(NIM_BASE_URL, {
-        method: "POST",
-        headers: {
-          "Authorization": `Bearer ${NVIDIA_API_KEY}`,
-          "Content-Type": "application/json",
-        },
-        signal: controller.signal,
-        body: JSON.stringify({
-          model: currentModel,
-          messages: [
-            {
-              role: "system",
-              content: "You are a quantitative corporate action parser for Indian financial filings. Extract precise numeric mechanics and facts with zero fluff.",
-            },
-            {
-              role: "user",
-              content: prompt,
-            },
-          ],
-          temperature: 0.05,
-          max_tokens: 1500,
-          response_format: { type: "json_object" },
-        }),
-      });
-
-      clearTimeout(timeoutId);
-
-      if (!response.ok) {
-        console.warn(`[NIM ACTION] Model ${currentModel} failed status ${response.status} (attempt ${attempt}/${MAX_RETRIES})`);
-        if (attempt < MAX_RETRIES) {
-          await new Promise(r => setTimeout(r, BASE_DELAY_MS * attempt));
-          continue;
-        }
-        return null;
-      }
-
-      const data = await response.json();
-      const content = data.choices[0].message.content;
-      let cleanJson = content.replace(/```json\n?/, "").replace(/\n?```/, "").trim();
-      const jsonMatch = cleanJson.match(/\{[\s\S]*\}/);
-      if (jsonMatch) {
-        cleanJson = jsonMatch[0];
-      }
-      return JSON.parse(cleanJson);
-    } catch (err) {
-      clearTimeout(timeoutId);
-      console.warn(`[NIM ACTION] Attempt ${attempt}/${MAX_RETRIES} failed for ${ticker}:`, err.message);
-      if (attempt < MAX_RETRIES) {
-        await new Promise(r => setTimeout(r, BASE_DELAY_MS * attempt));
-        continue;
-      }
-      return null;
+  try {
+    // Shared failover chain (Groq / Gemini / NIM). This enrichment is optional, so it gets a shorter budget than the verdict.
+    const content = await runLlm(systemPrompt, prompt, { temperature: 0.05, maxTotalMs: 60000 });
+    let cleanJson = content.replace(/```json\n?/, "").replace(/\n?```/, "").trim();
+    const jsonMatch = cleanJson.match(/\{[\s\S]*\}/);
+    if (jsonMatch) {
+      cleanJson = jsonMatch[0];
     }
+    return JSON.parse(cleanJson);
+  } catch (err) {
+    console.warn(`[LLM ACTION] Corporate-action extraction failed for ${ticker}: ${err.message}`);
+    return null;
   }
-
-  return null;
 }
 
 /**
