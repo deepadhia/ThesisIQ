@@ -472,18 +472,98 @@ const BSE_PAGE_LIMIT = 4;
  * @param {string} scripCode
  * @param {number} lookbackDays
  */
-export async function fetchBseAnnouncements(scripCode, lookbackDays = 7) {
+const BSE_SESSION_TTL_MS = 15 * 60 * 1000;
+const BSE_BROWSER_HEADERS = {
+  "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+  "Accept": "application/json, text/plain, */*",
+  "Accept-Language": "en-US,en;q=0.9",
+  "Origin": "https://www.bseindia.com",
+  "Referer": "https://www.bseindia.com/",
+  "Sec-Fetch-Dest": "empty",
+  "Sec-Fetch-Mode": "cors",
+  "Sec-Fetch-Site": "same-site",
+  "Connection": "keep-alive"
+};
+
+let bseSession = { cookie: "", at: 0 };
+
+/** Forgets the cached BSE browser session (used after a block, and by tests). */
+export function resetBseSession() {
+  bseSession = { cookie: "", at: 0 };
+}
+
+/** A refused request from an exchange: a block (403/429) rather than a failure of the exchange itself. */
+export class ExchangeBlockedError extends Error {
+  constructor(message, status) {
+    super(message);
+    this.name = "ExchangeBlockedError";
+    this.blocked = true;
+    this.status = status;
+  }
+}
+
+/**
+ * Opens a browser-like session on the BSE site and keeps its cookies for a while: the API refuses requests that arrive
+ * without the cookies a real visit sets. Best effort: any failure leaves an empty session and the call is still attempted.
+ */
+async function getBseCookie() {
+  if (bseSession.cookie && Date.now() - bseSession.at < BSE_SESSION_TTL_MS) return bseSession.cookie;
+  try {
+    const res = await fetch("https://www.bseindia.com/", {
+      headers: {
+        ...BSE_BROWSER_HEADERS,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none"
+      },
+      signal: AbortSignal.timeout(15000)
+    });
+    const raw = typeof res.headers?.getSetCookie === "function" ? res.headers.getSetCookie() : [res.headers?.get?.("set-cookie")].filter(Boolean);
+    const cookie = raw.map(c => String(c).split(";")[0].trim()).filter(Boolean).join("; ");
+    bseSession = { cookie, at: Date.now() };
+  } catch (err) {
+    console.warn(`[BSE] Session warm-up failed: ${err.message} — continuing without cookies.`);
+    bseSession = { cookie: "", at: Date.now() };
+  }
+  return bseSession.cookie;
+}
+
+/**
+ * One BSE API GET: through the owner's relay when BSE_PROXY_URL is set (a host the exchange does not block), otherwise
+ * directly with a browser session. A block (403/429) is retried once with a fresh session before it is reported.
+ */
+async function bseGet(url, scripCode, retryDelayMs) {
+  const proxyUrl = (process.env.BSE_PROXY_URL || "").trim().replace(/\/+$/, "");
+  const attempt = async () => {
+    if (proxyUrl) {
+      const headers = { "Accept": "application/json" };
+      if (process.env.BSE_PROXY_TOKEN) headers["x-proxy-token"] = process.env.BSE_PROXY_TOKEN;
+      return fetch(`${proxyUrl}/?url=${encodeURIComponent(url)}`, { headers, signal: AbortSignal.timeout(30000) });
+    }
+    const cookie = await getBseCookie();
+    return fetch(url, { headers: cookie ? { ...BSE_BROWSER_HEADERS, Cookie: cookie } : { ...BSE_BROWSER_HEADERS }, signal: AbortSignal.timeout(30000) });
+  };
+
+  let res = await attempt();
+  if (!res.ok && (res.status === 403 || res.status === 429)) {
+    resetBseSession();
+    if (retryDelayMs > 0) await new Promise(r => setTimeout(r, retryDelayMs));
+    res = await attempt();
+  }
+  if (res.ok) return res;
+
+  let snippet = "";
+  try { snippet = String(await res.text()).replace(/\s+/g, " ").trim().slice(0, 120); } catch { /* body unreadable */ }
+  const message = `BSE announcements HTTP ${res.status} for scrip ${scripCode}${snippet ? ` (${snippet})` : ""}`;
+  if (res.status === 403 || res.status === 429) throw new ExchangeBlockedError(message, res.status);
+  throw new Error(message);
+}
+
+export async function fetchBseAnnouncements(scripCode, lookbackDays = 7, { retryDelayMs = 800 } = {}) {
   if (!scripCode) return [];
 
   const baseUrl = `https://api.bseindia.com/BseIndiaAPI/api/AnnSubCategoryGetData/w`;
-  const headers = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Accept": "application/json, text/plain, */*",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Origin": "https://www.bseindia.com",
-    "Referer": "https://www.bseindia.com/",
-    "Connection": "keep-alive"
-  };
 
   const today = new Date();
   const from = new Date(Date.now() - lookbackDays * 24 * 60 * 60 * 1000);
@@ -503,10 +583,7 @@ export async function fetchBseAnnouncements(scripCode, lookbackDays = 7) {
       subcategory: "-1"
     });
 
-    const res = await fetch(`${baseUrl}?${params.toString()}`, { headers });
-    if (!res.ok) {
-      throw new Error(`BSE announcements HTTP ${res.status} for scrip ${scripCode}`);
-    }
+    const res = await bseGet(`${baseUrl}?${params.toString()}`, scripCode, retryDelayMs);
     const data = await res.json();
 
     // Surface API-level rejections instead of silently reporting "0 announcements".
@@ -548,8 +625,12 @@ export async function fetchBseAnnouncements(scripCode, lookbackDays = 7) {
  * Returns empty string on failure so the API call is still attempted without cookies.
  */
 let nseCookies = "";
+let nseCookieFailedAt = 0;
+const NSE_COOKIE_RETRY_MS = 10 * 60 * 1000;
 async function getNseCookies() {
   if (nseCookies) return nseCookies;
+  // a refused homepage is not asked again for every stock of the same run
+  if (nseCookieFailedAt && Date.now() - nseCookieFailedAt < NSE_COOKIE_RETRY_MS) return "";
   try {
     const res = await fetch("https://www.nseindia.com/", {
       headers: {
@@ -564,9 +645,11 @@ async function getNseCookies() {
         nseCookies = setCookie.split(";")[0];
       }
     } else {
+      nseCookieFailedAt = Date.now();
       console.warn(`[NSE] Homepage returned ${res.status} — proceeding without cookies (cloud IP likely).`);
     }
   } catch (err) {
+    nseCookieFailedAt = Date.now();
     console.warn(`[NSE] Cookie fetch failed: ${err.message} — proceeding without cookies.`);
   }
   return nseCookies;

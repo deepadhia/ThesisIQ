@@ -44,6 +44,7 @@ import { pool } from "../db/pool.js";
 import { findThesisGaps } from "../services/thesis-driver-context.service.js";
 import { getConfiguredProviders, initModelRegistry, settleModelRegistry, markModelsDirty } from "../services/llm.service.js";
 import { reportLlmHealth, dbStore } from "../services/llm-health.service.js";
+import { evaluateExchangeAccess, alertExchangeAccess, shouldSkipBse } from "../services/exchange-access.service.js";
 
 /**
  * Retry wrapper for flaky APIs.
@@ -156,6 +157,8 @@ async function runScan({ isDryRun, runUrl, targetTicker, forceReevaluate, startT
   let newAnnouncements  = 0;
   let bseErrors         = 0;
   let nseErrors         = 0;
+  const bseFailures     = new Map();   // ticker -> why BSE gave nothing this run (feeds the exchange-access alert)
+  let bseBlockedInRun   = 0;
 
   for (const stock of stocks) {
     if (!targetTicker && Date.now() - startTime > SCAN_PHASE_BUDGET_MS) {
@@ -169,12 +172,19 @@ async function runScan({ isDryRun, runUrl, targetTicker, forceReevaluate, startT
       let bseList = [];
       let nseList = [];
 
-      try {
-        bseList = await fetchBseAnnouncements(stock.bse_scrip_code);
-        console.log(`Found ${bseList.length} raw announcements for ${stock.ticker} (BSE)`);
-      } catch (err) {
-        console.error(`[ERROR] BSE fetch failed for ${stock.ticker}:`, err.message);
-        bseErrors++;
+      if (shouldSkipBse({ blockedInRun: bseBlockedInRun, hasNse: Boolean(stock.nse_symbol) })) {
+        // BSE keeps refusing this server: NSE covers this stock, so stop asking (each refusal keeps the IP flagged)
+        bseFailures.set(stock.ticker, "skipped-after-block");
+      } else {
+        try {
+          bseList = await fetchBseAnnouncements(stock.bse_scrip_code);
+          console.log(`Found ${bseList.length} raw announcements for ${stock.ticker} (BSE)`);
+        } catch (err) {
+          console.error(`[ERROR] BSE fetch failed for ${stock.ticker}:`, err.message);
+          bseErrors++;
+          bseFailures.set(stock.ticker, err.status ?? "error");
+          if (err.blocked) bseBlockedInRun++;
+        }
       }
 
       try {
@@ -829,6 +839,15 @@ async function runScan({ isDryRun, runUrl, targetTicker, forceReevaluate, startT
     await settleModelRegistry(60000);
     await reportLlmHealth({ store: dbStore(pool), send: sendTelegramMessage, providers: getConfiguredProviders(), onBroken: markModelsDirty });
     await settleModelRegistry(60000);
+  }
+
+  // ── Exchange access: say so when a stock listed only on BSE cannot be fetched (never throws) ──
+  if (!isDryRun && !targetTicker) {
+    try {
+      await alertExchangeAccess({ issues: evaluateExchangeAccess({ stocks, bseFailures }), store: dbStore(pool), send: sendTelegramMessage });
+    } catch (err) {
+      console.error("[WARN] Exchange access alert failed:", err.message);
+    }
   }
 
   // ── End-of-run summary to Telegram ───────────────────────────────────────
