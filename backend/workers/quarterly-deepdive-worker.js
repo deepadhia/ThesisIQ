@@ -761,7 +761,10 @@ export async function flushPendingAlerts(limit = 10) {
 async function loadCarriedFinancials(ticker) {
   try {
     const { rows } = await pool.query(
-      `SELECT event_analysis->'institutional_verdict'->'verified_financials' AS vf, filing_date
+      `SELECT event_analysis->'institutional_verdict'->'verified_financials' AS vf,
+              event_analysis->'institutional_verdict'->>'final_action' AS action,
+              event_analysis->'institutional_verdict'->>'conviction_score' AS conviction,
+              filing_date
        FROM corporate_announcements
        WHERE ticker = $1
          AND deep_dive_status = 'completed'
@@ -772,7 +775,12 @@ async function loadCarriedFinancials(ticker) {
       [ticker]
     );
     if (rows.length > 0 && rows[0].vf && typeof rows[0].vf === "object") {
-      return { fin: rows[0].vf, filingDate: rows[0].filing_date };
+      return {
+        fin: rows[0].vf,
+        action: rows[0].action,
+        conviction: rows[0].conviction ? parseInt(rows[0].conviction, 10) : null,
+        filingDate: rows[0].filing_date
+      };
     }
   } catch (err) {
     console.warn(`[WORKER] Could not load carried-forward financials for ${ticker}:`, err.message);
@@ -818,6 +826,8 @@ function buildVerifiedFinancialsBlock(fin, { carried = false, periodLabel = null
 
 const GATE_BADGES = {
   THESIS_CONFIRMED_BEAT: "🟢 *Thesis Confirmed Beat*",
+  TEMPORARY_FRICTION: "🟡 *Temporary Operating Friction*",
+  CARRIED_QUARTERLY_ACTION: "🟢 *Carried-forward Quarterly Verdict*",
   GROWING_BUT_THESIS_UNCONFIRMED: "🟡 *Growing, but Thesis Unconfirmed*",
   GATES_PASS_ANALYSIS_BEARISH: "🟡 *Numbers pass, analysis flags a risk*",
   UNVERIFIED_FIGURES: "🟡 *Figures unverified — no buy authorised*",
@@ -874,13 +884,22 @@ function buildStage1Message({ item, verdict, activeFin, finSource, carried, stag
   const finBlock = buildVerifiedFinancialsBlock(activeFin, { carried: finSource === "CARRIED_FORWARD", periodLabel: carried?.periodLabel || periodLabel });
   const gateSec = buildGateSection(verdict.thesis_gate_result);
   const driverSec = formatDriverAssessmentSection(verdict.thesis_driver_assessment);
-  const kpis = bulletList(verdict.thesis_operational_kpis);
-  const pos = bulletList(verdict.key_positives);
+  // Consolidate KPIs and positive execution proof under MANAGEMENT EXECUTION & CAPACITY PROOF
+  const rawExec = [...(verdict.thesis_operational_kpis || []), ...(verdict.key_positives || [])];
+  // Deduplicate case-insensitively
+  const seenExec = new Set();
+  const dedupedExec = [];
+  for (const itemText of rawExec) {
+    if (typeof itemText !== "string" || itemText.length < 5) continue;
+    const cleanNorm = itemText.toLowerCase().replace(/[^a-z0-9]/g, "");
+    if (!seenExec.has(cleanNorm)) {
+      seenExec.add(cleanNorm);
+      dedupedExec.push(itemText);
+    }
+  }
+  const executionItems = bulletList(dedupedExec, 4);
+  const executionSec = executionItems ? `\n🛡️ *MANAGEMENT EXECUTION & CAPACITY PROOF:*\n${executionItems}\n` : "";
   const drags = bulletList(verdict.key_concerns_and_drags);
-  const drivers = (verdict.key_drivers || []).filter(d => d && d !== "Results under evaluation" && !/^EBITDA:/i.test(d) && !/RED FLAG|EXCEPTIONAL GAIN/i.test(d));
-  const driversText = drivers.length > 0 ? `\n🛡️ *Key Thesis Drivers:*\n${bulletList(drivers)}\n` : "";
-  const kpiSec = kpis ? `\n🎯 *THESIS OPERATIONAL KPIS & EXECUTION:*\n${kpis}\n` : "";
-  const posSec = pos ? `\n✅ *WHAT WENT WELL:*\n${pos}\n` : "";
   const dragSec = drags ? `\n⚠️ *WATCH ITEMS & DRAGS:*\n${drags}\n` : "";
   const points = bulletList(verdict.concall_verification_points || verdict.dodged_questions || verdict.concall_checklist);
   const concallSec = points ? `\n🎙️ *OPEN QUERIES FOR CONCALL:*\n${points}\n` : "";
@@ -890,14 +909,26 @@ function buildStage1Message({ item, verdict, activeFin, finSource, carried, stag
     ? "📑 *Event:* Investor Presentation"
     : `📊 *Event:* Quarterly Results Flash Note • ${stageName}`;
 
-  return `
-🏢 *${item.ticker.toUpperCase()}* | ${cleanCompanyForAlert(item)}
-${eventLine}
-──────────────────────────────
-${actionSignalLine(verdict)}
-──────────────────────────────${degradedNote}${gateSec}${finBlock}${guidanceSection}${driverSec}${kpiSec}${posSec}${dragSec}${commText}${summary}${driversText}${concallSec}
-──────────────────────────────${docLink ? `${docLink}\n` : "\n"}_Stage 1 snapshot judged against the stock's thesis drivers. Concall transcript will verify the open queries._
-`.trim();
+  const header = `🏢 *${item.ticker.toUpperCase()}* | ${cleanCompanyForAlert(item)}\n${eventLine}`;
+  const actionLine = actionSignalLine(verdict);
+  const divider = "──────────────────────────────";
+
+  const bodyBlocks = [
+    degradedNote?.trim(),
+    gateSec?.trim(),
+    finBlock?.trim(),
+    guidanceSection?.trim(),
+    driverSec?.trim(),
+    executionSec?.trim(),
+    dragSec?.trim(),
+    commText?.trim(),
+    summary?.trim(),
+    concallSec?.trim()
+  ].filter(Boolean);
+
+  const footer = `${divider}\n${docLink ? `${docLink}\n` : ""}_Stage 1 snapshot judged against the stock's thesis drivers. Concall transcript will verify the open queries._`;
+
+  return `${header}\n${divider}\n${actionLine}\n${divider}\n\n${bodyBlocks.join("\n\n")}\n\n${footer}`.trim();
 }
 
 /**
@@ -1309,7 +1340,9 @@ async function processOneDeepDive(item, ctx) {
     driverAssessment: verdict.thesis_driver_assessment || [],
     financialsRequired: looksLikeStatementDoc,
     financialsSource: gateSource || "THIS_FILING",
-    financialsVerified: finSource !== "LLM_GROUNDED"
+    financialsVerified: finSource !== "LLM_GROUNDED",
+    carriedAction: carried?.action || null,
+    carriedConviction: carried?.conviction || null
   });
 
   // Hard mechanical gate enforcement outside model subjectivity:

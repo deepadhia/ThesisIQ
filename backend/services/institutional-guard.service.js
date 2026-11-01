@@ -127,14 +127,11 @@ export function applyInstitutionalGuard(llmOutput = {}, financialData = null, ti
     };
 
     if (safeEbitda !== null && financialData.ebitdaMarginPct !== null && financialData.ebitdaMarginPct !== undefined) {
-      const ebitdaStr = `EBITDA: ₹${safeEbitda} Cr (Margin: ${financialData.ebitdaMarginPct}%${financialData.ebitdaMarginBpsDelta !== null ? `, ${financialData.ebitdaMarginBpsDelta >= 0 ? '+' : ''}${financialData.ebitdaMarginBpsDelta} bps YoY` : ''})`;
-      if (!summaryText.includes("EBITDA")) {
-        summaryText = `${summaryText} ${ebitdaStr}.`.trim();
-      }
-      if (guarded.key_drivers && Array.isArray(guarded.key_drivers)) {
-        if (!guarded.key_drivers.some(d => d.includes("EBITDA"))) {
-          guarded.key_drivers.unshift(`EBITDA: ₹${financialData.ebitda} Cr (${financialData.ebitdaMarginPct}% margin${financialData.ebitdaMarginBpsDelta !== null ? `, ${financialData.ebitdaMarginBpsDelta >= 0 ? '+' : ''}${financialData.ebitdaMarginBpsDelta} bps YoY` : ''})`);
-        }
+      // If summary is completely missing, supply clean numbers; otherwise do not forcibly append redundant EBITDA text
+      // to an executive summary that already sits under the VERIFIED FINANCIALS table.
+      if (!summaryText.trim()) {
+        const ebitdaStr = `EBITDA: ₹${safeEbitda} Cr (Margin: ${financialData.ebitdaMarginPct}%${financialData.ebitdaMarginBpsDelta !== null ? `, ${financialData.ebitdaMarginBpsDelta >= 0 ? '+' : ''}${financialData.ebitdaMarginBpsDelta} bps YoY` : ''})`;
+        summaryText = ebitdaStr;
       }
     }
 

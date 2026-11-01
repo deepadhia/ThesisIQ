@@ -194,7 +194,16 @@ export function formatThesisDigestMessage({ ticker, companyName, items = [], boa
     const pos = fresh(it.positives).map((t) => `  ✅ ${plain(t)}`);
     const con = fresh(it.concerns).map((t) => `  ⚠️ ${plain(t)}`);
     const gui = fresh(it.guidance).map((t) => `  ⏱️ ${plain(t)}`);
-    const fct = fresh(it.facts).map((t) => `  📌 ${plain(t)}`);
+    // Filter facts so they never duplicate bullets already listed in positives or concerns
+    const fct = fresh(it.facts)
+      .filter((t) => {
+        const normT = norm(t);
+        const inPos = (it.positives || []).some((p) => { const nP = norm(p); return nP.includes(normT) || normT.includes(nP); });
+        const inCon = (it.concerns || []).some((c) => { const nC = norm(c); return nC.includes(normT) || normT.includes(nC); });
+        return !inPos && !inCon;
+      })
+      .slice(0, 4)
+      .map((t) => `  📌 ${plain(t)}`);
     const flg = (it.commitmentFlags || []).map((f) => `  🔴 ${f.status}: ${plain(f.statement)}${f.reason ? ` (${plain(f.reason)})` : ""}`);
     if (!summary && !pos.length && !con.length && !gui.length && !fct.length && !flg.length) {
       collapsed.push(link);

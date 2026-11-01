@@ -118,10 +118,22 @@ export function evaluateUniversalFinancialHealth(fin = {}) {
   }
 
   if (isMarginEroded) {
+    const bps = (fin.ebitdaMarginBpsDelta !== null && fin.ebitdaMarginBpsDelta !== undefined) ? Number(fin.ebitdaMarginBpsDelta) : null;
+    // When revenue growth is strong (>= 15%) and PAT is positive, moderate margin compression (-100 to -300 bps)
+    // represents operating / raw-material friction during scaling, NOT structural thesis breakdown.
+    const isModerateFriction = revGrowth >= 15 && patGrowth >= 0 && (bps === null || bps >= -300);
+    if (isModerateFriction) {
+      return {
+        status: 'TEMPORARY_FRICTION',
+        passed: false,
+        reason: `Top-line (+${revGrowth}% YoY) and profit (+${patGrowth}% YoY) expanding, but EBITDA margin compressed ${bps ?? -150} bps YoY (operating/input cost friction during expansion)`
+      };
+    }
+
     return {
       status: 'FAIL',
       passed: false,
-      reason: `Severe EBITDA margin compression (${fin.ebitdaMarginBpsDelta ?? -150} bps YoY)`
+      reason: `Severe EBITDA margin compression (${bps ?? -150} bps YoY)`
     };
   }
 
@@ -450,7 +462,9 @@ export function evaluateDualLayerActionGate({
   driverAssessment = [],
   financialsRequired = true,
   financialsSource = 'THIS_FILING',
-  financialsVerified = true
+  financialsVerified = true,
+  carriedAction = null,
+  carriedConviction = null
 }) {
   const hasFinancials = Boolean(financialData) && typeof financialData === 'object' && Object.keys(financialData).length > 0;
   const safeFin = financialData || {};
@@ -495,6 +509,11 @@ export function evaluateDualLayerActionGate({
       calibratedConviction = Math.min(baseConviction, 5);
       statusClassification = 'NO_FINANCIALS_BEARISH_READ';
       decisionExplanation = withDriverNote('Analysis of this filing is cautious; no new financial statements to confirm or refute it.');
+    } else if (carriedAction) {
+      finalAction = carriedAction;
+      calibratedConviction = carriedConviction ? Number(carriedConviction) : baseConviction;
+      statusClassification = 'CARRIED_QUARTERLY_ACTION';
+      decisionExplanation = withDriverNote(`Action signal carried forward from quarterly results (${carriedAction}). No new financial statements in this filing.`);
     } else {
       finalAction = 'HOLD / MONITOR';
       calibratedConviction = Math.min(baseConviction, drivers.highAtRisk.length > 0 ? 5 : 6);
@@ -547,6 +566,11 @@ export function evaluateDualLayerActionGate({
     calibratedConviction = Math.min(baseConviction, 5);
     statusClassification = 'DATA_UNAVAILABLE';
     decisionExplanation = withDriverNote(`Data requirement unmet: ${universal.status === 'UNAVAILABLE' ? universal.reason : thesis.reason}.`);
+  } else if (universal.status === 'TEMPORARY_FRICTION') {
+    finalAction = (drivers.highBroken.length > 0) ? 'REASSESS THESIS' : 'HOLD / MONITOR';
+    calibratedConviction = Math.min(baseConviction, drivers.highBroken.length > 0 ? 4 : 6);
+    statusClassification = drivers.highBroken.length > 0 ? 'THESIS_DRIVER_BROKEN' : 'TEMPORARY_FRICTION';
+    decisionExplanation = withDriverNote(`Temporary operating friction: ${universal.reason}.`);
   } else if (universal.status === 'FAIL') {
     finalAction = 'REASSESS THESIS';
     calibratedConviction = Math.min(baseConviction, 4);

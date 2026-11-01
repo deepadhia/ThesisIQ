@@ -14,9 +14,10 @@ import {
   amountMatchesVerified
 } from '../../services/institutional-guard.service.js';
 import { classifyFilingCategory, isNewspaperPublicationFiling } from '../../services/filing-classifier.service.js';
-import { sanitizeResultDate, stripOcrMarkdown } from '../../services/announcement.service.js';
+import { sanitizeResultDate, stripOcrMarkdown, getConcallType } from '../../services/announcement.service.js';
 import { extractDeterministicFinancials } from '../../services/financial-validator.service.js';
 import { formatConcallScheduleMessage, formatAnnouncementMessage } from '../../services/telegram.service.js';
+import { evaluateDualLayerActionGate } from '../../services/thesis-gate-evaluator.service.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const backendRoot = path.resolve(here, '../..');
@@ -402,5 +403,59 @@ describe('concall invitation formatting', () => {
     expect(ans).not.toMatch(/\.\.\.$/);
     expect(ans).toContain('RCM implementation');
     expect(ans).toMatch(/[.…]$/);
+  });
+});
+
+describe('Alert Quality & Institutional Thesis Guard (2026-11-01)', () => {
+  test('concall invitation promising future audio recording is NOT classified as audio', () => {
+    const title = 'Analysts/Institutional Investor Meet/Con. Call Updates';
+    const body = 'Intimation of Earnings Call scheduled on Nov 4, 2026. The audio recording and transcript will be made available on the website of the company after the call.';
+    const attachUrl = 'https://nsearchives.nseindia.com/corporate/POLICYBZR27102026212824EarningsCallIntimationPOLICYBZRQ2FY27.pdf';
+    const type = getConcallType(title, body, attachUrl);
+    expect(type).not.toBe('audio');
+    expect(type).toBe('scheduled');
+  });
+
+  test('Monitoring Agency Report mentioning CARE/CRISIL is CAPITAL_RAISE, not CREDIT_EVENT', () => {
+    const title = 'General Updates';
+    const body = 'CARE Ratings Limited Monitoring Agency Report for the quarter ended September 30, 2026 in respect of utilization of proceeds of preferential issue of equity shares.';
+    const attachUrl = 'https://nsearchives.nseindia.com/corporate/skipper_31102026150605_MAReportIntimation.pdf';
+    const cat = classifyFilingCategory(title, body, attachUrl);
+    expect(cat).toBe('CAPITAL_RAISE');
+  });
+
+  test('Gravita Q2 FY27 high revenue growth (+37.8%) with moderate margin dip (-174 bps) is TEMPORARY_FRICTION, not REASSESS_THESIS', () => {
+    const gravitaFin = {
+      revenue: 1427.35,
+      revenueYoYGrowthPct: 37.84,
+      patConsolidated: 102.01,
+      patAttributable: 102.01,
+      patYoYGrowthPct: 6.27,
+      ebitda: 151.98,
+      ebitdaMarginPct: 10.65,
+      ebitdaMarginBpsDelta: -174,
+      isMarginErosion: false
+    };
+    const gate = evaluateDualLayerActionGate({
+      ticker: 'GRAVITA',
+      financialData: gravitaFin,
+      proposedAction: 'HOLD',
+      llmConviction: 6
+    });
+    expect(gate.statusClassification).toBe('TEMPORARY_FRICTION');
+    expect(gate.finalAction).toBe('HOLD / MONITOR');
+  });
+
+  test('secondary filing without statements carries forward previous Stage 1 action instead of forcing neutral HOLD 6/10', () => {
+    const gate = evaluateDualLayerActionGate({
+      ticker: 'QPOWER',
+      financialData: null,
+      financialsRequired: false,
+      carriedAction: 'BUY / ACCUMULATE',
+      carriedConviction: 8,
+      driverAssessment: [{ driver: 'Export Market Certification for Grid Bushings', status: 'CONFIRMED', evidence: 'WSIL type tests completed', materiality: 'MEDIUM' }]
+    });
+    expect(gate.finalAction).toBe('BUY / ACCUMULATE');
+    expect(gate.calibratedConviction).toBe(8);
   });
 });

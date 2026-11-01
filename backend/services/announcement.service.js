@@ -175,13 +175,34 @@ export function getConcallType(title, rawText = "", attachmentUrl = "") {
   }
 
   // 2. Check for Audio Recording / Audio Link (indicates concall or AGM is completed)
-  if (
-    combined.includes("audio recording") ||
-    combined.includes("audio link") ||
-    combined.includes("link of audio") ||
-    combined.includes("recording of") ||
-    combined.includes("webcast")
-  ) {
+  const isAudioTitleOrAttach =
+    t.includes("audio recording") ||
+    t.includes("audio link") ||
+    t.includes("link of audio") ||
+    t.includes("recording of") ||
+    t.includes("webcast") ||
+    attach.includes("audio") ||
+    attach.includes("recording");
+
+  const bodyLooksLikeFutureAudio = (() => {
+    if (!body.includes("audio") && !body.includes("recording") && !body.includes("webcast")) return false;
+    const m = body.match(/(?:audio\s+recording|recording|audio\s+link|transcript\s+and\s+audio|audio\s+and\s+transcript)/i);
+    if (!m) return false;
+    const ctx = body.slice(Math.max(0, m.index - 140), m.index + m[0].length + 140);
+    return /(?:will|shall|would|to)\s+be\s+(?:made\s+)?(?:available|uploaded|hosted|published|posted|shared)|available\s+on\s+(?:the\s+)?(?:company|our|website)|in\s+due\s+course|within\s+\d+\s+(?:working\s+)?days/i.test(ctx);
+  })();
+
+  const isIntimationTitle = /intimation|schedule|invite|invitation|notice\s+of/i.test(t) && !/submission\s+of|outcome\s+of/i.test(t);
+
+  const hasAudioRelease = (isAudioTitleOrAttach || (
+    (combined.includes("audio recording") ||
+     combined.includes("audio link") ||
+     combined.includes("link of audio") ||
+     combined.includes("recording of") ||
+     combined.includes("webcast")) && !bodyLooksLikeFutureAudio && !isIntimationTitle
+  ));
+
+  if (hasAudioRelease) {
     const isGenericMeet =
       combined.includes("investor meet") ||
       combined.includes("analyst meet") ||

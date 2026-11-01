@@ -160,11 +160,12 @@ export function classifyFilingCategory(title = "", text = "", attachmentUrl = ""
 
   // 1. CREDIT_EVENT (Rating revision/upgrade/downgrade on debt instruments)
   // Must precede CAPEX, ORDER_WIN, and CAPITAL_RAISE to prevent rating reports quoting orderbook/capex from being misclassified
+  const isMonitoringAgency = /\bmonitoring agency\b/i.test(combined) || /\butili[sz]ation of (?:issue |preferential )?proceeds\b/i.test(combined) || /mareport/i.test(attachLower);
   const isDebtRatingAgency = /\b(crisil|care ratings?|icra|ind-ra|india ratings|brickwork|acuite)\b/i.test(combined);
   const isCreditAction = /\b(credit rating|debt rating|rating revision|rating upgrade|rating downgrade|bank facilities rating|commercial paper rating|update on credit rating)\b/i.test(combined);
   const isEsgOnly = /\besg (rating|score|impact)\b/i.test(combined) && !isCreditAction;
   
-  if ((isDebtRatingAgency || isCreditAction) && !isEsgOnly) {
+  if ((isDebtRatingAgency || isCreditAction) && !isEsgOnly && !isMonitoringAgency) {
     return "CREDIT_EVENT";
   }
 
@@ -194,8 +195,9 @@ export function classifyFilingCategory(title = "", text = "", attachmentUrl = ""
     return "RESTRUCTURING";
   }
 
-  // 3. CAPITAL_RAISE (QIP, Preferential Issue, Rights Issue, Warrants, FPO)
+  // 3. CAPITAL_RAISE (QIP, Preferential Issue, Rights Issue, Warrants, FPO, Monitoring Agency Report)
   if (
+    isMonitoringAgency ||
     combined.includes("qip") ||
     combined.includes("qualified institutions placement") ||
     combined.includes("preferential allotment") ||

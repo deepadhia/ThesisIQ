@@ -202,12 +202,13 @@ export function formatDriverAssessmentSection(assessment = []) {
   const rows = [];
   for (const st of order) {
     for (const a of assessment.filter(x => x.status === st)) {
-      rows.push(`${STATUS_EMOJI[st]} *${a.driver}* — ${a.evidence}`);
-      if (st === "BROKEN" && a.falsificationTrigger) rows.push(`   ↳ _Falsification trigger hit:_ ${a.falsificationTrigger}`);
+      let row = `${STATUS_EMOJI[st]} *${a.driver}* — ${a.evidence}`;
+      if (st === "BROKEN" && a.falsificationTrigger) row += `\n   ↳ _Falsification trigger hit:_ ${a.falsificationTrigger}`;
+      rows.push(row);
     }
   }
   if (s.noEvidence.length > 0) {
     rows.push(`⚪ _${s.noEvidence.length} driver(s) not addressed in this filing_`);
   }
-  return `\n🧭 *THESIS DRIVER CHECK:*\n${rows.join("\n")}\n`;
+  return `🧭 *THESIS DRIVER CHECK:*\n${rows.join("\n\n")}`;
 }
