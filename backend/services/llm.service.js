@@ -9,10 +9,16 @@
  * fallback while no discovered list exists. Without a store (unit tests, ad-hoc scripts) nothing is discovered at all.
  */
 import { NVIDIA_API_KEY, GROQ_API_KEY, GEMINI_API_KEY } from "../config/env.js";
+import * as env from "../config/env.js";
 import { runLlmPrompt, buildProviders, SEED_MODELS } from "./llm-failover.service.js";
 import { loadRegistry, refreshModelRegistry, needsRefresh } from "./model-discovery.service.js";
 
-const keys = { nvidiaKey: NVIDIA_API_KEY, groqKey: GROQ_API_KEY, geminiKey: GEMINI_API_KEY };
+const keys = {
+  nvidiaKey: NVIDIA_API_KEY,
+  groqKey: GROQ_API_KEY,
+  geminiKey: GEMINI_API_KEY,
+  openrouterKey: env.OPENROUTER_API_KEY || ""
+};
 
 const registryState = { registry: null, store: null, dirty: false, lastAttemptAt: 0, inFlight: null };
 

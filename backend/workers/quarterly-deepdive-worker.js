@@ -17,6 +17,11 @@ import { runLlm } from "../services/llm.service.js";
 import { decideLlmFailureAction, backoffDelayMs, quotaPauseMs, isQuotaPaused, batchSizeAfterPause } from "../services/retry-policy.service.js";
 import { dbStore } from "../services/llm-health.service.js";
 import { extractDeterministicFinancials } from "../services/financial-validator.service.js";
+import {
+  extractDeterministicCashFlow,
+  extractEarningsQualityMetrics,
+  formatCashFlowAndQualitySection
+} from "../services/cash-flow-analyzer.service.js";
 import { applyInstitutionalGuard, sanitizeConcallHighlights } from "../services/institutional-guard.service.js";
 import { getVerifiedGroundTruth } from "../services/verified-data-layer.service.js";
 import { evaluateDualLayerActionGate } from "../services/thesis-gate-evaluator.service.js";
@@ -42,7 +47,9 @@ import {
 import { buildFactRegistry, validateSynthesisClaims, calculateProgrammaticCommitmentStatus } from "../services/fact-registry.service.js";
 import { 
   extractAudioUrlFromFiling, 
+  resolveAudioMediaUrl,
   downloadAndExtractMp3, 
+  transcribeAudioWithGroqWhisper,
   analyzeAudioWithGemini, 
   analyzeTranscriptWithGemini, 
   auditDiscrepancies 
@@ -297,6 +304,38 @@ Be extremely decisive, objective, and evidence-driven. Zero fluff allowed.`;
 
   // Split long documents into overlapping 10,000-character chunks so the whole Q&A is audited (not just the head/tail)
   const fullText = text || "";
+  const finData = opts.verifiedFin || extractDeterministicFinancials(fullText);
+  const cfData = opts.cashFlow || extractDeterministicCashFlow(fullText);
+  const eqData = opts.earningsQuality || extractEarningsQualityMetrics(fullText, finData);
+
+  let verifiedFinCtx = "";
+  if (finData && finData.revenue) {
+    verifiedFinCtx = `
+── Machine-Verified Financials & Unit Scaling (Ground Truth) ──
+• Statement Scope: ${finData.statementScope || 'CONSOLIDATED'}
+• Table Unit in Filing: ${finData.unit || 'CRORES'}
+• Verified Consolidated Revenue: ₹${finData.revenue} Cr (${finData.revenueYoYGrowthPct !== null && finData.revenueYoYGrowthPct !== undefined ? `${finData.revenueYoYGrowthPct >= 0 ? '+' : ''}${finData.revenueYoYGrowthPct}% YoY` : 'N/A'})
+• Verified Attributable PAT: ₹${finData.patAttributable || finData.patConsolidated} Cr (${finData.patYoYGrowthPct !== null && finData.patYoYGrowthPct !== undefined ? `${finData.patYoYGrowthPct >= 0 ? '+' : ''}${finData.patYoYGrowthPct}% YoY` : 'N/A'})
+${finData.ebitda ? `• Verified EBITDA: ₹${finData.ebitda} Cr (${finData.ebitdaMarginPct || 'N/A'}% margin)` : ''}
+CRITICAL: The figures above are in ₹ Crores. If quoting revenue or profit in your verdict_summary, you MUST use ₹ Crores. NEVER quote unscaled numbers from Lakhs/Millions tables as Crores!
+`;
+  }
+
+  let cfQualityCtx = "";
+  if (cfData && cfData.operatingCashFlowCr !== null) {
+    const pat = finData?.patConsolidated || finData?.patAttributable;
+    const conv = (pat && pat > 0) ? Math.round((cfData.operatingCashFlowCr / pat) * 100) : null;
+    cfQualityCtx = `
+── Machine-Verified Cash Flow & Quality of Earnings ──
+• Net Operating Cash Flow (H1): ₹${cfData.operatingCashFlowCr} Cr${cfData.operatingCashFlowPriorCr !== null ? ` (vs ₹${cfData.operatingCashFlowPriorCr} Cr prior year)` : ''}
+${conv !== null ? `• Cash Conversion Ratio: ${conv}% of PAT (₹${cfData.operatingCashFlowCr} Cr OCF / ₹${pat} Cr PAT)` : ''}
+${cfData.inventoryChangeCr !== null && cfData.inventoryChangeCr < 0 ? `• Working Capital Drain: ₹${Math.abs(cfData.inventoryChangeCr)} Cr cash absorbed by inventory buildup` : ''}
+${cfData.freeCashFlowCr !== null ? `• Free Cash Flow: ₹${cfData.freeCashFlowCr} Cr (Capex: ₹${cfData.capexCr || 0} Cr)` : ''}
+${eqData?.otherIncomeCr ? `• Other Income: ₹${eqData.otherIncomeCr} Cr (${eqData.otherIncomePctOfPbt || 'N/A'}% of PBT)` : ''}
+${eqData?.hyperinflationGainCr ? `• One-Off Accounting Credits: ₹${eqData.hyperinflationGainCr} Cr hyperinflation monetary gain (Ind AS 29)` : ''}
+`;
+  }
+
   const llmText = capContext(fullText, 46000);
   const CHUNK_SIZE = 10000;
   const OVERLAP = 1000;
@@ -324,7 +363,7 @@ ${periodLine}
 Document Part: ${idx + 1} of ${textChunks.length}
 Investment Thesis Context:
 ${thesisCtx.text}
-
+${verifiedFinCtx}${cfQualityCtx}
 Filing Content (Part ${idx + 1}):
 ${chunkText}
 
@@ -353,6 +392,8 @@ ${chunkText}
    - Set guidance_scope = "CAPEX_MILESTONE" for physical plant commissioning, demergers, and capacity expansions.
 9. NUMBERS: Quote only figures that appear in the filing text. Do not compute growth rates yourself — the verified numbers are injected separately.
 10. NO PLACEHOLDERS: Never output template tokens such as X, Y, Z, "₹X Cr" or "details". If the filing does not state a figure, name the item without a number or omit the item; return an empty list when the filing has nothing for a field.
+11. UNIT SCALE INTEGRITY: Verified financials in ₹ Crores are provided above. NEVER confuse document units (${finData?.unit || 'Crores'}) with ₹ Crores.
+12. CASH FLOW & WORKING CAPITAL AUDIT: If Cash Conversion is poor (<40%) or substantial profit is absorbed by working capital / inventory buildup, you MUST highlight this as a primary drag in key_concerns_and_drags and factor it into the conviction score.
 ${DRIVER_ASSESSMENT_PROMPT_RULES}
 
 Return ONLY a valid JSON object:
@@ -420,8 +461,6 @@ Your previous reply was not valid JSON. Reply again with ONLY the JSON object de
   });
   await Promise.all(lanes);
 
-  const finData = extractDeterministicFinancials(fullText);
-
   // Merge and deduplicate commitments & drivers from ALL chunks
   const validResults = chunkResults.filter(Boolean);
   if (validResults.length === 0) {
@@ -445,6 +484,9 @@ Your previous reply was not valid JSON. Reply again with ONLY the JSON object de
       commitments: []
     };
     failed._raw_text = fullText;
+    failed.cash_flow = cfData || null;
+    failed.earnings_quality = eqData || null;
+    failed.market_data = opts.marketData || null;
     return applyInstitutionalGuard(failed, finData, title, ticker);
   }
 
@@ -499,6 +541,9 @@ Your previous reply was not valid JSON. Reply again with ONLY the JSON object de
 
   mergedVerdict.thesis_driver_assessment = mergeDriverAssessments(validResults.map(r => r.thesis_driver_assessment), drivers);
   mergedVerdict._raw_text = fullText;
+  mergedVerdict.cash_flow = cfData || null;
+  mergedVerdict.earnings_quality = eqData || null;
+  mergedVerdict.market_data = opts.marketData || null;
   return applyInstitutionalGuard(mergedVerdict, finData, title, ticker);
 }
 
@@ -836,6 +881,37 @@ function buildVerifiedFinancialsBlock(fin, { carried = false, periodLabel = null
   return `\n${head}\n${lines.join("\n")}\n`;
 }
 
+function formatValuationSection(marketData) {
+  if (!marketData || !marketData.share_price) return "";
+  const lines = [];
+  const price = marketData.share_price ? `₹${Number(marketData.share_price).toLocaleString('en-IN')}` : null;
+  const mcap = marketData.market_cap ? `₹${Number(marketData.market_cap).toLocaleString('en-IN')} Cr` : null;
+  const pe = marketData.pe_ratio ? `${Number(marketData.pe_ratio).toFixed(1)}x` : null;
+  const roce = marketData.roce_pct ? `${Number(marketData.roce_pct).toFixed(1)}%` : null;
+
+  const headerParts = [];
+  if (price) headerParts.push(`*CMP:* ${price}`);
+  if (mcap) headerParts.push(`*Mcap:* ${mcap}`);
+  if (roce) headerParts.push(`*ROCE:* ${roce}`);
+  if (headerParts.length > 0) lines.push(`• ${headerParts.join(" | ")}`);
+
+  if (pe) {
+    const peNum = Number(marketData.pe_ratio);
+    let note = "";
+    if (peNum > 60) {
+      note = " _(Hyper-growth multiple; static trailing P/E — forward return hinges on order book conversion & cash generation)_";
+    } else if (peNum > 35) {
+      note = " _(Premium growth multiple)_";
+    } else if (peNum > 0 && peNum < 20) {
+      note = " _(Value multiple / attractive entry valuation)_";
+    }
+    lines.push(`• *Trailing P/E:* ${pe}${note}`);
+  }
+
+  if (lines.length === 0) return "";
+  return `\n📈 *LIVE VALUATION & MULTIPLES:*\n${lines.join("\n")}\n`;
+}
+
 const GATE_BADGES = {
   THESIS_CONFIRMED_BEAT: "🟢 *Thesis Confirmed Beat*",
   TEMPORARY_FRICTION: "🟡 *Temporary Operating Friction*",
@@ -896,6 +972,8 @@ function buildStage1Message({ item, verdict, activeFin, finSource, carried, stag
   const finBlock = buildVerifiedFinancialsBlock(activeFin, { carried: finSource === "CARRIED_FORWARD", periodLabel: carried?.periodLabel || periodLabel });
   const gateSec = buildGateSection(verdict.thesis_gate_result);
   const driverSec = formatDriverAssessmentSection(verdict.thesis_driver_assessment);
+  const cashFlowSec = formatCashFlowAndQualitySection(verdict.cash_flow, verdict.earnings_quality, activeFin?.patConsolidated || activeFin?.patAttributable);
+  const valSec = formatValuationSection(verdict.market_data);
   // Consolidate KPIs and positive execution proof under MANAGEMENT EXECUTION & CAPACITY PROOF
   const rawExec = [...(verdict.thesis_operational_kpis || []), ...(verdict.key_positives || [])];
   // Deduplicate case-insensitively
@@ -929,6 +1007,8 @@ function buildStage1Message({ item, verdict, activeFin, finSource, carried, stag
     degradedNote?.trim(),
     gateSec?.trim(),
     finBlock?.trim(),
+    cashFlowSec?.trim(),
+    valSec?.trim(),
     guidanceSection?.trim(),
     driverSec?.trim(),
     executionSec?.trim(),
@@ -952,6 +1032,8 @@ function buildConcallMessage({ item, verdict, activeFin, finSource, carried, per
   const gateSec = buildGateSection(verdict.thesis_gate_result);
   const driverSec = formatDriverAssessmentSection(verdict.thesis_driver_assessment);
   const finBlock = buildVerifiedFinancialsBlock(activeFin, { carried: finSource === "CARRIED_FORWARD", periodLabel: carried?.periodLabel || periodLabel });
+  const cashFlowSec = formatCashFlowAndQualitySection(verdict.cash_flow, verdict.earnings_quality, activeFin?.patConsolidated || activeFin?.patAttributable);
+  const valSec = formatValuationSection(verdict.market_data);
   const perf = section("FINANCIAL HIGHLIGHTS & ORDER BOOK (from the call)", "📊", ch.financial_performance || ch.performance_overview);
   const growth = section("NEW GROWTH INITIATIVES & PILOTS", "🚀", ch.growth_initiatives);
   const ops = section("CAPEX & CAPACITY EXPANSION", "🏭", ch.operational_highlights);
@@ -974,6 +1056,8 @@ function buildConcallMessage({ item, verdict, activeFin, finSource, carried, per
     degradedNote?.trim(),
     gateSec?.trim(),
     finBlock?.trim(),
+    cashFlowSec?.trim(),
+    valSec?.trim(),
     guidanceSection?.trim(),
     qG?.trim(),
     aG?.trim(),
@@ -1100,8 +1184,47 @@ async function processOneDeepDive(item, ctx) {
     const mp3Path = path.resolve(scratchDir, `${item.ticker}_audio_${String(item.id).slice(0, 8)}.mp3`);
 
     try {
-      await downloadAndExtractMp3(classification.audioUrl, mp3Path);
-      const audioAudit = await analyzeAudioWithGemini(mp3Path, item.ticker, item.company_name, item.investment_thesis);
+      const resolvedMedia = await resolveAudioMediaUrl(classification.audioUrl);
+      const isYoutube = resolvedMedia?.type === "YOUTUBE";
+      const targetAudioUrl = isYoutube ? null : (resolvedMedia?.url || classification.audioUrl);
+
+      if (isYoutube) {
+        console.log(`[WORKER AUDIO] Resolved YouTube recording link for ${item.ticker}: ${resolvedMedia.url}`);
+        const ytMsg = `🏢 *${item.ticker.toUpperCase()}* | ${cleanCompanyForAlert(item)}\n🎙️ *Event:* Concall audio recording published\n──────────────────────────────\n• Audio recording link verified on company investor portal.\n• 📺 [Listen to Concall on YouTube →](${resolvedMedia.url})\n• Transcript analysis will follow when the written transcript is filed.\n──────────────────────────────${item.attachment_url ? `\n📄 [View Official Intimation →](${item.attachment_url})` : ""}`;
+        if (suppressTelegram) {
+          await deliverWorkerAlert(item, ytMsg, { suppressTelegram });
+        } else {
+          await queueDigestItem(item, buildDigestItem({
+            kind: "AUDIO",
+            title: item.title,
+            url: resolvedMedia.url,
+            filedAt: item.filing_date ? new Date(item.filing_date).toISOString() : new Date().toISOString(),
+            verdict: { verdict_summary: `Concall audio recording verified on YouTube: ${resolvedMedia.url}. Written transcript analysis follows when filed.` }
+          }));
+        }
+        await pool.query("UPDATE corporate_announcements SET deep_dive_status = 'completed' WHERE id = $1", [item.id]);
+        return { success: true, ticker: item.ticker, stage: "audio-youtube" };
+      }
+
+      await downloadAndExtractMp3(targetAudioUrl, mp3Path);
+
+      let audioAudit;
+      let transcriptText = null;
+      try {
+        if (process.env.GROK_API_KEY) {
+          console.log(`[WORKER AUDIO] Transcribing with Groq Whisper Large v3 Turbo...`);
+          transcriptText = await transcribeAudioWithGroqWhisper(mp3Path);
+          console.log(`[WORKER AUDIO] Whisper completed: ${transcriptText.length} characters.`);
+        }
+      } catch (whisperErr) {
+        console.warn(`[WORKER AUDIO] Whisper transcription failed, falling back to Gemini audio analysis:`, whisperErr.message);
+      }
+
+      if (transcriptText && transcriptText.length > 200) {
+        audioAudit = await analyzeTranscriptWithGemini(transcriptText, item.ticker, item.company_name, item.investment_thesis);
+      } else {
+        audioAudit = await analyzeAudioWithGemini(mp3Path, item.ticker, item.company_name, item.investment_thesis);
+      }
 
       const eventAnalysisObj = {
         audio_analysis: audioAudit,
@@ -1299,6 +1422,24 @@ async function processOneDeepDive(item, ctx) {
     return { success: false, skipped: true };
   }
 
+  let marketData = null;
+  try {
+    const { rows: mRows } = await pool.query(
+      `SELECT share_price, pe_ratio, market_cap, roce_pct, market_data_as_of
+       FROM market_data_snapshots
+       WHERE ticker = $1
+       ORDER BY market_data_as_of DESC
+       LIMIT 1`,
+      [item.ticker]
+    );
+    if (mRows.length > 0) marketData = mRows[0];
+  } catch (mErr) {
+    console.warn(`[WORKER] Market data lookup failed for ${item.ticker}:`, mErr.message);
+  }
+
+  const deterministicCashFlow = extractDeterministicCashFlow(docText);
+  const earningsQuality = extractEarningsQualityMetrics(docText, deterministicFin);
+
   // ── 5. Thesis-aware institutional verdict (LLM) ──
   const rawVerdict = await evaluateInstitutionalVerdict(
     item.ticker,
@@ -1306,7 +1447,13 @@ async function processOneDeepDive(item, ctx) {
     docText,
     item.deep_dive_status,
     item.title,
-    { periodLabel }
+    {
+      periodLabel,
+      verifiedFin: deterministicFin,
+      cashFlow: deterministicCashFlow,
+      earningsQuality,
+      marketData
+    }
   );
 
   let degradedNote = "";

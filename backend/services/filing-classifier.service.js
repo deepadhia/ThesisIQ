@@ -622,8 +622,8 @@ Extract Acquisition & Investment details:
 `,
     QUARTERLY_EARNINGS: `
 Extract Quarterly Earnings key highlights:
-- revenue_cr: Revenue in ₹ Crores and YoY/QoQ %
-- pat_cr: Net Profit in ₹ Crores and YoY/QoQ %
+- revenue_cr: Revenue in ₹ Crores and YoY/QoQ % (CRITICAL: Indian filings report in Lakhs, Millions, or Crores. You MUST convert to ₹ Crores: 1 Crore = 100 Lakhs = 10 Millions. If text says 2,725.28 Millions, that is ₹272.53 Crores, NOT ₹2,725 Crores!)
+- pat_cr: Net Profit in ₹ Crores and YoY/QoQ % (convert Lakhs/Millions to ₹ Crores)
 - ebitda_margin_pct: Operating margin %
 - segmental_highlights: Key division performance
 `,
@@ -657,6 +657,7 @@ Rule: Output ONLY a valid JSON object matching this structure:
     /* Put the exact fields requested above in category instruction here */
   }
 }
+CRITICAL UNIT NORMALIZATION: Indian filings frequently use Lakhs (1 Cr = 100 Lakhs) or Millions (1 Cr = 10 Millions). Check the unit header of the table. ALWAYS convert figures to ₹ Crores. NEVER quote raw unscaled table numbers as Crores.
 If any metric is not disclosed in the text, use null. NEVER output filler strings like "Not Disclosed" or "None". Never hallucinate missing numbers.
 `;
 }

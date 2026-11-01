@@ -18,6 +18,7 @@
 const NIM_URL = "https://integrate.api.nvidia.com/v1/chat/completions";
 const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
 const GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions";
+const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
 
 export const MAX_CONCURRENT_LLM_CALLS = 3;
 /** One logical LLM call (all providers and retries together) never runs longer than this. */
@@ -36,6 +37,7 @@ const TRANSIENT_FAILURES_BEFORE_COOLDOWN = 2;
 const KIND_CONFIG = {
   groq: { chatUrl: GROQ_URL, listUrl: "https://api.groq.com/openai/v1/models", timeoutMs: 30000, maxTokens: 3000 },
   gemini: { chatUrl: GEMINI_URL, listUrl: "https://generativelanguage.googleapis.com/v1beta/openai/models", timeoutMs: 40000, maxTokens: 4096 },
+  openrouter: { chatUrl: OPENROUTER_URL, listUrl: "https://openrouter.ai/api/v1/models", timeoutMs: 35000, maxTokens: 4096 },
   nim: { chatUrl: NIM_URL, listUrl: "https://integrate.api.nvidia.com/v1/models", timeoutMs: 25000, maxTokens: 3000 }
 };
 export const PROVIDER_KINDS = Object.keys(KIND_CONFIG);
@@ -97,6 +99,9 @@ export const SEED_MODELS = {
     { model: "gemini-3.5-flash-lite", timeoutMs: 40000 },
     { model: "gemini-flash-lite-latest", timeoutMs: 40000 }
   ],
+  openrouter: [
+    { model: "meta-llama/llama-3.3-70b-instruct", timeoutMs: 35000, extra: {} }
+  ],
   // NIM's free tier is the least reliable (it hung for 45 s twice in the 2026-10-31 live runs): last resort, short timeouts.
   nim: [
     { model: "openai/gpt-oss-20b", timeoutMs: 25000, extra: { reasoning_effort: "low" } },
@@ -106,23 +111,25 @@ export const SEED_MODELS = {
 
 /**
  * The ordered chain. Models come from `registry` (discovered and probed) and fall back to SEED_MODELS per provider.
- * Groq and Gemini alternate so one provider's outage never removes two adjacent attempts; NIM is strictly last.
+ * Groq and Gemini alternate so one provider's outage never removes two adjacent attempts; OpenRouter handles large/complex
+ * prompts; NIM is strictly last.
  */
-export function buildProviders({ nvidiaKey, groqKey, geminiKey, registry } = {}) {
+export function buildProviders({ nvidiaKey, groqKey, geminiKey, openrouterKey, registry } = {}) {
   const entriesFor = (kind, key) => {
     if (!key) return [];
     const discovered = registry?.providers?.[kind];
     const list = Array.isArray(discovered) && discovered.length > 0 ? discovered : SEED_MODELS[kind];
-    return list.map((e) => makeProvider(kind, key, e));
+    return (list || []).map((e) => makeProvider(kind, key, e));
   };
   const groq = entriesFor("groq", groqKey);
   const gemini = entriesFor("gemini", geminiKey);
+  const openrouter = entriesFor("openrouter", openrouterKey);
   const nim = entriesFor("nim", nvidiaKey);
   const chain = [];
   let gi = 0;
   let mi = 0;
   while (gi < groq.length && mi < gemini.length) chain.push(groq[gi++], gemini[mi++]);
-  chain.push(...gemini.slice(mi), ...groq.slice(gi), ...nim);
+  chain.push(...gemini.slice(mi), ...groq.slice(gi), ...openrouter, ...nim);
   return chain;
 }
 

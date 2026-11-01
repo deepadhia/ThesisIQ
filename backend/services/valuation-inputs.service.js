@@ -60,7 +60,7 @@ export function mapThesisHealth(rawStatus) {
   const s = String(rawStatus || '').trim().toLowerCase();
   if (!s || UNUSABLE_THESIS_STATUSES.includes(s)) return null;
   if (s.includes('weaken') || s.includes('broken') || s.includes('deteriorat')) return 'WEAKENING';
-  if (s.includes('pressure') || s.includes('review') || s.includes('watch') || s.includes('deviation')) return 'UNDER_PRESSURE';
+  if (s.includes('pressure') || s.includes('review') || s.includes('watch') || s.includes('deviation') || s.includes('friction') || s.includes('unconfirmed')) return 'UNDER_PRESSURE';
   if (s.includes('strengthen') || s.includes('accelerat') || s.includes('confirmed_beat')) return 'STRENGTHENING';
   if (s.includes('intact') || s.includes('stable')) return 'INTACT';
   return null;

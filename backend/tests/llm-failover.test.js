@@ -11,6 +11,7 @@ const http = (status, headers = {}) => ({ ok: false, status, statusText: 'err', 
 const isNim = (url) => String(url).includes('integrate.api.nvidia.com');
 const isGroq = (url) => String(url).includes('api.groq.com');
 const isGemini = (url) => String(url).includes('generativelanguage.googleapis.com');
+const isOpenRouter = (url) => String(url).includes('openrouter.ai');
 const bodyOf = (init) => JSON.parse(init.body);
 const ALL_KEYS = { nvidiaKey: 'nv-key', groqKey: 'gq-key', geminiKey: 'gm-key' };
 const run = (fetchImpl, extra = {}, keys = ALL_KEYS) => runLlmPrompt('sys', 'user', {
@@ -42,8 +43,16 @@ describe('buildProviders', () => {
   it('works with a single provider key', () => {
     expect(buildProviders({ groqKey: 'b' }).every(p => isGroq(p.url))).toBe(true);
     expect(buildProviders({ geminiKey: 'g' }).every(p => isGemini(p.url))).toBe(true);
+    expect(buildProviders({ openrouterKey: 'or' }).every(p => isOpenRouter(p.url))).toBe(true);
     expect(buildProviders({ nvidiaKey: 'a' }).every(p => isNim(p.url))).toBe(true);
     expect(buildProviders({ nvidiaKey: 'a' }).length).toBeGreaterThanOrEqual(2);
+  });
+  it('includes OpenRouter when openrouterKey is configured, placed before NIM', () => {
+    const plan = buildProviders({ ...ALL_KEYS, openrouterKey: 'or-key' });
+    const orIdx = plan.map((p, i) => (isOpenRouter(p.url) ? i : -1)).filter(i => i >= 0);
+    const nimIdx = plan.map((p, i) => (isNim(p.url) ? i : -1)).filter(i => i >= 0);
+    expect(orIdx.length).toBeGreaterThanOrEqual(1);
+    expect(Math.max(...orIdx)).toBeLessThan(Math.min(...nimIdx));
   });
   it('is empty when no provider is configured', () => {
     expect(buildProviders({ nvidiaKey: '', groqKey: '', geminiKey: '' })).toEqual([]);
@@ -75,6 +84,18 @@ describe('runLlmPrompt', () => {
     expect(gemCall[1].headers.Authorization).toBe('Bearer gm-key');
     const groqCall = f.mock.calls.find(c => isGroq(c[0]));
     expect(groqCall[1].headers.Authorization).toBe('Bearer gq-key');
+  });
+
+  it('falls over to OpenRouter when Groq and Gemini are both down', async () => {
+    const f = vi.fn(async (url) => {
+      if (isOpenRouter(url)) return ok('from openrouter');
+      throw new TypeError('fetch failed');
+    });
+    const out = await run(f, {}, { ...ALL_KEYS, openrouterKey: 'or-key' });
+    expect(out).toBe('from openrouter');
+    const orCall = f.mock.calls.find(c => isOpenRouter(c[0]));
+    expect(orCall[1].headers.Authorization).toBe('Bearer or-key');
+    expect(bodyOf(orCall[1]).model).toBe('meta-llama/llama-3.3-70b-instruct');
   });
 
   it('reaches NVIDIA NIM when Groq and Gemini are both down', async () => {

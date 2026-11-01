@@ -35,6 +35,7 @@ vi.mock('../config/env.js', () => ({
   TELEGRAM_BOT_TOKEN: 'tok',
   TELEGRAM_CHAT_ID: '1',
   GEMINI_API_KEY: '',
+  OPENROUTER_API_KEY: '',
   DATABASE_URL: 'postgres://test'
 }));
 

@@ -2,7 +2,7 @@ import fs from "fs";
 import path from "path";
 import { execFile } from "child_process";
 import { promisify } from "util";
-import { getGeminiModelNames } from "./llm.service.js";
+import { getGeminiModelNames, runLlm } from "./llm.service.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -29,7 +29,8 @@ export function extractAudioUrlFromFiling(pdfText = "", attachmentUrl = "") {
   const unwrappedText = (pdfText || "")
     .replace(/(https?:\/\/[^\s"'<>]+)-\r?\n([a-zA-Z0-9_\-\.\/?&=%#]+)/gi, "$1-$2")
     .replace(/(https?:\/\/[^\s"'<>\-]+)\r?\n([a-zA-Z0-9_\-\.\/?&=%#]+)/gi, (match, p1, p2) => {
-      if (/^[a-zA-Z0-9_\-\.\/?&=%#]+$/.test(p2) && !/^(To|From|Dear|Date|Subject|The|Ref|Yours|For|National|BSE|NSE)\b/i.test(p2)) {
+      if (/\.(?:html?|pdf|php|aspx?)$/i.test(p1)) return match;
+      if (/^[a-zA-Z0-9_\-\.\/?&=%#]+$/.test(p2) && !/^(To|From|Dear|Date|Subject|The|Ref|Yours|For|National|BSE|NSE|You|Please|Kindly|With)\b/i.test(p2)) {
         return `${p1}${p2}`;
       }
       return match;
@@ -37,19 +38,89 @@ export function extractAudioUrlFromFiling(pdfText = "", attachmentUrl = "") {
 
   const combined = `${attachmentUrl}\n${unwrappedText}`;
   
-  // Look for direct audio/video links
+  // 1. Look for direct audio/video links
   const directMatch = combined.match(/https?:\/\/[^\s"'<>]+\.(?:mp3|mp4|m4a|wav|aac|ogg)(?:\?[^\s"'<>]*)?/i);
   if (directMatch) return directMatch[0].replace(/[.,;)\]]+$/, "");
 
-  // Look for common Indian corporate audio hosting, IR short links, or webcast links
-  const webcastMatch = combined.match(/https?:\/\/(?:www\.)?(?:[a-zA-Z0-9-]+\.)*(?:researchbytes|choruscall|orientcapital|zoom|webex|youtube|youtu\.be|drive\.google|dropbox|vimeo|tinyurl|bit\.ly)[^\s"'<>]+/i);
+  // 2. Look for common Indian corporate audio hosting, IR short links, or webcast links
+  const webcastMatch = combined.match(/https?:\/\/(?:www\.)?(?:[a-zA-Z0-9-]+\.)*(?:researchbytes|choruscall|orientcapital|zoom|webex|youtube|youtu\.be|drive\.google|dropbox|vimeo|tinyurl|bit\.ly|diamondpass)[^\s"'<>]+/i);
   if (webcastMatch) return webcastMatch[0].replace(/[.,;)\]]+$/, "");
 
-  // Look for generic URLs containing audio/concall/recording/webcast pathways
-  const genericAudioMatch = combined.match(/https?:\/\/[^\s"'<>]+\/(?:audio|concall|recording|webcast|media)[^\s"'<>]*/i);
+  // 3. Look for generic URLs containing audio/concall/recording/webcast/transcript/investor pathways
+  const genericAudioMatch = combined.match(/https?:\/\/[^\s"'<>]+\/(?:audio|concall|recording|webcast|media|transcript|investor)[^\s"'<>]*/i);
   if (genericAudioMatch) return genericAudioMatch[0].replace(/[.,;)\]]+$/, "");
 
+  // 4. In explicit audio intimation notices, capture any non-exchange corporate landing URL mentioned in the letter
+  const isAudioNotice = /(?:audio recording|recording link|audio link|conference call recording|concall recording)/i.test(pdfText || "");
+  if (isAudioNotice) {
+    const allUrls = [...unwrappedText.matchAll(/https?:\/\/[a-zA-Z0-9\-\.]+\.[a-zA-Z]{2,}[^\s"'<>]+/gi)]
+      .map(m => m[0].replace(/[.,;)\]]+$/, ""))
+      .filter(u => !/(?:nseindia\.com|bseindia\.com|bse\.com|w3\.org|adobe\.com)/i.test(u));
+    if (allUrls.length > 0) return allUrls[0];
+  }
+
   return null;
+}
+
+/**
+ * Resolves an audio URL or HTML landing page into its underlying media stream, YouTube link, or webcast URL.
+ */
+export async function resolveAudioMediaUrl(url, { fetchFn = fetch, timeoutMs = 6000 } = {}) {
+  if (!url || typeof url !== "string") return null;
+
+  // Direct media extensions
+  if (/\.(?:mp3|mp4|m4a|wav|aac|ogg)(?:\?[^\s"'<>]*)?$/i.test(url)) {
+    return { type: "DIRECT_AUDIO", url };
+  }
+
+  // Direct YouTube links
+  if (/(?:youtube\.com\/watch\?v=|youtu\.be\/)/i.test(url)) {
+    return { type: "YOUTUBE", url };
+  }
+
+  // Web landing page: inspect HTML to harvest underlying media/webcast links
+  try {
+    const signal = typeof AbortSignal?.timeout === "function" ? AbortSignal.timeout(timeoutMs) : undefined;
+    const res = await fetchFn(url, {
+      signal,
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+      }
+    });
+
+    if (!res.ok) return { type: "WEB_LINK", url };
+
+    const contentType = (res.headers.get("content-type") || "").toLowerCase();
+    if (!contentType.includes("text/html")) {
+      return { type: "DIRECT_AUDIO", url };
+    }
+
+    const html = await res.text();
+
+    // 1. Check for YouTube links in HTML
+    const ytMatch = html.match(/(?:href|src)=["'](https?:\/\/(?:www\.)?(?:youtube\.com\/watch\?v=[a-zA-Z0-9_\-]+|youtu\.be\/[a-zA-Z0-9_\-]+)[^"']*)["']/i);
+    if (ytMatch) {
+      return { type: "YOUTUBE", url: ytMatch[1], originalUrl: url };
+    }
+
+    // 2. Check for direct audio files in HTML
+    const audioMatch = html.match(/(?:href|src)=["']([^"']+\.(?:mp3|m4a|wav|aac|ogg)(?:\?[^"']*)?)["']/i);
+    if (audioMatch) {
+      const resolved = new URL(audioMatch[1], url).href;
+      return { type: "DIRECT_AUDIO", url: resolved, originalUrl: url };
+    }
+
+    // 3. Check for ChorusCall / Researchbytes / Zoom / Drive in HTML
+    const webcastMatch = html.match(/(?:href|src)=["'](https?:\/\/(?:[a-zA-Z0-9-]+\.)*(?:choruscall|researchbytes|orientcapital|drive\.google|dropbox|vimeo|zoom)[^"']*)["']/i);
+    if (webcastMatch) {
+      return { type: "WEBCAST", url: webcastMatch[1], originalUrl: url };
+    }
+
+    return { type: "LANDING_PAGE", url };
+  } catch (err) {
+    console.warn(`[AUDIO RESOLVER] Could not inspect landing page ${url}:`, err.message);
+    return { type: "WEB_LINK", url };
+  }
 }
 
 /**
@@ -73,12 +144,13 @@ export async function downloadAndExtractMp3(url, outputMp3Path) {
   const contentType = (response.headers.get("content-type") || "").toLowerCase();
   if (contentType.includes("text/html")) {
     console.log(`[AUDIO ANALYZER] Detected HTML landing page for media URL. Resolving direct audio stream link...`);
-    const htmlText = await response.text();
-    const hrefMatches = [...htmlText.matchAll(/href=["']([^"']+\.(?:mp3|mp4|m4a|wav|aac)(?:\?[^"']*)?)["']/gi)].map(m => m[1]);
-    if (hrefMatches.length > 0) {
-      const resolvedDirectUrl = new URL(hrefMatches[0], url).href;
-      console.log(`[AUDIO ANALYZER] Successfully resolved direct audio stream: ${resolvedDirectUrl}`);
-      return downloadAndExtractMp3(resolvedDirectUrl, outputMp3Path);
+    const resolved = await resolveAudioMediaUrl(url);
+    if (resolved?.type === "DIRECT_AUDIO" && resolved.url !== url) {
+      console.log(`[AUDIO ANALYZER] Successfully resolved direct audio stream: ${resolved.url}`);
+      return downloadAndExtractMp3(resolved.url, outputMp3Path);
+    }
+    if (resolved?.type === "YOUTUBE") {
+      throw new Error(`YOUTUBE_MEDIA_LINK:${resolved.url}`);
     }
     throw new Error(`Landing page did not contain direct audio link (.mp3/.m4a): ${url}`);
   }
@@ -112,6 +184,41 @@ export async function downloadAndExtractMp3(url, outputMp3Path) {
   const sizeMb = (fs.statSync(outputMp3Path).size / (1024 * 1024)).toFixed(2);
   console.log(`[AUDIO ANALYZER] MP3 ready at ${outputMp3Path} (${sizeMb} MB)`);
   return outputMp3Path;
+}
+
+/**
+ * Ultra-fast transcription of an audio file using Groq's whisper-large-v3-turbo LPU runner.
+ * Transcribes audio up to 200x real-time speed.
+ */
+export async function transcribeAudioWithGroqWhisper(mp3Path, { apiKey = process.env.GROK_API_KEY, timeoutMs = 60000 } = {}) {
+  if (!apiKey) throw new Error("GROK_API_KEY is not configured for Whisper transcription");
+  if (!fs.existsSync(mp3Path)) throw new Error(`Audio file not found at ${mp3Path}`);
+
+  const buffer = fs.readFileSync(mp3Path);
+  const blob = new Blob([buffer], { type: "audio/mp3" });
+  const form = new FormData();
+  form.append("file", blob, path.basename(mp3Path));
+  form.append("model", "whisper-large-v3-turbo");
+  form.append("response_format", "json");
+  form.append("temperature", "0.0");
+
+  const signal = typeof AbortSignal?.timeout === "function" ? AbortSignal.timeout(timeoutMs) : undefined;
+  const res = await fetch("https://api.groq.com/openai/v1/audio/transcriptions", {
+    method: "POST",
+    signal,
+    headers: {
+      "Authorization": `Bearer ${apiKey}`
+    },
+    body: form
+  });
+
+  if (!res.ok) {
+    const errText = await res.text();
+    throw new Error(`Groq Whisper failed: ${res.status} ${errText}`);
+  }
+
+  const data = await res.json();
+  return data.text || "";
 }
 
 /**
@@ -305,15 +412,11 @@ Return ONLY a valid JSON object with the following schema:
  * Stage 2: Ingest and analyze Written PDF Transcript.
  */
 export async function analyzeTranscriptWithGemini(transcriptText, ticker, companyName, thesis = "") {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) throw new Error("GEMINI_API_KEY is not configured");
-
-  const prompt = `
-You are a senior institutional Indian equity research analyst analyzing the official written earnings call transcript for ${companyName} (${ticker}).
-Investment Thesis Context: ${thesis || "High ROCE, strong capital allocation, prudent balance sheet."}
+  const systemPrompt = `You are a senior institutional Indian equity research analyst analyzing the official written earnings call transcript for ${companyName} (${ticker}). Return ONLY a valid JSON object.`;
+  const userPrompt = `Investment Thesis Context: ${thesis || "High ROCE, strong capital allocation, prudent balance sheet."}
 
 Filing Transcript Text:
-${transcriptText.substring(0, 100000)}
+${(transcriptText || "").substring(0, 80000)}
 
 Return ONLY a valid JSON object:
 {
@@ -344,22 +447,38 @@ Return ONLY a valid JSON object:
 }
 `;
 
-  const contents = [{ parts: [{ text: prompt }] }];
-  const { text } = await callGemini(contents, apiKey);
-  const cleanJson = text.replace(/^```json\s*|\s*```$/gi, "").trim();
-  return JSON.parse(cleanJson);
+  let replyText = "";
+  try {
+    replyText = await runLlm(systemPrompt, userPrompt, { temperature: 0.05, maxTotalMs: 90000 });
+  } catch (llmErr) {
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) throw llmErr;
+    console.warn(`[TRANSCRIPT ANALYZER] runLlm failed (${llmErr.message}), falling back to direct Gemini call...`);
+    const contents = [{ parts: [{ text: `${systemPrompt}\n\n${userPrompt}` }] }];
+    const { text } = await callGemini(contents, apiKey);
+    replyText = text;
+  }
+
+  const cleanJson = (replyText || "").replace(/^```json\s*|\s*```$/gi, "").trim();
+  try {
+    return JSON.parse(cleanJson);
+  } catch (err) {
+    const match = cleanJson.match(/\{[\s\S]*\}/);
+    if (match) {
+      try {
+        return JSON.parse(match[0]);
+      } catch { /* proceed to throw */ }
+    }
+    throw new Error(`Failed to parse transcript analysis JSON: ${err.message}`);
+  }
 }
 
 /**
  * Cross-audit: Discrepancy detector between Audio Ingestion and Written Transcript.
  */
 export async function auditDiscrepancies(audioData, transcriptData, ticker) {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) throw new Error("GEMINI_API_KEY is not configured");
-
-  const prompt = `
-You are an expert Forensic Auditor specializing in corporate disclosures under SEBI LODR regulations.
-Compare the preliminary findings extracted from the LIVE CONCALL AUDIO against the OFFICIAL WRITTEN TRANSCRIPT published days later for ${ticker}.
+  const systemPrompt = `You are an expert Forensic Auditor specializing in corporate disclosures under SEBI LODR regulations for ${ticker}. Return ONLY a valid JSON object.`;
+  const userPrompt = `Compare the preliminary findings extracted from the LIVE CONCALL AUDIO against the OFFICIAL WRITTEN TRANSCRIPT published days later for ${ticker}.
 
 Live Audio Findings:
 ${JSON.stringify(audioData, null, 2)}
@@ -389,8 +508,28 @@ Return ONLY a valid JSON object:
 }
 `;
 
-  const contents = [{ parts: [{ text: prompt }] }];
-  const { text } = await callGemini(contents, apiKey);
-  const cleanJson = text.replace(/^```json\s*|\s*```$/gi, "").trim();
-  return JSON.parse(cleanJson);
+  let replyText = "";
+  try {
+    replyText = await runLlm(systemPrompt, userPrompt, { temperature: 0.05, maxTotalMs: 90000 });
+  } catch (llmErr) {
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) throw llmErr;
+    console.warn(`[DISCREPANCY AUDITOR] runLlm failed (${llmErr.message}), falling back to direct Gemini call...`);
+    const contents = [{ parts: [{ text: `${systemPrompt}\n\n${userPrompt}` }] }];
+    const { text } = await callGemini(contents, apiKey);
+    replyText = text;
+  }
+
+  const cleanJson = (replyText || "").replace(/^```json\s*|\s*```$/gi, "").trim();
+  try {
+    return JSON.parse(cleanJson);
+  } catch (err) {
+    const match = cleanJson.match(/\{[\s\S]*\}/);
+    if (match) {
+      try {
+        return JSON.parse(match[0]);
+      } catch { /* proceed to throw */ }
+    }
+    throw new Error(`Failed to parse discrepancy audit JSON: ${err.message}`);
+  }
 }

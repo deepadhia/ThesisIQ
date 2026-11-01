@@ -6,7 +6,7 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
-vi.mock('../config/env.js', () => ({ NVIDIA_API_KEY: '', GROQ_API_KEY: '', TELEGRAM_BOT_TOKEN: '', TELEGRAM_CHAT_ID: '', GEMINI_API_KEY: '', DATABASE_URL: 'postgres://test' }));
+vi.mock('../config/env.js', () => ({ NVIDIA_API_KEY: '', GROQ_API_KEY: '', TELEGRAM_BOT_TOKEN: '', TELEGRAM_CHAT_ID: '', GEMINI_API_KEY: '', OPENROUTER_API_KEY: '', DATABASE_URL: 'postgres://test' }));
 vi.mock('../db/pool.js', () => ({ pool: { query: vi.fn(async () => ({ rows: [] })) } }));
 vi.mock('../services/telegram.service.js', async () => ({ ...(await vi.importActual('../services/telegram.service.js')), sendTelegramMessage: vi.fn(async () => ({ ok: true })) }));
 

@@ -33,6 +33,9 @@ export const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || "";
 /** Google Gemini API Key for Multimodal OCR and Concall Audio Processing */
 export const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
 
+/** OpenRouter API Key for high-context failover and deep concall transcript reasoning */
+export const OPENROUTER_API_KEY = (process.env.OPENROUTER_API_KEY || process.env.OPENROUTER_KEY || "").trim();
+
 /** Supabase project URL and anon key for proxying Edge Functions (fetch-price, fetch-financials). */
 export const SUPABASE_URL = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || "";
 export const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || process.env.VITE_SUPABASE_PUBLISHABLE_KEY || "";
@@ -46,4 +49,3 @@ if (!DATABASE_URL) {
 if (!JWT_SECRET) {
   console.warn("[WARN] JWT_SECRET is not set. Admin authentication features will be disabled.");
 }
-

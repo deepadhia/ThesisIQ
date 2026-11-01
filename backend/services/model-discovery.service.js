@@ -31,7 +31,7 @@ const PROBE_TIMEOUT_MS = 15000;
 /** A model that answers, but slower than this, is dropped: it would hold up every call for its whole timeout. */
 const SLOW_PROBE_MS = 10000;
 const PROBE_CONCURRENCY = 4;
-const KEEP = { groq: 3, gemini: 4, nim: 3 };
+const KEEP = { groq: 3, gemini: 4, openrouter: 2, nim: 3 };
 const MIN_PARAMS_B = 15;
 
 /** Names that are never text-chat models for this pipeline (speech, image, embedding, safety, vision, code, multimodal). */
@@ -65,6 +65,7 @@ export function isChatCandidate(kind, id) {
   const name = String(id);
   if (NOISE.test(name)) return false;
   if (kind === "gemini") return GEMINI_FLASH.test(name) || GEMINI_ALIAS.test(name);
+  if (kind === "openrouter") return /llama-3\.3-70b|qwen.*72b|deepseek-chat/i.test(name);
   const size = paramsB(name);
   if (size !== null && size < MIN_PARAMS_B) return false;
   return true;
@@ -83,6 +84,12 @@ function nimRankKey(id) {
   return [fast ? 0 : 1, paramsB(id) ?? 25];                          // fast families first, smaller (faster) first
 }
 
+function openrouterRankKey(id) {
+  if (/llama-3\.3-70b/i.test(id)) return 0;
+  if (/qwen.*72b/i.test(id)) return 1;
+  return 2;
+}
+
 function compareKeys(a, b) {
   for (let i = 0; i < Math.max(a.length, b.length); i++) {
     if ((a[i] ?? 0) !== (b[i] ?? 0)) return (a[i] ?? 0) - (b[i] ?? 0);
@@ -92,7 +99,7 @@ function compareKeys(a, b) {
 
 /** Orders candidate ids best-first for the provider kind (fast, capable, current). Stable for equal scores. */
 export function rankCandidates(kind, ids) {
-  const key = kind === "gemini" ? geminiRankKey : kind === "nim" ? nimRankKey : (id) => [-(paramsB(id) ?? 0)];
+  const key = kind === "gemini" ? geminiRankKey : kind === "nim" ? nimRankKey : kind === "openrouter" ? openrouterRankKey : (id) => [-(paramsB(id) ?? 0)];
   return ids.map((id, i) => ({ id, i, k: key(id) })).sort((a, b) => compareKeys(a.k, b.k) || a.i - b.i).map((x) => x.id);
 }
 
@@ -217,7 +224,7 @@ export async function loadRegistry(store) {
  * @param {{keys: {groqKey?: string, geminiKey?: string, nvidiaKey?: string}, fetchImpl?: Function, callImpl?: Function, store?: object, previous?: object|null, now?: Date, sleepImpl?: Function}} deps
  */
 export async function refreshModelRegistry({ keys, fetchImpl = globalThis.fetch, callImpl = callProvider, store, previous = null, now = new Date(), sleepImpl, probeTimeoutMs } = {}) {
-  const keyFor = { groq: keys?.groqKey, gemini: keys?.geminiKey, nim: keys?.nvidiaKey };
+  const keyFor = { groq: keys?.groqKey, gemini: keys?.geminiKey, openrouter: keys?.openrouterKey, nim: keys?.nvidiaKey };
   const providers = {};
   const report = {};
   const snapshot = () => ({ version: 1, fetchedAt: now.toISOString(), providers: { ...providers }, report: { ...report } });

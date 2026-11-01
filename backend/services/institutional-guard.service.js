@@ -480,7 +480,7 @@ const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
  * Builds a predicate that says whether every concrete number / percentage in a sentence is backed by the source
  * document (or by a parser-verified percentage). Years, 1-2 digit counts and bps/x ratios are not hard-grounded.
  */
-function buildGroundingCheck(rawDocText, verifiedPcts = []) {
+function buildGroundingCheck(rawDocText, verifiedPcts = [], financialData = null) {
   const doc = String(rawDocText || "").toLowerCase();
   const docNoCommas = doc.replace(/,/g, "");
   const hasDoc = doc.length > 50;
@@ -513,6 +513,32 @@ function buildGroundingCheck(rawDocText, verifiedPcts = []) {
       const lakhForm = String(Math.round(n * 100));
       if (!tokenRe.test(docNoCommas) && !docNoCommas.includes(lakhForm)) return false;
     }
+    // Figures carrying a Crores denomination ("₹2,725 Cr", "2725.28 Crores", "2725 Cr"):
+    // When a document is reported in Millions or Lakhs, raw table numbers are NOT in Crores!
+    // A figure >= 10 claiming "Cr" must either match a verified number in Crores or literally appear with "cr"/"crore" in the document.
+    for (const m of sentence.matchAll(/(?:₹|rs\.?|inr)?\s*(\d+(?:,\d+)*(?:\.\d+)?)\s*(?:crores?|crs?\b|cr\b)/gi)) {
+      const cleanNum = m[1].replace(/,/g, "");
+      const val = parseFloat(cleanNum);
+      if (isNaN(val)) continue;
+      if (financialData && (financialData.unit === "MILLIONS" || financialData.unit === "LAKHS")) {
+        const verifiedVals = [
+          financialData.revenue,
+          financialData.patConsolidated,
+          financialData.patAttributable,
+          financialData.ebitda,
+          financialData.pbt
+        ].filter(v => v !== null && v !== undefined);
+
+        const matchesVerified = verifiedVals.some(v => Math.abs(v - val) <= 1.0);
+        if (matchesVerified) continue;
+
+        const crorePattern = new RegExp(`(?<![\\d.])${escapeRe(cleanNum)}(?:\\.[0-9]+)?\\s*(?:crores?|crs?\\b|cr\\b)`, "i");
+        if (!crorePattern.test(docNoCommas)) {
+          return false;
+        }
+      }
+    }
+
     // Absolute figures (>= 3 digits, no % / bps / x suffix) must literally exist in the source.
     for (const m of sentence.matchAll(/(\d{2,}(?:[.,]\d+)*)(\s*(?:%|bps|x\b))?/gi)) {
       if (m[2]) continue;
@@ -631,7 +657,7 @@ function sanitizeLlmOutput(guarded, title = "", ticker = "", financialData = nul
     financialData.patQoQGrowthPct, financialData.ebitdaYoYGrowthPct, financialData.ebitdaMarginPct,
     financialData.normalisedPatYoYGrowthPct
   ].filter(v => v !== null && v !== undefined && !isNaN(v)).map(Number) : [];
-  const isGrounded = buildGroundingCheck(rawDocText, verifiedPcts);
+  const isGrounded = buildGroundingCheck(rawDocText, verifiedPcts, financialData);
   const sanitizeArray = (arr) => (Array.isArray(arr) ? arr.filter(item => isItemAcceptable(item, isGrounded)) : []);
 
   if (guarded.forward_catalysts) {

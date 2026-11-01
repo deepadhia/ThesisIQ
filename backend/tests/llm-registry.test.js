@@ -3,7 +3,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
-vi.mock('../config/env.js', () => ({ NVIDIA_API_KEY: 'n-key', GROQ_API_KEY: 'g-key', GEMINI_API_KEY: 'm-key' }));
+vi.mock('../config/env.js', () => ({ NVIDIA_API_KEY: 'n-key', GROQ_API_KEY: 'g-key', GEMINI_API_KEY: 'm-key', OPENROUTER_API_KEY: '' }));
 
 import {
   initModelRegistry,
