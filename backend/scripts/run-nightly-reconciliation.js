@@ -104,11 +104,13 @@ export async function runNightlyReconciliation({ isDryRun = false } = {}) {
       console.log(`⚡ Ingested new late filings for symbols: ${pipeRes.downloadedSymbols.join(", ")}`);
       summaryReport.newFilingsIngested = pipeRes.downloadedSymbols.length;
 
+      const todayIst = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(new Date());
       for (const sym of pipeRes.downloadedSymbols) {
         summaryReport.newAlerts.push({
           ticker: sym,
           type: "LATE_FILING_RECONCILED",
-          text: `📑 Ingested newly filed Concall Transcript / Presentation for **${sym}**`
+          key: `${sym}_LATE_FILING_${todayIst}`,
+          text: `📑 Ingested newly filed Concall Transcript / Presentation for **${sym}** (${todayIst})`
         });
       }
     } else {
@@ -124,7 +126,7 @@ export async function runNightlyReconciliation({ isDryRun = false } = {}) {
   // ──────────────────────────────────────────────────────────────────────────
   console.log("\n--- 📢 Step 3: Scanning Corporate Announcements & AGM Disclosures ---");
   try {
-    const scanRes = await scan({ isDryRun: true }); // Scan quietly, collect raw events
+    const scanRes = await scan({ isDryRun }); // Ingest and persist events in DB unless nightly is in dry-run
     summaryReport.announcementsScanned = scanRes.newAnnouncements || 0;
     console.log(`✅ Scanned announcements. New filings detected: ${summaryReport.announcementsScanned}`);
   } catch (err) {
@@ -157,8 +159,10 @@ export async function runNightlyReconciliation({ isDryRun = false } = {}) {
     for (const ev of recentEvents.rows) {
       const icon = ev.impact === 'NEGATIVE' ? '⚠️' : '🚀';
       summaryReport.newAlerts.push({
+        id: ev.id,
         ticker: ev.ticker,
         type: "MATERIAL_GROWTH_CATALYST",
+        key: `${ev.id}_${ev.ticker}`,
         text: `${icon} *${ev.ticker}* | ${ev.title}\n   ${ev.summary ? `_${ev.summary.substring(0, 180)}..._` : ""}`
       });
     }
@@ -211,56 +215,68 @@ export async function runNightlyReconciliation({ isDryRun = false } = {}) {
   const pendingMorningDigest = [];
 
   for (const alert of summaryReport.newAlerts) {
+    const hashInput = alert.key || (alert.id ? `${alert.id}_${alert.ticker}_${alert.type}` : `${alert.ticker}_${alert.type}_${alert.text}`);
     const hash = crypto.createHash("sha256")
-      .update(`${alert.ticker}_${alert.type}_${alert.text}`)
+      .update(hashInput)
       .digest("hex");
 
     // Check if this exact alert was already dispatched previously
     const check = await pool.query("SELECT id FROM reconciliation_alerts_sent WHERE alert_hash = $1", [hash]);
     if (check.rows.length === 0) {
-      // New unsent alert
-      pendingMorningDigest.push(alert);
-      if (!isDryRun) {
-        await pool.query(
-          "INSERT INTO reconciliation_alerts_sent (alert_hash, ticker, alert_type, summary) VALUES ($1, $2, $3, $4)",
-          [hash, alert.ticker, alert.type, alert.text]
-        );
-      }
-      dispatchedCount++;
+      // New unsent alert (attach hash for post-delivery persistence)
+      pendingMorningDigest.push({ ...alert, hash });
     }
   }
 
   console.log(`Found ${pendingMorningDigest.length} fresh deduplicated alerts (Filtered ${summaryReport.newAlerts.length - pendingMorningDigest.length} duplicates).`);
 
-  if (pendingMorningDigest.length > 0 && !isDryRun) {
-    const dateStr = new Date().toLocaleDateString("en-IN", {
-      timeZone: "Asia/Kolkata",
-      day: "numeric",
-      month: "short",
-      year: "numeric"
-    });
+  // Deliver up to 10 alerts in the digest
+  const toDeliver = pendingMorningDigest.slice(0, 10);
 
-    let msg = `🌅 *MORNING THESIS RECONCILIATION DIGEST*\n`;
-    msg += `📅 *Date:* ${dateStr}\n`;
-    msg += `──────────────────────────────\n`;
-    msg += `📊 *Nightly Summary:*\n`;
-    msg += `• Prices Synced: ${summaryReport.pricesRefreshed}\n`;
-    msg += `• Filings Reconciled: ${summaryReport.newFilingsIngested}\n`;
-    msg += `• Verified Catalysts: ${pendingMorningDigest.length}\n`;
-    msg += `──────────────────────────────\n\n`;
+  if (toDeliver.length > 0) {
+    if (!isDryRun) {
+      const dateStr = new Date().toLocaleDateString("en-IN", {
+        timeZone: "Asia/Kolkata",
+        day: "numeric",
+        month: "short",
+        year: "numeric"
+      });
 
-    for (const item of pendingMorningDigest.slice(0, 10)) {
-      msg += `${item.text}\n\n`;
-    }
+      let msg = `🌅 *MORNING THESIS RECONCILIATION DIGEST*\n`;
+      msg += `📅 *Date:* ${dateStr}\n`;
+      msg += `──────────────────────────────\n`;
+      msg += `📊 *Nightly Summary:*\n`;
+      msg += `• Prices Synced: ${summaryReport.pricesRefreshed}\n`;
+      msg += `• Filings Reconciled: ${summaryReport.newFilingsIngested}\n`;
+      msg += `• Verified Catalysts: ${toDeliver.length}\n`;
+      msg += `──────────────────────────────\n\n`;
 
-    msg += `──────────────────────────────\n`;
-    msg += `_ThesisIQ Automated Nightly Governance_`;
+      for (const item of toDeliver) {
+        msg += `${item.text}\n\n`;
+      }
 
-    try {
-      await sendTelegramMessage(msg);
-      console.log("✅ Sent Morning Reconciliation Digest to Telegram.");
-    } catch (err) {
-      console.warn("[WARN] Could not send Telegram digest:", err.message);
+      msg += `──────────────────────────────\n`;
+      msg += `_ThesisIQ Automated Nightly Governance_`;
+
+      try {
+        await sendTelegramMessage(msg);
+        console.log("✅ Sent Morning Reconciliation Digest to Telegram.");
+
+        // Invariant I1: Mark alerts as sent in DB ONLY after successful Telegram delivery
+        for (const item of toDeliver) {
+          await pool.query(
+            "INSERT INTO reconciliation_alerts_sent (alert_hash, ticker, alert_type, summary) VALUES ($1, $2, $3, $4) ON CONFLICT (alert_hash) DO NOTHING",
+            [item.hash, item.ticker, item.type, item.text]
+          );
+          dispatchedCount++;
+        }
+      } catch (err) {
+        console.warn("[WARN] Could not send Telegram digest:", err.message);
+        // Do NOT commit to reconciliation_alerts_sent if delivery failed (Invariant I2 / I3)
+      }
+    } else {
+      console.log(`[DRY RUN] Would send ${toDeliver.length} morning digest alerts to Telegram.`);
+      dispatchedCount = toDeliver.length;
     }
   }
 

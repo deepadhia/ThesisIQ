@@ -1,5 +1,28 @@
 # Changelog
 
+## [v4.4.2] - 2026-11-01 (Audited Invariant Fixes: Timezones, Sorting, Auth & Calendar Matching)
+
+### Security & Access Control
+- **Fail-Closed Dispatcher Auth**: Eliminated fallback plaintext bearer token in `backend/api/reconciler-dispatcher.js`. Fails closed (`401 Unauthorized`) if `CRON_SECRET` is unset.
+- **Path Traversal Containment**: Guarded `/files/:symbol/:quarter/:filename` route in `backend/app.js` using `path.resolve` directory containment check against `getDataDir()`.
+- **Header Injection Defense**: Sanitized `Content-Disposition` header in `backend/app.js` by escaping quote, backslash, and newline characters from file names.
+
+### Nightly Governance & Invariant Precedence
+- **Precedence Guard (Invariants I1/I2/I3)**: In `backend/scripts/run-nightly-reconciliation.js`, alerts are sliced before dispatch, and committed to `reconciliation_alerts_sent` strictly *after* successful Telegram delivery, preventing dropped alerts and silent truncation.
+- **Hash Uniqueness**: Replaced generic text hashing in `run-nightly-reconciliation.js` with date-qualified keys (`key = ticker_LATE_FILING_date`) and event ID qualifiers, preventing multi-quarter duplicate suppression.
+- **Nightly Scanner Ingestion**: Removed premature `isDryRun: true` in Step 3 of nightly reconciliation so real exchange filings persist to `corporate_announcements` for multi-year catalyst auditing.
+- **Early Results Detection Window**: Widened `checkResultsPublished` in `backend/scripts/remind-results.js` to look back 7 days prior to scheduled date, preventing spurious reminders when results are published early.
+
+### Quarter Formatting & Invariant Integrity
+- **Chronological Fiscal Quarter Resolution**: Fixed PostgreSQL `max(quarter)` ASCII sort in `backend/scripts/generate-portfolio-thesis-board.js` by using chronological fiscal quarter comparison (`compareFiscalQuarters`), eliminating `'Q4_FY25' > 'Q1_FY27'` lexicographical bugs.
+- **Quarter Format Normalization**: Unified `FY27-Q1` and `Q1_FY27` representations across `src/components/CopyGeminiPrompt.tsx`, `src/components/ThesisTimeline.tsx`, `src/lib/quarterSort.ts`, and `backend/services/geminiImport.service.js`.
+- **Dynamic Thesis Contract Loading**: Removed 160-line static `OPERATIONAL_METADATA` table in `generate-portfolio-thesis-board.js`, replacing it with dynamic driver resolution from `getThesisContract(ticker)` (adheres to Rule 3).
+
+### Calendar Synchronization & Timezones
+- **Timezone Invariant I11 Compliance**: Replaced host-dependent date construction in `backend/scripts/remind-results.js` with explicit `Asia/Kolkata` wall-clock time (`getIstTodayYmd()`) and `+05:30` timestamp parsing, preventing GitHub Actions UTC date drift.
+- **Strict BSE Forthcoming Results Matching**: Eliminated loose first-word matching (`words[0]`) in `backend/scripts/remind-results.js` and `supabase/functions/fetch-results-calendar/index.ts`. Forthcoming results are matched strictly by BSE scrip code, exact ticker, or exact full normalized company name.
+- **ZIP Controller Resource & Error Handling**: Moved CRC32 lookup table to module scope and ensured 500 error responses are sent if ZIP creation fails in `backend/controllers/transcripts.controller.js`.
+
 ## [v4.4.1] - 2026-11-01 (Statutory Statement OCR Noise Tolerance, Kerning Reconstruction & Reg 33 Earnings Routing)
 
 ### Financial Parser OCR Noise Tolerance

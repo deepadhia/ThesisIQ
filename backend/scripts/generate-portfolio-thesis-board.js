@@ -18,174 +18,52 @@ import dotenv from 'dotenv';
 dotenv.config({ path: './.env.local' });
 import { pool } from '../db/pool.js';
 import { classifyThesisStateV2, reconcileSnapshotThesisState, THESIS_STATES } from '../services/thesis-state-engine.service.js';
+import { getThesisContract } from '../services/thesis-driver-context.service.js';
+import { compareFiscalQuarters } from '../utils/fiscal-quarter.js';
 
 const OUTPUT_DIR = path.resolve('reports/thesis_board');
 
-// Grounded operational driver metadata for the 18 portfolio stocks
-const OPERATIONAL_METADATA = {
-  HSCL: {
-    coreDriver: 'Specialty Carbon Black & Synthetic Anode Materials',
-    category: 'Capacity & High-Value Mix',
-    relevance: 'MATERIAL (130k MTPA / 20k MTPA Anode)',
-    direction: 'UP',
-    kpiEvidence: 'SCB capacity expanded from 60k to 130k MTPA (+116%); Phase-1 20k MTPA synthetic battery anode plant established; blended EBITDA/MT expanded to ₹17,500/MT.',
-    decisionQuestion: 'Does the commissioning of the 20k MTPA anode plant translate into contracted commercial off-take from battery gigafactories in FY27?',
-    bucket: '🟢 Strengthening'
-  },
-  ANANTRAJ: {
-    coreDriver: 'Hyperscale Data Centers & NCR Real Estate Monetization',
-    category: 'Asset Commercialization',
-    relevance: 'Core Growth Engine (300 MW Pipeline)',
-    direction: 'UP',
-    kpiEvidence: 'Manesar, Panchkula & Rai data center delivery on schedule; Phase-1 21 MW operational; contracted enterprise leasing driving high-margin recurring rental yields.',
-    decisionQuestion: 'Is power grid connectivity and tenant rack occupancy scaling smoothly toward the 50 MW run-rate?',
-    bucket: '🟢 Strengthening'
-  },
-  JYOTICNC: {
-    coreDriver: 'CNC Machine Tooling & Aerospace / Defence Order Backlog',
-    category: 'Order Book & Capacity',
-    relevance: 'Core Growth Engine (₹3,500+ Cr Backlog)',
-    direction: 'UP',
-    kpiEvidence: 'Order book exceeds 3.5x annual revenue; European subsidiary Huron turnaround accelerating; aerospace and precision engineering mix expanding.',
-    decisionQuestion: 'Are delivery lead times and component supply bottlenecks managed to sustain 30%+ revenue throughput?',
-    bucket: '🟢 Strengthening'
-  },
-  LUMAXTECH: {
-    coreDriver: 'Advanced Mechatronics, Sensors & EV Components',
-    category: 'Revenue Mix & Backlog',
-    relevance: 'MATERIAL (41% Mix / ₹1,500 Cr EV Backlog)',
-    direction: 'UP',
-    kpiEvidence: 'IAC India synergy realization; electronic content per vehicle expanding; mechatronics revenue reached ₹360 Cr/quarter (+50% YoY); EV order wins backlog ₹1,500 Cr.',
-    decisionQuestion: 'Can mechatronic product margins expand consolidated EBITDA margin past 13-14% as EV volume scales?',
-    bucket: '🟢 Strengthening'
-  },
-  POLICYBZR: {
-    coreDriver: 'Online Insurance Penetration & Corporate / Health Renewal Compounding',
-    category: 'Platform Compounding',
-    relevance: 'Core Platform Engine',
-    direction: 'UP',
-    kpiEvidence: 'Premium renewal book scaling with near-zero marginal acquisition cost; operating leverage driving steep cash PAT compounding; POSP / corporate business expanding.',
-    decisionQuestion: 'Are regulatory commission changes or bancassurance tie-ups impacting digital market share leadership?',
-    bucket: '🟢 Strengthening'
-  },
-  HBLENGINE: {
-    coreDriver: 'Kavach (TCAS) Railway Collision Avoidance & Defence Power Systems',
-    category: 'Infrastructure & Safety Tech',
-    relevance: 'Core Growth Engine',
-    direction: 'UP',
-    kpiEvidence: 'Indian Railways Kavach 4.0 mandate deploying across 10,000+ km network; electronic interlocking & TMS tenders providing multi-year visibility; defence battery supply intact.',
-    decisionQuestion: 'What is the actual quarterly execution pace of Kavach loco/track installations vs railway tender timelines?',
-    bucket: '🟢 Strengthening'
-  },
-  SKIPPER: {
-    coreDriver: 'Power Transmission Towers, Monopoles & Global EPC Exports',
-    category: 'Order Book & Grid Infrastructure',
-    relevance: 'Core Growth Engine (₹6,000+ Cr Backlog)',
-    direction: 'UP',
-    kpiEvidence: 'Bumper order inflows from North America, Latin America, and domestic PGCIL HVDC corridors; tower manufacturing capacity running at high utilization.',
-    decisionQuestion: 'Are ocean freight volatility and raw steel price pass-through mechanisms maintaining target operating margins?',
-    bucket: '🟢 Strengthening'
-  },
-  JSLL: {
-    coreDriver: 'Specialized Industrial Logistics & 3PL Supply Chain Solutions',
-    category: 'Network Footprint',
-    relevance: 'Core Expansion',
-    direction: 'FLAT / UP',
-    kpiEvidence: 'Warehouse footprint expansion across key consumption hubs; FMCG & retail contract renewals stable; transportation fleet utilization maintained.',
-    decisionQuestion: 'Will customer supply chain consolidation drive higher asset turnover and ROCE expansion in upcoming quarters?',
-    bucket: '🟢/🟡 Transitioning'
-  },
-  TRANSRAILL: {
-    coreDriver: 'Global Transmission Lines, Substations & Railway Electrification',
-    category: 'EPC & Grid Modernization',
-    relevance: 'Core Growth Engine',
-    direction: 'FLAT / UP',
-    kpiEvidence: 'Multi-geography transmission execution in Africa, Middle East, and India; balance sheet deleveraging continuing; substation pipeline expanding. International receivables collection monitored as a thesis-relevant watch item (independent of ranking trajectory score).',
-    decisionQuestion: 'Are international receivables and project execution milestones being collected within working capital limits in Q2?',
-    bucket: '🟡 Thesis Stable (Working Capital Watch)'
-  },
-  SBCL: {
-    coreDriver: 'Specialty Steel Alloys & Seamless Tube Manufacturing',
-    category: 'Industrial Manufacturing',
-    relevance: 'Core Expansion',
-    direction: 'FLAT / UP',
-    kpiEvidence: 'Value-added alloy steel grades displacing generic carbon steel; aerospace & energy sector certifications underway; export volume expanding.',
-    decisionQuestion: 'How resilient are unit spreads against cyclical global specialty steel price fluctuations?',
-    bucket: '🟢/🟡 Transitioning'
-  },
-  SJS: {
-    coreDriver: 'Premium Aesthetic Interior / Exterior Dials & Electronic Overlays',
-    category: 'Automotive / Consumer Mix',
-    relevance: 'Core Business Expansion',
-    direction: 'FLAT',
-    kpiEvidence: 'Exotech & Walter Pack integration on track; premium 2W/4W vehicle content per car steady; exports to North America growing moderately.',
-    decisionQuestion: 'When will domestic automotive OEM volume acceleration trigger operating leverage in advanced IML/IME lines?',
-    bucket: '🟡 Intact (Monitoring)'
-  },
-  QPOWER: {
-    coreDriver: 'Power Transformer Components & High-Voltage Grid Switchgear',
-    category: 'Grid Capex',
-    relevance: 'Core Grid Infrastructure',
-    direction: 'FLAT',
-    kpiEvidence: 'Demand from state utilities and renewable evacuation corridors healthy; order book solid; supply chain lead times for CRGO electrical steel stabilizing.',
-    decisionQuestion: 'Is raw material availability (CRGO steel) constraining quarterly dispatches and revenue recognition?',
-    bucket: '🟡 Intact (Monitoring)'
-  },
-  INOXINDIA: {
-    coreDriver: 'Cryogenic Liquid Storage Tanks & LNG Satellite Fueling Stations',
-    category: 'Clean Energy & Industrial Gas',
-    relevance: 'Core Cryogenics Engine',
-    direction: 'FLAT',
-    kpiEvidence: 'Global LNG fueling infrastructure and industrial gas tank demand steady; international cryogenic export projects proceeding on schedule.',
-    decisionQuestion: 'Will LNG trucking corridor adoption in India accelerate commercial satellite station orders in FY27?',
-    bucket: '🟡 Intact (Monitoring)'
-  },
-  TIMETECHNO: {
-    coreDriver: 'Value-Added Products (VAP) & Type-IV CNG / Hydrogen Composite Cylinders',
-    category: 'Product Mix & Clean Energy',
-    relevance: 'MATERIAL (32% Mix / ₹950 Cr Backlog)',
-    direction: 'UP',
-    kpiEvidence: 'VAP revenue reached ₹580 Cr/quarter (+46.8% YoY); VAP mix expanded to 32%; composite cylinder capacity 1.4M units; cascade order backlog ₹950 Cr.',
-    decisionQuestion: 'Is the higher-margin composite cylinder volume translating into consolidated ROCE expansion past 16-18%?',
-    bucket: '🟢 Strengthening (Operational)'
-  },
-  CCL: {
-    coreDriver: 'Value-Added Freeze-Dried Instant Coffee & Continental B2C Brand',
-    category: 'Product Mix & Branded Retail',
-    relevance: 'MATERIAL (40% Mix / ₹460 Cr B2C)',
-    direction: 'UP',
-    kpiEvidence: 'Freeze-dried mix reached 40%; manufacturing capacity expanded to 31.5k MTPA; domestic B2C sales ₹150 Cr/quarter (+58% YoY); EBITDA spread ₹142/kg.',
-    decisionQuestion: 'Can green coffee bean price inflation continue to be passed on seamlessly without impacting volume growth in key European private labels?',
-    bucket: '🟢 Strengthening (Operational)'
-  },
-  GRAVITA: {
-    coreDriver: 'Value-Added Lead Alloys & Non-Lead (Aluminum/Plastic) Recycling Expansion',
-    category: 'Capacity & Vertical Mix',
-    relevance: 'MATERIAL (48% VAP Mix / 28% Non-Lead)',
-    direction: 'UP',
-    kpiEvidence: 'Total recycling capacity 3.60L MTPA; VAP mix 48%; non-lead vertical share reached 28%; lead recycling EBITDA spread ₹23,500/MT via geographical arbitrage.',
-    decisionQuestion: 'How fast is non-lead recycling capacity (aluminum, plastic, rubber) scaling to become an independent 40%+ EBITDA contributor?',
-    bucket: '🟢 Strengthening (Operational)'
-  },
-  ELECON: {
-    coreDriver: 'Industrial Gearboxes & Material Handling Equipment',
-    category: 'Capital Goods Cycle',
-    relevance: 'Core Business (Facing Export Headwinds)',
-    direction: 'DOWN',
-    kpiEvidence: 'European industrial slowdown impacting overseas subsidiary Benzlers/Radicon; domestic gear replacement demand moderate; quarterly growth decelerating.',
-    decisionQuestion: 'Is European OEM industrial capex stabilizing, or is further revenue contraction likely in international markets?',
-    bucket: '🔴 Weakening (Investigation)'
-  },
-  SHAKTIPUMP: {
-    coreDriver: 'Solar Submersible Pumps & PM-KUSUM State Tenders',
-    category: 'Government Subsidy / Solarization Cycle',
-    relevance: 'Core Solar Engine (High Cyclical Base)',
-    direction: 'DOWN / SLOWING',
-    kpiEvidence: 'Unprecedented FY25 earnings surge facing extremely tough YoY high-base comparisons; PM-KUSUM tender dispatch milestones subject to state subsidy release timing.',
-    decisionQuestion: 'Can commercial EV motor/controller diversification and private retail pump sales offset post-KUSUM tender cyclicality?',
-    bucket: '🔴 Weakening (High Base Risk)'
+/**
+ * Dynamically resolves operational driver metadata for any portfolio stock
+ * from its thesis contract (driver-level-thesis-contracts.json / supplementary-thesis-contracts.json).
+ * Adheres strictly to AGENTS.md Rule 3 (no static hardcoded ticker tables in backend code).
+ */
+function getOperationalMetadataForTicker(ticker) {
+  const contract = getThesisContract(ticker);
+  if (!contract || !contract.drivers || contract.drivers.length === 0) {
+    return {
+      coreDriver: contract?.thesisTitle || 'Core Business Operations',
+      category: 'General',
+      relevance: 'Core',
+      direction: 'FLAT',
+      kpiEvidence: 'Quarterly financial compounding and operating margins tracked in snapshots.',
+      decisionQuestion: 'Is quarterly performance maintaining thesis trajectory?',
+      bucket: '🟡 Intact (Monitoring)'
+    };
   }
-};
+
+  // Find primary driver (HIGH materiality or first driver)
+  const primaryDriver = contract.drivers.find(d => d.materiality === 'HIGH') || contract.drivers[0];
+  
+  let direction = 'FLAT';
+  const dirUpper = String(primaryDriver.direction || '').toUpperCase();
+  if (dirUpper.includes('IMPROVING') || dirUpper.includes('UP')) direction = 'UP';
+  else if (dirUpper.includes('DETERIORATING') || dirUpper.includes('DOWN')) direction = 'DOWN';
+
+  let bucket = '🟡 Intact (Monitoring)';
+  if (direction === 'UP') bucket = '🟢 Strengthening';
+  else if (direction === 'DOWN') bucket = '🔴 Weakening';
+
+  return {
+    coreDriver: primaryDriver.name || contract.thesisTitle || 'Core Business Operations',
+    category: primaryDriver.category || 'Operational Focus',
+    relevance: primaryDriver.materiality ? `${primaryDriver.materiality} Materiality` : 'Core',
+    direction,
+    kpiEvidence: primaryDriver.currentEvidence || primaryDriver.mustBeTrue || 'Performance tracked against thesis drivers.',
+    decisionQuestion: primaryDriver.falsificationTrigger ? `Does execution avoid falsification: "${primaryDriver.falsificationTrigger}"?` : 'Is quarterly performance maintaining thesis trajectory?',
+    bucket
+  };
+}
 
 export async function generatePortfolioThesisBoard() {
   console.log('--- 🏛️ Generating 18-Stock Portfolio Thesis State Board ---');
@@ -200,34 +78,31 @@ export async function generatePortfolioThesisBoard() {
     rankings = JSON.parse(fs.readFileSync(rankingPath, 'utf-8'));
   }
 
-  // 2. Fetch latest snapshot evidence
+  // 2. Fetch latest snapshot evidence chronologically (eliminates ASCII max(quarter) corruption)
   const { rows: snapshots } = await pool.query(`
     SELECT qs.*, s.ticker, s.company_name
     FROM quarterly_snapshots qs
     JOIN stocks s ON s.id = qs.stock_id
-    WHERE (qs.stock_id, qs.quarter) IN (
-      SELECT stock_id, max(quarter) FROM quarterly_snapshots GROUP BY stock_id
-    )
     ORDER BY s.ticker ASC
   `);
 
   const snapshotMap = new Map();
   for (const s of snapshots) {
-    snapshotMap.set(s.ticker, s);
+    const existing = snapshotMap.get(s.ticker);
+    if (!existing) {
+      snapshotMap.set(s.ticker, s);
+    } else {
+      const cmp = compareFiscalQuarters(s.quarter, existing.quarter);
+      if (cmp > 0 || (cmp === 0 && new Date(s.created_at || 0) > new Date(existing.created_at || 0))) {
+        snapshotMap.set(s.ticker, s);
+      }
+    }
   }
 
   // 3. Build unified 18-stock board rows
   const boardRows = rankings.map(r => {
     const snap = snapshotMap.get(r.ticker) || {};
-    const meta = OPERATIONAL_METADATA[r.ticker] || {
-      coreDriver: 'Core Business Operations',
-      category: 'General',
-      relevance: 'Core',
-      direction: 'FLAT',
-      kpiEvidence: 'Quarterly financial compounding and operating margins tracked in snapshots.',
-      decisionQuestion: 'Is quarterly performance maintaining thesis trajectory?',
-      bucket: '🟢 Strengthening'
-    };
+    const meta = getOperationalMetadataForTicker(r.ticker);
 
     return {
       rank: r.rank,

@@ -41,26 +41,31 @@ function parseExchangeDate(dateStr) {
 }
 
 /**
- * Calculates the calendar days difference between two YYYY-MM-DD strings.
- * Totally timezone independent.
+ * Returns current date in IST wall-clock time (YYYY-MM-DD)
+ * Invariant I11: All exchange dates/times are IST wall-clock.
+ */
+function getIstTodayYmd() {
+  return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(new Date());
+}
+
+/**
+ * Calculates the calendar days difference between two YYYY-MM-DD strings
+ * using explicit Asia/Kolkata (+05:30) timezone representation.
  */
 function getDaysDifference(dateStr1, dateStr2) {
-  const d1 = new Date(dateStr1 + 'T00:00:00');
-  const d2 = new Date(dateStr2 + 'T00:00:00');
+  const d1 = new Date(dateStr1 + 'T00:00:00+05:30');
+  const d2 = new Date(dateStr2 + 'T00:00:00+05:30');
   const diffTime = d1.getTime() - d2.getTime();
   return Math.round(diffTime / (1000 * 60 * 60 * 24));
 }
 
 /**
- * Formats a raw database date (Date object or string) into a clean local "YYYY-MM-DD" string.
+ * Formats a raw database date into a clean "YYYY-MM-DD" string in IST.
  */
 function formatDbDateToYmd(rawDate) {
   if (!rawDate) return null;
   if (rawDate instanceof Date) {
-    const y = rawDate.getFullYear();
-    const m = String(rawDate.getMonth() + 1).padStart(2, '0');
-    const d = String(rawDate.getDate()).padStart(2, '0');
-    return `${y}-${m}-${d}`;
+    return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(rawDate);
   }
   return String(rawDate).split('T')[0];
 }
@@ -87,30 +92,41 @@ async function getNSECookies() {
 export async function syncForthcomingResults() {
   console.log("Starting forthcoming results sync from BSE & NSE...");
   
-  // 1. Get tracked stocks
+  // 1. Get tracked stocks with BSE scrip codes
   const { rows: stocks } = await pool.query(
-    "SELECT id, ticker, company_name, next_results_date FROM stocks"
+    "SELECT id, ticker, company_name, bse_scrip_code, next_results_date FROM stocks"
   );
   
   const tickerToStock = new Map();
-  const nameWords = new Map();
+  const scripCodeToStock = new Map();
+  const normCompanyNameToStock = new Map();
+
+  function normalizeCompanyName(name) {
+    return String(name || '')
+      .toUpperCase()
+      .replace(/[^A-Z0-9\s]/g, ' ')
+      .split(/\s+/)
+      .filter(w => w.length > 0 && !['LTD', 'LIMITED', 'PVT', 'PRIVATE', 'INC', 'CORP', 'THE', 'INDIA', 'HOLDINGS'].includes(w))
+      .join(' ')
+      .trim();
+  }
+
   for (const s of stocks) {
     tickerToStock.set(s.ticker.toUpperCase(), s);
-    const words = s.company_name.toUpperCase().split(/\s+/).filter(w => w.length > 2 && !['LTD', 'LIMITED', 'PVT', 'PRIVATE', 'INC', 'CORP', 'THE'].includes(w));
-    if (words.length > 0) {
-      nameWords.set(words[0], s);
+    if (s.bse_scrip_code) {
+      scripCodeToStock.set(String(s.bse_scrip_code).trim(), s);
+    }
+    const norm = normalizeCompanyName(s.company_name);
+    if (norm) {
+      normCompanyNameToStock.set(norm, s);
     }
   }
 
   const matchedIds = new Set();
   const updates = [];
 
-  // Get local YYYY-MM-DD for today to filter past dates timezone-safely
-  const now = new Date();
-  const y = now.getFullYear();
-  const m = String(now.getMonth() + 1).padStart(2, '0');
-  const d = String(now.getDate()).padStart(2, '0');
-  const todayYmd = `${y}-${m}-${d}`;
+  // Get local YYYY-MM-DD for today in IST wall-clock time
+  const todayYmd = getIstTodayYmd();
 
   // 2. Fetch BSE Forthcoming Results Calendar
   try {
@@ -139,24 +155,30 @@ export async function syncForthcomingResults() {
           if (getDaysDifference(dateStr, todayYmd) < 0) continue;
 
           let matchedStock = null;
-          // Match by ticker (strict exact match to avoid false substring matches like CCL matching CCCL)
-          const cleanBseShort = bseName.replace(/[^A-Z0-9]/g, '');
-          for (const [ticker, stock] of tickerToStock) {
-            const cleanTicker = ticker.replace(/[^A-Z0-9]/g, '');
-            if (cleanBseShort === cleanTicker) {
-              matchedStock = stock;
-              break;
+
+          // 1. Primary: Match strictly by BSE Scrip Code
+          const itemScrip = String(item.scrip_cd || item.scrip_code || item.ScripCode || item.SCRIP_CD || '').trim();
+          if (itemScrip && scripCodeToStock.has(itemScrip)) {
+            matchedStock = scripCodeToStock.get(itemScrip);
+          }
+
+          // 2. Secondary: Exact Ticker Match
+          if (!matchedStock) {
+            const cleanBseShort = bseName.replace(/[^A-Z0-9]/g, '');
+            for (const [ticker, stock] of tickerToStock) {
+              const cleanTicker = ticker.replace(/[^A-Z0-9]/g, '');
+              if (cleanBseShort === cleanTicker) {
+                matchedStock = stock;
+                break;
+              }
             }
           }
 
-          // Fuzzy name match (only if ticker did not match directly)
+          // 3. Tertiary: Exact Normalized Company Name Match (full name, never loose first word)
           if (!matchedStock) {
-            const bseWords = bseName.split(/\s+/).filter(w => w.length > 2 && !['LTD', 'LIMITED', 'PVT', 'PRIVATE', 'INC', 'CORP', 'THE'].includes(w));
-            for (const bw of bseWords) {
-              if (nameWords.has(bw)) {
-                matchedStock = nameWords.get(bw);
-                break;
-              }
+            const normBseName = normalizeCompanyName(item.Long_Name || item.short_name);
+            if (normBseName && normCompanyNameToStock.has(normBseName)) {
+              matchedStock = normCompanyNameToStock.get(normBseName);
             }
           }
 
@@ -255,9 +277,9 @@ async function checkResultsPublished(stockId, expectedDateStr) {
         AND title NOT ILIKE '%analyst%'
         AND title NOT ILIKE '%con%call%'
         AND (
-          (filing_date IS NOT NULL AND filing_date::date >= ($2::date - interval '1 day') AND filing_date::date <= ($2::date + interval '2 days'))
+          (filing_date IS NOT NULL AND filing_date::date >= ($2::date - interval '7 days') AND filing_date::date <= ($2::date + interval '2 days'))
           OR 
-          (processed_at::date >= ($2::date - interval '1 day') AND processed_at::date <= ($2::date + interval '2 days'))
+          (processed_at::date >= ($2::date - interval '7 days') AND processed_at::date <= ($2::date + interval '2 days'))
         )
     ) as published
   `;
@@ -285,12 +307,8 @@ export async function checkAndSendReminders({ isDryRun = false } = {}) {
     "SELECT id, ticker, company_name, next_results_date FROM stocks WHERE next_results_date IS NOT NULL"
   );
 
-  // Get local YYYY-MM-DD for today timezone-safely
-  const now = new Date();
-  const y = now.getFullYear();
-  const m = String(now.getMonth() + 1).padStart(2, '0');
-  const d = String(now.getDate()).padStart(2, '0');
-  const todayYmd = `${y}-${m}-${d}`;
+  // Get local YYYY-MM-DD for today in IST wall-clock time
+  const todayYmd = getIstTodayYmd();
 
   let remindersSent = 0;
 

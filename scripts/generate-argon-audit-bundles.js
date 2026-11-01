@@ -29,12 +29,16 @@ const EXCLUDE_REGEX = [
   /requeue-backup-/i,
   /audit_staging/i,
   /audit_output/i,
-  /package-lock\.json$/i // can be 1MB of pure lockfile noise, skip or include? Better skip lockfile to keep bundle clean
+  /audit-staging/i,
+  /audit_core_pipeline/i,
+  /package-lock\.json$/i,
+  /src[\\/]/i,        // Strictly exclude frontend
+  /public[\\/]/i,     // Strictly exclude frontend static assets
 ];
 
 function shouldExclude(filePath) {
   const rel = path.relative(rootDir, filePath).replace(/\\/g, "/");
-  return EXCLUDE_REGEX.some(rx => rx.test(rel));
+  return EXCLUDE_REGEX.some((rx) => rx.test(rel));
 }
 
 function collectFiles(dir, filterFn = () => true) {
@@ -55,21 +59,32 @@ function collectFiles(dir, filterFn = () => true) {
 }
 
 function createTextBundle(outputPath, fileList, label) {
-  console.log(`Building ${label} -> ${path.basename(outputPath)} (${fileList.length} files)...`);
+  console.log(
+    `Building ${label} -> ${path.basename(outputPath)} (${fileList.length} files)...`,
+  );
   const stream = fs.createWriteStream(outputPath, { encoding: "utf8" });
-  
-  stream.write(`================================================================================\n`);
-  stream.write(`THESISIQ ARBITRAGE & AUDIT BUNDLE: ${label.toUpperCase()}\n`);
+
+  stream.write(
+    `================================================================================\n`,
+  );
+  stream.write(`THESISIQ BACKEND & AUDIT BUNDLE: ${label.toUpperCase()}\n`);
   stream.write(`Generated: ${new Date().toISOString()}\n`);
   stream.write(`Total Files: ${fileList.length}\n`);
   stream.write(`Security: Zero .env / secret / credential files included.\n`);
-  stream.write(`================================================================================\n\n`);
+  stream.write(`Scope: Pure backend, workers, services, scripts & database layer (no frontend).\n`);
+  stream.write(
+    `================================================================================\n\n`,
+  );
 
   for (const file of fileList) {
     const rel = path.relative(rootDir, file).replace(/\\/g, "/");
-    stream.write(`\n================================================================================\n`);
+    stream.write(
+      `\n================================================================================\n`,
+    );
     stream.write(`FILE: ${rel}\n`);
-    stream.write(`================================================================================\n\n`);
+    stream.write(
+      `================================================================================\n\n`,
+    );
     try {
       const content = fs.readFileSync(file, "utf8");
       stream.write(content);
@@ -83,25 +98,23 @@ function createTextBundle(outputPath, fileList, label) {
 }
 
 async function main() {
-  console.log("=== GENERATING GEMINI ARGON AUDIT DISTRIBUTION BUNDLES ===");
+  console.log("=== GENERATING GEMINI ARGON AUDIT DISTRIBUTION BUNDLES (BACKEND ONLY) ===");
 
-  // 1. Gather files for src_and_scripts_only.txt
-  const srcFiles = collectFiles(path.join(rootDir, "src"));
+  // 1. Gather files for backend_and_scripts_only.txt
+  const backendFiles = collectFiles(path.join(rootDir, "backend"));
   const scriptsFiles = collectFiles(path.join(rootDir, "scripts"));
-  const srcAndScriptsList = [...srcFiles, ...scriptsFiles];
+  const backendAndScriptsList = [...backendFiles, ...scriptsFiles];
 
-  // 2. Gather master file list for audit_bundle.txt & zip
+  // 2. Gather master file list for audit_bundle.txt & zip (Excluding all frontend)
   const dirsToInclude = [
     ".agents",
     ".github",
     "backend",
     "cloudflare-dispatcher",
     "docs",
-    "public",
     "reports",
     "scripts",
-    "src",
-    "supabase"
+    "supabase",
   ];
   let masterFileList = [];
   for (const d of dirsToInclude) {
@@ -115,17 +128,9 @@ async function main() {
     "CHANGELOG.md",
     "package.json",
     "tsconfig.json",
-    "tsconfig.app.json",
-    "tsconfig.node.json",
-    "vite.config.ts",
     "vitest.config.ts",
-    "eslint.config.js",
     "eslint.backend.config.js",
-    "components.json",
-    "tailwind.config.ts",
-    "postcss.config.js",
-    "index.html",
-    "vercel.json"
+    "vercel.json",
   ];
   for (const rf of rootFiles) {
     const full = path.join(rootDir, rf);
@@ -134,28 +139,50 @@ async function main() {
     }
   }
 
-  // Safety Assertion
+  // Safety Assertion: ensure no .env and no src/ files leak
   for (const f of masterFileList) {
     if (/\.env/i.test(f)) {
-      throw new Error(`CRITICAL SECURITY FAILURE: .env file found in audit list: ${f}`);
+      throw new Error(
+        `CRITICAL SECURITY FAILURE: .env file found in audit list: ${f}`,
+      );
+    }
+    if (/src[\\/]/i.test(f)) {
+      throw new Error(
+        `POLICY VIOLATION: Frontend file leaked into backend audit bundle: ${f}`,
+      );
     }
   }
 
-  // 3. Output 1: src_and_scripts_only.txt
-  const srcAndScriptsPath = path.join(rootDir, "src_and_scripts_only.txt");
-  createTextBundle(srcAndScriptsPath, srcAndScriptsList, "Source & Scripts Only");
+  // 3. Output 1: backend_and_scripts_only.txt (replaces src_and_scripts_only.txt)
+  const backendAndScriptsPath = path.join(rootDir, "backend_and_scripts_only.txt");
+  createTextBundle(
+    backendAndScriptsPath,
+    backendAndScriptsList,
+    "Backend & Scripts Only",
+  );
+
+  // Clean up legacy src_and_scripts_only.txt if present
+  const oldSrcBundle = path.join(rootDir, "src_and_scripts_only.txt");
+  if (fs.existsSync(oldSrcBundle)) {
+    fs.unlinkSync(oldSrcBundle);
+  }
 
   // 4. Output 2: audit_bundle.txt
   const auditBundlePath = path.join(rootDir, "audit_bundle.txt");
-  createTextBundle(auditBundlePath, masterFileList, "Master Codebase Audit Archive");
+  createTextBundle(
+    auditBundlePath,
+    masterFileList,
+    "Master Backend Codebase Audit Archive",
+  );
 
   // 5. Output 3: thesisiq_code_audit.zip
   const zipPath = path.join(rootDir, "thesisiq_code_audit.zip");
   const stagingDir = path.join(rootDir, "audit-staging");
-  if (fs.existsSync(stagingDir)) fs.rmSync(stagingDir, { recursive: true, force: true });
+  if (fs.existsSync(stagingDir))
+    fs.rmSync(stagingDir, { recursive: true, force: true });
   fs.mkdirSync(stagingDir, { recursive: true });
 
-  console.log("Staging files for ZIP packaging...");
+  console.log("Staging backend files for ZIP packaging...");
   for (const f of masterFileList) {
     const rel = path.relative(rootDir, f);
     const target = path.join(stagingDir, rel);
@@ -164,8 +191,11 @@ async function main() {
   }
 
   if (fs.existsSync(zipPath)) fs.unlinkSync(zipPath);
-  console.log("Compressing thesisiq_code_audit.zip...");
-  execSync(`powershell -NoProfile -Command "Compress-Archive -Path '${stagingDir}\\*' -DestinationPath '${zipPath}' -Force"`, { stdio: "inherit" });
+  console.log("Compressing thesisiq_code_audit.zip (backend only)...");
+  execSync(
+    `powershell -NoProfile -Command "Compress-Archive -Path '${stagingDir}\\*' -DestinationPath '${zipPath}' -Force"`,
+    { stdio: "inherit" },
+  );
   fs.rmSync(stagingDir, { recursive: true, force: true });
 
   // 6. Output 4: AUDIT_REPORT.md
@@ -176,6 +206,7 @@ async function main() {
 **Date:** 2026-11-01  
 **Repository:** ThesisIQ (Multibagger Live Tracking & Thesis Evaluation Engine)  
 **Security Clearance:** Zero Credentials / No \`.env\` Secrets Included  
+**Scope:** Pure Backend Architecture, Ingestion Daemon, Financial Validator, Dual-Layer Gates & Database Layer (Frontend Excluded)
 
 ---
 
@@ -186,10 +217,11 @@ ThesisIQ is an automated, real-time institutional equity compounding, duration e
 The core pipeline functions under a critical mandate:
 > **Heart of ThesisIQ Invariant:** Every corporate announcement (Financial Results, Investor Presentation, Concall Transcript, Concall Audio) must be deterministically ingested from NSE/BSE, verified against raw statutory PDF text layers, checked against driver-level thesis contracts, and delivered as **one accurate Telegram alert within 90 seconds** without dropping data or inventing metrics.
 
-This audit package provides the complete, un-truncated codebase for exhaustive forensic review:
-1. \`src_and_scripts_only.txt\`: Frontend React components, custom hooks, and operational script runners.
-2. \`audit_bundle.txt\`: Master concatenated codebase archive encompassing all backend services, workers, database models, and test fixtures.
-3. \`thesisiq_code_audit.zip\`: Production ZIP archive ready for IDE / LLM environment execution.
+This audit package provides the complete backend codebase for exhaustive forensic review:
+1. \`backend_and_scripts_only.txt\`: Core backend pipeline services, worker daemons, and operational runners.
+2. \`audit_bundle.txt\`: Master concatenated backend codebase archive encompassing all backend services, workers, database models, and test fixtures.
+3. \`thesisiq_code_audit.zip\`: Production ZIP archive of all backend services, tests, configs, and runners.
+4. \`audit_core_pipeline/\`: Pre-chunked (< 80 KB each) text representations of the 5 heart pipeline files for LLM ingestion without truncation.
 
 ---
 
@@ -268,11 +300,40 @@ When auditing the code in \`audit_bundle.txt\`, prioritize the following high-ri
 All pipeline code changes must satisfy the 16 Hard Invariants documented in \`.agents/AGENTS.md\`:
 - \`npm run lint:backend\`: Strict ESLint check (catches undefined variables).
 - \`npm run test:heart\`: Worker pipeline end-to-end suite (\`backend/tests/worker-pipeline.test.js\`).
-- \`npm test\`: Full project test suite (533 tests across 30 test files).
+- \`npm test\`: Full project test suite (541 tests across 31 test files).
 
 ---
 
-## 5. Verification Checklist for Auditor
+## 5. Audited Findings & Resolved Bugs (Argon Audit Resolution)
+
+The 8 concrete bugs and invariant violations identified during the external forensic code audit have been resolved and verified across the test suite:
+
+| # | Component | Root Cause / Vulnerability | Resolution |
+|---|-----------|----------------------------|------------|
+| 1 | \`backend/scripts/generate-portfolio-thesis-board.js\` | ASCII \`max(quarter)\` in SQL selected \`'Q4_FY25'\` over \`'Q1_FY27'\` | Replaced SQL string \`max\` with chronological fiscal quarter resolution via \`compareFiscalQuarters\`. |
+| 2 | \`backend/services/geminiImport.service.js\` | Quarter format split-brain (\`FY27-Q1\` vs \`Q1_FY27\`) | Normalized incoming quarters with \`parseFiscalQuarter(quarter).label\` before SQL operations. |
+| 3 | \`backend/scripts/remind-results.js\` | Timezone-unsafe date parsing in UTC on GitHub Actions drifted calendar days (Invariant \`I11\`) | Pinned date arithmetic to \`Asia/Kolkata\` wall-clock time (\`getIstTodayYmd()\`) with explicit \`+05:30\` offsets. |
+| 4 | \`backend/scripts/remind-results.js\`, Supabase Edge Function | Single first-word matching (\`words[0]\`) collided on common company words ("QUALITY", "TIME") | Enforced strict matching by BSE scrip code (\`bse_scrip_code\`), exact ticker, or exact full normalized company name. |
+| 5 | \`backend/scripts/generate-portfolio-thesis-board.js\` | Static \`OPERATIONAL_METADATA\` table hardcoded 18 tickers with stale metrics (Rule 3 violation) | Removed static table; dynamically load drivers from \`driver-level-thesis-contracts.json\` via \`getThesisContract(ticker)\`. |
+| 6 | \`backend/api/reconciler-dispatcher.js\` | Fallback plaintext bearer token permitted unauthorized execution if \`CRON_SECRET\` unset | Fails closed (\`401 Unauthorized\`) if \`CRON_SECRET\` is unset or invalid. |
+| 7 | \`backend/app.js\` | \`/files/:symbol/:quarter/:filename\` lacked directory traversal boundary check | Enforced path containment using \`path.resolve\` containment guard against \`getDataDir()\`. |
+| 8 | \`backend/controllers/transcripts.controller.js\` | Unawaited ZIP failure left client hanging; inner CRC32 rebuilt lookup table per file | Moved CRC32 lookup table to module scope; returned 500 JSON response on compression errors. |
+
+---
+
+## 6. Chunked Core Pipeline Ingestion (< 80 KB Bundles)
+
+To circumvent the ~80 KB attachment truncation limit in LLM interfaces, the 5 core alert pipeline files are pre-chunked in \`audit_core_pipeline/\`:
+- \`1a_quarterly-deepdive-worker_part1.txt\`: 63.0 KB (Lines 1 to 1254)
+- \`1b_quarterly-deepdive-worker_part2.txt\`: 65.5 KB (Lines 1255 to End)
+- \`2_scan-announcements.txt\`: 45.4 KB (Scanner, NSE/BSE Poller, Leases)
+- \`3_financial-validator.service.txt\`: 35.9 KB (Deterministic Table Slicer)
+- \`4_thesis-gate-evaluator.service.txt\`: 23.7 KB (Dual-Layer Hurdle Gates)
+- \`5_llm-and-institutional-guard.service.txt\`: 48.0 KB (LLM Failover & Grounding Guard)
+
+---
+
+## 7. Verification Checklist for Auditor
 - [ ] Scan for unhandled Promise rejections or empty \`.catch(() => {})\` blocks in the alert path.
 - [ ] Check SQL injection boundaries on dynamic queries in \`requeue-stuck-filings.js\` and \`quarterly-deepdive-worker.js\`.
 - [ ] Verify that exchange timestamps are strictly converted using \`parseExchangeTimestamp\` (IST wall-clock).
@@ -280,24 +341,41 @@ All pipeline code changes must satisfy the 16 Hard Invariants documented in \`.a
 `;
   fs.writeFileSync(reportPath, reportContent, "utf8");
 
-  console.log("\n=== PACKAGE INVENTORY SUMMARY ===");
+  console.log("\n=== PACKAGE INVENTORY SUMMARY (PURE BACKEND) ===");
   const files = [
-    { name: "Lightweight Code Bundle", file: "src_and_scripts_only.txt", desc: "Complete, un-truncated src/ and scripts/ code." },
-    { name: "Production Audit ZIP", file: "thesisiq_code_audit.zip", desc: "Full clean repository archive (428 files, services, tests, deploy scripts)." },
-    { name: "Master Text Archive", file: "audit_bundle.txt", desc: "Plain-text bundle containing all 428 core codebase files." },
-    { name: "Audit Report & Briefing", file: "AUDIT_REPORT.md", desc: "Comprehensive bug-hunting dossier and invariant audit specification." }
+    {
+      name: "Lightweight Code Bundle",
+      file: "backend_and_scripts_only.txt",
+      desc: "Complete, un-truncated backend/ and scripts/ code.",
+    },
+    {
+      name: "Production Audit ZIP",
+      file: "thesisiq_code_audit.zip",
+      desc: "Full clean backend repository archive (backend, scripts, tests, deploy configs).",
+    },
+    {
+      name: "Master Text Archive",
+      file: "audit_bundle.txt",
+      desc: "Plain-text bundle containing all backend, scripts, and architecture docs.",
+    },
+    {
+      name: "Audit Report & Briefing",
+      file: "AUDIT_REPORT.md",
+      desc: "Comprehensive bug-hunting dossier and invariant audit specification.",
+    },
   ];
 
   console.log("File\tPath\tSize\tDescription");
   for (const item of files) {
     const full = path.join(rootDir, item.file);
-    const size = fs.existsSync(full) ? (fs.statSync(full).size / 1024).toFixed(1) + " KB" : "N/A";
+    const size = fs.existsSync(full)
+      ? (fs.statSync(full).size / 1024).toFixed(1) + " KB"
+      : "N/A";
     console.log(`${item.name}\t${item.file}\t${size}\t${item.desc}`);
   }
 }
 
-main().catch(err => {
+main().catch((err) => {
   console.error("Generator failed:", err);
   process.exit(1);
 });
-

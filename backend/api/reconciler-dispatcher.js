@@ -10,9 +10,9 @@ import { reconcileInterQuarterEvents } from '../workers/interquarter-reconciler.
  */
 export async function handleCloudflareDispatcher(req, res) {
   const authHeader = req.headers['authorization'];
-  const cronSecret = process.env.CRON_SECRET || 'multibagger_cloudflared_secret_2026';
+  const cronSecret = process.env.CRON_SECRET;
 
-  if (authHeader !== `Bearer ${cronSecret}`) {
+  if (!cronSecret || authHeader !== `Bearer ${cronSecret}`) {
     return res.status(401).json({ error: 'Unauthorized Cloudflare Dispatcher request' });
   }
 

@@ -314,6 +314,23 @@ function getCategoryFromFilename(filename) {
   return "other";
 }
 
+const CRC32_TABLE = new Uint32Array(256);
+for (let i = 0; i < 256; i++) {
+  let c = i;
+  for (let j = 0; j < 8; j++) {
+    c = ((c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1));
+  }
+  CRC32_TABLE[i] = c >>> 0;
+}
+
+function crc32(buf) {
+  let crc = 0 ^ -1;
+  for (let i = 0; i < buf.length; i++) {
+    crc = (crc >>> 8) ^ CRC32_TABLE[(crc ^ buf[i]) & 0xFF];
+  }
+  return (crc ^ -1) >>> 0;
+}
+
 export async function downloadZipHandler(req, res) {
   const symbol = String(req.params.symbol).toUpperCase();
   const dataDir = getDataDir();
@@ -341,21 +358,7 @@ export async function downloadZipHandler(req, res) {
 
   const filesToZip = [];
 
-  function crc32(buf) {
-    let table = [];
-    for (let i = 0; i < 256; i++) {
-      let c = i;
-      for (let j = 0; j < 8; j++) {
-        c = ((c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1));
-      }
-      table[i] = c;
-    }
-    let crc = 0 ^ -1;
-    for (let i = 0; i < buf.length; i++) {
-      crc = (crc >>> 8) ^ table[(crc ^ buf[i]) & 0xFF];
-    }
-    return (crc ^ -1) >>> 0;
-  }
+
 
   function createSimpleZip(files) {
     const localHeaders = [];
@@ -617,6 +620,9 @@ export async function downloadZipHandler(req, res) {
     res.send(zipBuffer);
   } catch (err) {
     console.error("Error creating zip file:", err);
+    if (!res.headersSent) {
+      res.status(500).json({ ok: false, error: err instanceof Error ? err.message : "Error creating zip file" });
+    }
   }
 }
 

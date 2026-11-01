@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { pool } from "../db/pool.js";
+import { parseFiscalQuarter } from "../utils/fiscal-quarter.js";
 
 const geminiPromiseUpdateSchema = z.object({
   id: z.string().uuid(),
@@ -16,6 +17,9 @@ const geminiNewPromiseSchema = z.object({
 });
 
 export async function importGeminiResponseToDb({ stockId, quarter, payload }) {
+  const parsedQ = parseFiscalQuarter(quarter);
+  const normalizedQuarter =
+    parsedQ && parsedQ.label !== "UNKNOWN" ? parsedQ.label : quarter;
   // Zod-validate again server-side for zero-trust (front-end payload is untrusted).
   const validated = z
     .object({
@@ -55,7 +59,12 @@ export async function importGeminiResponseToDb({ stockId, quarter, payload }) {
         .optional(),
       thesis_dependency: z
         .object({
-          driver: z.enum(["execution", "capacity_expansion", "demand_tailwind", "pricing"]),
+          driver: z.enum([
+            "execution",
+            "capacity_expansion",
+            "demand_tailwind",
+            "pricing",
+          ]),
           reliance: z.enum(["proven", "developing", "speculative"]),
           risk_level: z.enum(["low", "medium", "high"]),
         })
@@ -118,7 +127,7 @@ export async function importGeminiResponseToDb({ stockId, quarter, payload }) {
          official_filing_present = EXCLUDED.official_filing_present`,
       [
         stockId,
-        quarter,
+        normalizedQuarter,
         validated.summary ?? null,
         dodgedQuestionsJson,
         redFlagsJson,
@@ -131,7 +140,7 @@ export async function importGeminiResponseToDb({ stockId, quarter, payload }) {
         validated.conviction_score ?? null,
         validated.action_decision ?? null,
         validated.position_size ?? null,
-        'V12',
+        "V12",
         // V12 intelligence columns
         validated.decision_blockers?.length ? validated.decision_blockers : [],
         validated.deterioration_quarters ?? 0,
@@ -157,7 +166,7 @@ export async function importGeminiResponseToDb({ stockId, quarter, payload }) {
           validated.thesis_drift_status ?? null,
           validated.confidence_score ?? null,
           stockId,
-          quarter,
+          normalizedQuarter,
         ],
       );
     }
@@ -175,11 +184,17 @@ export async function importGeminiResponseToDb({ stockId, quarter, payload }) {
              execution_quality       = COALESCE($3, execution_quality)
          WHERE stock_id = $4 AND quarter = $5`,
         [
-          validated.primary_metric_momentum ? JSON.stringify(validated.primary_metric_momentum) : null,
-          validated.thesis_dependency ? JSON.stringify(validated.thesis_dependency) : null,
-          validated.execution_quality ? JSON.stringify(validated.execution_quality) : null,
+          validated.primary_metric_momentum
+            ? JSON.stringify(validated.primary_metric_momentum)
+            : null,
+          validated.thesis_dependency
+            ? JSON.stringify(validated.thesis_dependency)
+            : null,
+          validated.execution_quality
+            ? JSON.stringify(validated.execution_quality)
+            : null,
           stockId,
-          quarter,
+          normalizedQuarter,
         ],
       );
 
@@ -187,18 +202,14 @@ export async function importGeminiResponseToDb({ stockId, quarter, payload }) {
       // Condition A: speculative reliance + weak execution (execution failure)
       // Condition B: decelerating primary metric + not yet proven reliance (momentum deterioration)
       const isHighRisk =
-        (
-          validated.thesis_dependency?.reliance === "speculative" &&
+        (validated.thesis_dependency?.reliance === "speculative" &&
           validated.execution_quality?.applicable === true &&
-          validated.execution_quality?.status === "weak"
-        ) ||
-        (
-          validated.primary_metric_momentum?.direction === "decelerating" &&
-          validated.thesis_dependency?.reliance !== "proven"
-        );
+          validated.execution_quality?.status === "weak") ||
+        (validated.primary_metric_momentum?.direction === "decelerating" &&
+          validated.thesis_dependency?.reliance !== "proven");
       await client.query(
         `UPDATE quarterly_snapshots SET is_high_risk_thesis = $1 WHERE stock_id = $2 AND quarter = $3`,
-        [isHighRisk, stockId, quarter],
+        [isHighRisk, stockId, normalizedQuarter],
       );
     }
 
@@ -241,7 +252,9 @@ export async function importGeminiResponseToDb({ stockId, quarter, payload }) {
         [stockId],
       );
       const existingSet = new Set(
-        (existingRes.rows || []).map((r) => `${r.promise_text}::${r.made_in_quarter}`),
+        (existingRes.rows || []).map(
+          (r) => `${r.promise_text}::${r.made_in_quarter}`,
+        ),
       );
 
       const rowsToInsert = [];
@@ -263,7 +276,13 @@ export async function importGeminiResponseToDb({ stockId, quarter, payload }) {
         await client.query(
           `INSERT INTO management_promises (stock_id, promise_text, made_in_quarter, target_deadline, status)
            VALUES ($1, $2, $3, $4, $5)`,
-          [row.stock_id, row.promise_text, row.made_in_quarter, row.target_deadline, row.status],
+          [
+            row.stock_id,
+            row.promise_text,
+            row.made_in_quarter,
+            row.target_deadline,
+            row.status,
+          ],
         );
         insertedCount++;
       }
@@ -283,4 +302,3 @@ export async function importGeminiResponseToDb({ stockId, quarter, payload }) {
     client.release();
   }
 }
-

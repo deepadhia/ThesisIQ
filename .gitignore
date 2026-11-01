@@ -82,11 +82,13 @@ scripts/scrape_and_download*
 # Generated Research Reports & Runtime Dossiers (runtime output — not source code)
 *.zip
 audit_bundle.txt
+backend_and_scripts_only.txt
 src_and_scripts_only.txt
 reports/
 artifacts/
 audit_output/
 audit/
+audit_core_pipeline/
 scripts/telegram_alerts_audit*.md
 scripts/test_truth_layer_invariants.js
 scripts/update_all_live_prices.js

@@ -43,7 +43,7 @@ Deno.serve(async (req) => {
     // Get all tracked stocks
     const { data: stocks, error: stocksErr } = await supabase
       .from('stocks')
-      .select('id, ticker, company_name');
+      .select('id, ticker, company_name, bse_scrip_code');
     if (stocksErr) throw stocksErr;
     if (!stocks?.length) {
       return new Response(JSON.stringify({ success: true, message: 'No stocks to check', updated: 0 }), {
@@ -51,15 +51,29 @@ Deno.serve(async (req) => {
       });
     }
 
-    // Build lookup maps for matching
+    // Build lookup maps for strict matching
     const tickerToStock = new Map<string, typeof stocks[0]>();
-    const nameWords = new Map<string, typeof stocks[0]>();
+    const scripCodeToStock = new Map<string, typeof stocks[0]>();
+    const normCompanyNameToStock = new Map<string, typeof stocks[0]>();
+
+    function normalizeCompanyName(name: string | null | undefined): string {
+      return String(name || '')
+        .toUpperCase()
+        .replace(/[^A-Z0-9\s]/g, ' ')
+        .split(/\s+/)
+        .filter(w => w.length > 0 && !['LTD', 'LIMITED', 'PVT', 'PRIVATE', 'INC', 'CORP', 'THE', 'INDIA', 'HOLDINGS'].includes(w))
+        .join(' ')
+        .trim();
+    }
+
     for (const s of stocks) {
       tickerToStock.set(s.ticker.toUpperCase(), s);
-      // Also map by first significant word of company name for fuzzy matching
-      const words = s.company_name.toUpperCase().split(/\s+/).filter(w => w.length > 2 && !['LTD', 'LIMITED', 'PVT', 'PRIVATE', 'INC', 'CORP', 'THE'].includes(w));
-      if (words.length > 0) {
-        nameWords.set(words[0], s);
+      if (s.bse_scrip_code) {
+        scripCodeToStock.set(String(s.bse_scrip_code).trim(), s);
+      }
+      const norm = normalizeCompanyName(s.company_name);
+      if (norm) {
+        normCompanyNameToStock.set(norm, s);
       }
     }
 
@@ -93,25 +107,32 @@ Deno.serve(async (req) => {
             const now = new Date();
             if (parsedDate < now) continue; // Skip past dates
 
-            // Try to match by ticker or company name
+            // Try to match strictly by BSE Scrip Code, Ticker, or full company name
             let matchedStock: typeof stocks[0] | undefined;
 
-            // Direct ticker match with BSE short_name
-            for (const [ticker, stock] of tickerToStock) {
-              if (bseName.includes(ticker) || ticker.includes(bseName.replace(/\s+/g, ''))) {
-                matchedStock = stock;
-                break;
+            // 1. Primary: Match strictly by BSE Scrip Code
+            const itemScrip = String(item.scrip_cd || item.scrip_code || item.ScripCode || item.SCRIP_CD || '').trim();
+            if (itemScrip && scripCodeToStock.has(itemScrip)) {
+              matchedStock = scripCodeToStock.get(itemScrip);
+            }
+
+            // 2. Secondary: Exact Ticker Match
+            if (!matchedStock) {
+              const cleanBseShort = bseName.replace(/[^A-Z0-9]/g, '');
+              for (const [ticker, stock] of tickerToStock) {
+                const cleanTicker = ticker.replace(/[^A-Z0-9]/g, '');
+                if (cleanBseShort === cleanTicker) {
+                  matchedStock = stock;
+                  break;
+                }
               }
             }
 
-            // Fuzzy name match
+            // 3. Tertiary: Exact Normalized Company Name Match (full name, never loose first word)
             if (!matchedStock) {
-              const bseWords = bseName.split(/\s+/).filter(w => w.length > 2 && !['LTD', 'LIMITED', 'PVT', 'PRIVATE', 'INC', 'CORP', 'THE'].includes(w));
-              for (const bw of bseWords) {
-                if (nameWords.has(bw)) {
-                  matchedStock = nameWords.get(bw);
-                  break;
-                }
+              const normBseName = normalizeCompanyName(item.Long_Name || item.short_name);
+              if (normBseName && normCompanyNameToStock.has(normBseName)) {
+                matchedStock = normCompanyNameToStock.get(normBseName);
               }
             }
 
