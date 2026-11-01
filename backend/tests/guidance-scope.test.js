@@ -301,5 +301,63 @@ describeFn('Guidance vs Actual Delivery Invariants', () => {
     expectFn(rec7).toBeNull();
   });
 
+  testFn('EBITDA margin commitment reconciles against actual ebitdaMarginPct in the Scorecard', () => {
+    const marginCommitment = [
+      {
+        statement: "Management guided Q2 EBITDA margin of 18-20%.",
+        metric: "EBITDA Margin",
+        target_value: "18-20%",
+        timeline: "Q2 FY27",
+        quarter: "Q1 FY27"
+      }
+    ];
+    const recMargin = reconcileGuidanceVsActual({
+      commitments: marginCommitment,
+      currentQuarter: "Q2 FY27",
+      currentFinancials: { revenue: 1215.99, ebitda: 217.3, ebitdaMarginPct: 17.87 }
+    });
+    expectFn(recMargin).not.toBeNull();
+    expectFn(recMargin.formattedSection).toContain('EBITDA Margin');
+    expectFn(recMargin.formattedSection).toContain('17.87%');
+    expectFn(recMargin.formattedSection).toContain('IN-LINE');
+  });
+
+  testFn('Multi-metric scorecard displays Revenue, EBITDA Margin, and Capex Milestone cleanly', () => {
+    const multiCommitments = [
+      {
+        statement: "Q2 revenue guidance of Rs 1,200 Cr.",
+        metric: "Revenue",
+        target_value: "₹1,200 Cr",
+        timeline: "Q2 FY27",
+        quarter: "Q1 FY27"
+      },
+      {
+        statement: "EBITDA margin target of 17-18%.",
+        metric: "EBITDA Margin",
+        target_value: "17-18%",
+        timeline: "Q2 FY27",
+        quarter: "Q1 FY27"
+      },
+      {
+        statement: "Vietnam Phase 2 10,000 MT plant commissioning.",
+        metric: "Plant Commissioning",
+        target_value: "10,000 MT",
+        timeline: "Q2 FY27",
+        quarter: "Q1 FY27",
+        status: "Achieved"
+      }
+    ];
+    const recMulti = reconcileGuidanceVsActual({
+      commitments: multiCommitments,
+      currentQuarter: "Q2 FY27",
+      currentFinancials: { revenue: 1215.99, revenueYoYGrowthPct: 7.8, ebitda: 217.3, ebitdaMarginPct: 17.87 }
+    });
+    expectFn(recMulti).not.toBeNull();
+    expectFn(recMulti.formattedSection).toContain('PROMISE VS. DELIVERY SCORECARD');
+    expectFn(recMulti.formattedSection).toContain('Revenue');
+    expectFn(recMulti.formattedSection).toContain('EBITDA Margin');
+    expectFn(recMulti.formattedSection).toContain('Vietnam Phase 2');
+  });
+
 });
 

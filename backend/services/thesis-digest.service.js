@@ -116,9 +116,12 @@ export function buildDigestItem({ kind, title, url = null, filedAt, queuedAt = n
     action: failed ? null : (verdict.final_action || verdict.action_signal || null),
     conviction: failed ? null : (verdict.conviction_score ?? null),
     summary: failed || LLM_FILLER.test(summaryRaw) ? "" : summaryRaw,
-    positives: positives.slice(0, 3),
-    concerns: concerns.slice(0, 3),
-    guidance: [...asList(ch.quarterly_guidance), ...asList(ch.annual_guidance)].slice(0, 3),
+    positives: positives.slice(0, 4),
+    concerns: concerns.slice(0, 4),
+    guidance: [...asList(ch.quarterly_guidance), ...asList(ch.annual_guidance), ...asList(ch.multi_year_targets)].slice(0, 4),
+    growthInitiatives: asList(ch.growth_initiatives).slice(0, 4),
+    operations: asList(ch.operational_highlights).slice(0, 4),
+    businessExecution: asList(ch.business_performance || ch.segment_highlights).slice(0, 4),
     // Facts the call itself stated (already grounded by sanitizeConcallHighlights); they back up the driver evidence.
     facts: ["financial_performance", "business_performance", "operational_highlights", "growth_initiatives", "multi_year_targets"]
       .flatMap((k) => asList(ch[k]).slice(0, 2))
@@ -194,24 +197,58 @@ export function formatThesisDigestMessage({ ticker, companyName, items = [], boa
     const pos = fresh(it.positives).map((t) => `  ✅ ${plain(t)}`);
     const con = fresh(it.concerns).map((t) => `  ⚠️ ${plain(t)}`);
     const gui = fresh(it.guidance).map((t) => `  ⏱️ ${plain(t)}`);
-    // Filter facts so they never duplicate bullets already listed in positives or concerns
+    const growth = fresh(it.growthInitiatives || []).map((t) => `• ${plain(t)}`);
+    const ops = fresh(it.operations || []).map((t) => `• ${plain(t)}`);
+    const biz = fresh(it.businessExecution || []).map((t) => `• ${plain(t)}`);
+    // Filter facts so they never duplicate bullets already listed in other sections
     const fct = fresh(it.facts)
       .filter((t) => {
         const normT = norm(t);
-        const inPos = (it.positives || []).some((p) => { const nP = norm(p); return nP.includes(normT) || normT.includes(nP); });
-        const inCon = (it.concerns || []).some((c) => { const nC = norm(c); return nC.includes(normT) || normT.includes(nC); });
-        return !inPos && !inCon;
+        const inOther = [...(it.positives || []), ...(it.concerns || []), ...(it.growthInitiatives || []), ...(it.operations || []), ...(it.businessExecution || [])]
+          .some((p) => { const nP = norm(p); return nP.includes(normT) || normT.includes(nP); });
+        return !inOther;
       })
       .slice(0, 4)
       .map((t) => `  📌 ${plain(t)}`);
     const flg = (it.commitmentFlags || []).map((f) => `  🔴 ${f.status}: ${plain(f.statement)}${f.reason ? ` (${plain(f.reason)})` : ""}`);
-    if (!summary && !pos.length && !con.length && !gui.length && !fct.length && !flg.length) {
+    if (!summary && !pos.length && !con.length && !gui.length && !growth.length && !ops.length && !biz.length && !fct.length && !flg.length) {
       collapsed.push(link);
       continue;
     }
     const lines = [`${KIND_LABEL[it.kind] || KIND_LABEL.OTHER} — ${link}`];
     if (summary) lines.push(`  ${summary}`);
-    lines.push(...fct, ...pos, ...con, ...gui, ...flg);
+    if (gui.length) {
+      lines.push(`  ⏱️ *Forward Guidance & Pacing:*`);
+      lines.push(...gui.map(g => `    • ${g.replace(/^  ⏱️\s*/, "")}`));
+    }
+    if (growth.length) {
+      lines.push(`  🚀 *New Growth Initiatives & Pilots:*`);
+      lines.push(...growth.map(g => `    ${g}`));
+    }
+    if (ops.length) {
+      lines.push(`  🏭 *Capex & Plant Commissioning:*`);
+      lines.push(...ops.map(o => `    ${o}`));
+    }
+    if (biz.length) {
+      lines.push(`  📦 *Divisional & Order Book Execution:*`);
+      lines.push(...biz.map(b => `    ${b}`));
+    }
+    if (con.length) {
+      lines.push(`  ⚠️ *Headwinds & Friction Points:*`);
+      lines.push(...con.map(c => `    • ${c.replace(/^  ⚠️\s*/, "")}`));
+    }
+    if (pos.length) {
+      lines.push(`  ✅ *Positive Highlights:*`);
+      lines.push(...pos.map(p => `    • ${p.replace(/^  ✅\s*/, "")}`));
+    }
+    if (fct.length) {
+      lines.push(`  📌 *Key Operational Facts:*`);
+      lines.push(...fct.map(f => `    • ${f.replace(/^  📌\s*/, "")}`));
+    }
+    if (flg.length) {
+      lines.push(`  🔴 *Flagged Commitments:*`);
+      lines.push(...flg.map(fl => `    • ${fl.replace(/^  🔴\s*/, "")}`));
+    }
     if (it.llmFailed) lines.push("  ⚠️ _AI narrative unavailable for this filing; open it for details._");
     blocks.push(lines.join("\n"));
   }

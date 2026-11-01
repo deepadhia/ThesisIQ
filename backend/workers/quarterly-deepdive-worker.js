@@ -510,19 +510,31 @@ export async function reconcilePriorGuidanceVsActual(ticker, currentQuarter, cur
   if (!ticker) return null;
   try {
     const { rows } = await pool.query(
-      `SELECT statement, metric, target_value, timeline, quarter 
+      `SELECT statement, metric, target_value, timeline, quarter, status, blockers_and_risks 
        FROM management_commitments 
        WHERE ticker = $1 
          AND (
            LOWER(metric) LIKE '%revenue%' OR 
            LOWER(metric) LIKE '%topline%' OR
            LOWER(metric) LIKE '%growth%' OR 
+           LOWER(metric) LIKE '%ebitda%' OR
+           LOWER(metric) LIKE '%margin%' OR
+           LOWER(metric) LIKE '%profit%' OR
+           LOWER(metric) LIKE '%pat%' OR
+           LOWER(metric) LIKE '%capex%' OR
+           LOWER(metric) LIKE '%capacity%' OR
+           LOWER(metric) LIKE '%commissioning%' OR
            LOWER(metric) LIKE '%guidance%' OR
            LOWER(statement) LIKE '%revenue%' OR
            LOWER(statement) LIKE '%growth%' OR
+           LOWER(statement) LIKE '%ebitda%' OR
+           LOWER(statement) LIKE '%margin%' OR
+           LOWER(statement) LIKE '%capex%' OR
+           LOWER(statement) LIKE '%capacity%' OR
+           LOWER(statement) LIKE '%commissioning%' OR
            LOWER(statement) LIKE '%guidance%'
          )
-       ORDER BY created_at DESC LIMIT 15`,
+       ORDER BY created_at DESC LIMIT 20`,
       [ticker]
     );
 
@@ -900,7 +912,7 @@ function buildStage1Message({ item, verdict, activeFin, finSource, carried, stag
   const executionItems = bulletList(dedupedExec, 4);
   const executionSec = executionItems ? `\n🛡️ *MANAGEMENT EXECUTION & CAPACITY PROOF:*\n${executionItems}\n` : "";
   const drags = bulletList(verdict.key_concerns_and_drags);
-  const dragSec = drags ? `\n⚠️ *WATCH ITEMS & DRAGS:*\n${drags}\n` : "";
+  const dragSec = drags ? `\n⚠️ *KEY DRAGS & FRICTION POINTS:*\n${drags}\n` : "";
   const points = bulletList(verdict.concall_verification_points || verdict.dodged_questions || verdict.concall_checklist);
   const concallSec = points ? `\n🎙️ *OPEN QUERIES FOR CONCALL:*\n${points}\n` : "";
   const docLink = item.attachment_url ? `\n📄 [View Official Filing →](${item.attachment_url})` : "";
@@ -936,33 +948,52 @@ function buildStage1Message({ item, verdict, activeFin, finSource, carried, stag
  */
 function buildConcallMessage({ item, verdict, activeFin, finSource, carried, periodLabel, guidanceSection, commText, degradedNote }) {
   const ch = verdict.concall_highlights || {};
-  const section = (title, emoji, list) => (Array.isArray(list) && list.length > 0) ? `\n${emoji} *${title}:*\n${list.map(p => `• ${p}`).join("\n")}\n` : "";
+  const section = (title, emoji, list) => (Array.isArray(list) && list.length > 0) ? `${emoji} *${title}:*\n${list.map(p => `• ${p}`).join("\n")}` : "";
   const gateSec = buildGateSection(verdict.thesis_gate_result);
   const driverSec = formatDriverAssessmentSection(verdict.thesis_driver_assessment);
   const finBlock = buildVerifiedFinancialsBlock(activeFin, { carried: finSource === "CARRIED_FORWARD", periodLabel: carried?.periodLabel || periodLabel });
-  const perf = section("FINANCIAL METRICS & ORDER BOOK (from the call)", "📊", ch.financial_performance || ch.performance_overview);
-  const biz = section("BUSINESS EXECUTION & CONTRACT WINS", "📦", ch.business_performance || ch.segment_highlights);
+  const perf = section("FINANCIAL HIGHLIGHTS & ORDER BOOK (from the call)", "📊", ch.financial_performance || ch.performance_overview);
+  const growth = section("NEW GROWTH INITIATIVES & PILOTS", "🚀", ch.growth_initiatives);
   const ops = section("CAPEX & CAPACITY EXPANSION", "🏭", ch.operational_highlights);
-  const growth = section("GROWTH INITIATIVES & PARTNERSHIPS", "🚀", ch.growth_initiatives);
+  const biz = section("BUSINESS EXECUTION & CONTRACT WINS", "📦", ch.business_performance || ch.segment_highlights);
   const qG = section("QUARTERLY GUIDANCE (NEXT QUARTER)", "⏱️", ch.quarterly_guidance);
   const aG = section("ANNUAL (FY) GUIDANCE", "📅", ch.annual_guidance);
   const mY = section("MULTI-YEAR / LONG-TERM ROADMAP", "🎯", ch.multi_year_targets);
   const legacyG = (!qG && !aG && !mY) ? section("FORWARD GUIDANCE & TARGETS", "📈", ch.management_guidance) : "";
-  const pos = ch.key_positives && ch.key_positives.length ? section("KEY POSITIVES", "✅", ch.key_positives) : (bulletList(verdict.key_positives) ? `\n✅ *KEY POSITIVES:*\n${bulletList(verdict.key_positives)}\n` : "");
-  const chal = (ch.key_challenges || ch.key_risks) ? section("KEY RISKS & CHALLENGES", "⚠️", ch.key_challenges || ch.key_risks) : (bulletList(verdict.key_concerns_and_drags) ? `\n⚠️ *KEY RISKS & CHALLENGES:*\n${bulletList(verdict.key_concerns_and_drags)}\n` : "");
-  const tone = ch.management_tone ? `\n🗣️ *Management Tone:* ${ch.management_tone}\n` : "";
-  const takeaway = ch.key_takeaway ? `\n🔑 *DECISION BOTTOM LINE:*\n• ${ch.key_takeaway}\n` : (verdict._llm_failed ? "" : `\n🔑 *DECISION BOTTOM LINE:*\n• ${verdict.verdict_summary}\n`);
-  const docLink = item.attachment_url ? `\n📄 [View Official Filing →](${item.attachment_url})` : "";
+  const pos = ch.key_positives && ch.key_positives.length ? section("KEY EXECUTION POSITIVES", "✅", ch.key_positives) : (bulletList(verdict.key_positives) ? `✅ *KEY EXECUTION POSITIVES:*\n${bulletList(verdict.key_positives)}` : "");
+  const chal = (ch.key_challenges || ch.key_risks) ? section("KEY DRAGS & FRICTION POINTS", "⚠️", ch.key_challenges || ch.key_risks) : (bulletList(verdict.key_concerns_and_drags) ? `⚠️ *KEY DRAGS & FRICTION POINTS:*\n${bulletList(verdict.key_concerns_and_drags)}` : "");
+  const tone = ch.management_tone ? `🗣️ *Management Tone:* ${ch.management_tone}` : "";
+  const takeaway = ch.key_takeaway ? `🔑 *DECISION BOTTOM LINE:*\n• ${ch.key_takeaway}` : (verdict._llm_failed ? "" : `🔑 *DECISION BOTTOM LINE:*\n• ${verdict.verdict_summary}`);
+  const docLink = item.attachment_url ? `📄 [View Official Filing →](${item.attachment_url})` : "";
 
-  return `
-🏢 *${item.ticker.toUpperCase()}* | ${cleanCompanyForAlert(item)}
-🎙️ *Event:* Institutional Concall Audit & Forensic Verification
-──────────────────────────────
-${actionSignalLine(verdict)}
-──────────────────────────────${degradedNote}${gateSec}${driverSec}${finBlock}${guidanceSection}${biz}${ops}${growth}${perf}${qG}${aG}${mY}${legacyG}${commText}${pos}${chal}${tone}${takeaway}
-──────────────────────────────
-${docLink ? `${docLink}\n` : ""}_Institutional Quarterly Concall Deep-Dive_
-`.trim();
+  const header = `🏢 *${item.ticker.toUpperCase()}* | ${cleanCompanyForAlert(item)}\n🎙️ *Event:* Institutional Concall Audit & Forensic Verification`;
+  const actionLine = actionSignalLine(verdict);
+  const divider = "──────────────────────────────";
+
+  const bodyBlocks = [
+    degradedNote?.trim(),
+    gateSec?.trim(),
+    finBlock?.trim(),
+    guidanceSection?.trim(),
+    qG?.trim(),
+    aG?.trim(),
+    mY?.trim(),
+    legacyG?.trim(),
+    growth?.trim(),
+    ops?.trim(),
+    biz?.trim(),
+    perf?.trim(),
+    chal?.trim(),
+    pos?.trim(),
+    driverSec?.trim(),
+    commText?.trim(),
+    takeaway?.trim(),
+    tone?.trim()
+  ].filter(Boolean);
+
+  const footer = `${divider}\n${docLink ? `${docLink}\n` : ""}_Institutional Quarterly Concall Deep-Dive_`;
+
+  return `${header}\n${divider}\n${actionLine}\n${divider}\n\n${bodyBlocks.join("\n\n")}\n\n${footer}`.trim();
 }
 
 function buildCommitmentsSection(commitments) {
@@ -2275,7 +2306,7 @@ ${cleanText}
 Extract the following structured sections from the transcript above (and nothing else):
 1. "financial_performance": the revenue/income, EBITDA and margin, PAT, order book, export order book, cash position and order inflow figures management stated for the period, each with the comparison management gave.
 2. "business_performance": contract wins, customer orders and segment or division performance management described, with the order sizes they stated.
-3. "growth_initiatives": new certifications, technology partnerships, new product categories, prototypes and similar initiatives management announced.
+3. "growth_initiatives": new product rollouts, brand targets/extensions, pilot categories, retail distribution deals, turnaround initiatives, technology partnerships and new certifications announced.
 4. "operational_highlights": plant commissioning status, facility expansions, capacity and utilisation figures, network growth and execution timelines management stated.
 5. "quarterly_guidance": explicit guidance for the next quarter only. Return [] if none was given.
 6. "annual_guidance": explicit guidance for the full fiscal year. Return [] if none was given.

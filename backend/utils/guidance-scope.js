@@ -322,8 +322,16 @@ export function reconcileGuidanceVsActual({
   const actualRevGrowth = fin.revenueYoYGrowthPct !== undefined && fin.revenueYoYGrowthPct !== null 
     ? parseFloat(fin.revenueYoYGrowthPct) 
     : null;
+  const actualEbitda = fin.ebitda ? parseFloat(String(fin.ebitda).replace(/,/g, '')) : null;
+  const actualEbitdaMargin = fin.ebitdaMarginPct !== undefined && fin.ebitdaMarginPct !== null 
+    ? parseFloat(fin.ebitdaMarginPct) 
+    : null;
+  const actualEbitdaGrowth = fin.ebitdaYoYGrowthPct !== undefined && fin.ebitdaYoYGrowthPct !== null 
+    ? parseFloat(fin.ebitdaYoYGrowthPct) 
+    : null;
 
-  let bestQuarterlyMatch = null;
+  const quarterlyScorecardItems = [];
+  const seenQuarterlyMetrics = new Set();
   let bestAnnualMatch = null;
 
   const currentQNormalized = currentQuarter ? currentQuarter.replace(/_/g, ' ').toUpperCase() : "";
@@ -342,38 +350,64 @@ export function reconcileGuidanceVsActual({
     const stmt = c.statement || "";
     const shortStmt = stmt.length > 80 ? stmt.substring(0, 80) + '...' : stmt;
     const originQ = c.quarter || "Prior Concall";
+    const combinedText = `${c.metric || ''} ${c.statement || ''} ${c.target_value || ''}`.toLowerCase();
 
-    // 1. Process QUARTERLY Scope
-    if (classification.scope === 'QUARTERLY') {
-      if (bestQuarterlyMatch) continue; // Keep highest-priority match
+    // 1. Process QUARTERLY Scope & Current Capex Milestones
+    const isQuarterlyScope = classification.scope === 'QUARTERLY';
+    const isCapexMilestone = classification.scope === 'CAPEX_MILESTONE' || /commissioning|capacity|capex|plant|commercial production/i.test(combinedText);
 
-      // If targetQuarter is specified, check if it matches currentQuarter
+    if (isQuarterlyScope || isCapexMilestone) {
+      // Check quarter validity
       if (classification.targetQuarter && currentQuarter) {
         const tqParsed = parseFiscalQuarter(classification.targetQuarter);
         if (tqParsed.fiscalYear > 0 && currentQParsed.fiscalYear > 0) {
-          // If both have FY, require exact key match (prevents Q1 FY26 matching Q1 FY27)
-          if (tqParsed.key !== currentQParsed.key) {
-            continue;
-          }
+          if (tqParsed.key !== currentQParsed.key) continue;
         } else if (tqParsed.quarter > 0 && currentQParsed.quarter > 0) {
-          // If FY not present on target, at least require matching quarter number
-          if (tqParsed.quarter !== currentQParsed.quarter) {
-            continue;
-          }
+          if (tqParsed.quarter !== currentQParsed.quarter) continue;
         }
       }
 
-      // If targetQuarter is NOT specified, check distance from origin quarter
       if (!classification.targetQuarter && c.quarter && currentQuarter) {
         const dist = getQuarterDistance(currentQuarter, c.quarter);
-        // Quarterly guidance must be from an immediate prior quarter (e.g. 1 or 2 quarters ago)
-        if (dist !== null && (dist <= 0 || dist > 2)) {
-          continue; // Guidance is outdated or from the future
-        }
+        if (dist !== null && (dist <= 0 || dist > 2)) continue;
       }
 
-      // Math Comparison: Revenue (₹ Cr)
-      if (classification.targetUnit === 'CR' && actualRev && classification.targetNumericValue) {
+      const isMargin = /margin|opm/i.test(combinedText);
+      const isRev = /revenue|topline|sales/i.test(combinedText);
+      const isEbitda = /ebitda|operating profit/i.test(combinedText) && !isMargin;
+
+      // Match A: EBITDA Margin Target (%)
+      if (isMargin && classification.targetUnit === 'PCT' && actualEbitdaMargin !== null && !seenQuarterlyMetrics.has('EBITDA_MARGIN') && classification.targetNumericValue !== null) {
+        const minPct = classification.rangeMin !== null ? classification.rangeMin : classification.targetNumericValue;
+        const maxPct = classification.rangeMax !== null ? classification.rangeMax : classification.targetNumericValue;
+
+        let verdictBadge = "🟢 *QUARTERLY IN-LINE* (Delivered within margin band)";
+        if (actualEbitdaMargin > maxPct + 0.5) {
+          const bps = Math.round((actualEbitdaMargin - maxPct) * 100);
+          verdictBadge = `🟢 *QUARTERLY BEAT* (+${bps} bps above guided margin)`;
+        } else if (actualEbitdaMargin < minPct - 0.5) {
+          const bps = Math.round((minPct - actualEbitdaMargin) * 100);
+          verdictBadge = `🔴 *QUARTERLY MISSED* (-${bps} bps below guided margin)`;
+        }
+
+        seenQuarterlyMetrics.add('EBITDA_MARGIN');
+        quarterlyScorecardItems.push({
+          scope: 'QUARTERLY',
+          metricType: 'EBITDA_MARGIN',
+          metricLabel: 'EBITDA Margin',
+          priorQuarter: originQ,
+          targetQuarter: classification.targetQuarter || currentQuarter,
+          guidedStatement: shortStmt,
+          guidedValue: classification.isRange ? `${minPct}%–${maxPct}%` : `${minPct}%`,
+          actualValue: `${actualEbitdaMargin}%`,
+          verdictBadge,
+          diffBps: Math.round((actualEbitdaMargin - maxPct) * 100)
+        });
+        continue;
+      }
+
+      // Match B: Revenue (₹ Cr)
+      if (classification.targetUnit === 'CR' && (isRev || !isMargin) && actualRev && classification.targetNumericValue && !seenQuarterlyMetrics.has('REVENUE')) {
         const guidedRev = classification.targetNumericValue;
         const diff = actualRev - guidedRev;
         const diffPct = ((diff / guidedRev) * 100).toFixed(1);
@@ -385,9 +419,11 @@ export function reconcileGuidanceVsActual({
           verdictBadge = `🔴 *QUARTERLY MISSED* (-₹${Math.abs(diff).toFixed(1)} Cr / ${diffPct}% below guidance)`;
         }
 
-        bestQuarterlyMatch = {
+        seenQuarterlyMetrics.add('REVENUE');
+        quarterlyScorecardItems.push({
           scope: 'QUARTERLY',
           metricType: 'REVENUE',
+          metricLabel: 'Revenue',
           priorQuarter: originQ,
           targetQuarter: classification.targetQuarter || currentQuarter,
           guidedStatement: shortStmt,
@@ -396,11 +432,12 @@ export function reconcileGuidanceVsActual({
           verdictBadge,
           diffCr: diff,
           diffPct: parseFloat(diffPct)
-        };
+        });
+        continue;
       }
 
-      // Math Comparison: Growth (% YoY)
-      else if (classification.targetUnit === 'PCT' && actualRevGrowth !== null && !isNaN(actualRevGrowth) && classification.targetNumericValue) {
+      // Match C: Revenue Growth (% YoY)
+      if (classification.targetUnit === 'PCT' && (isRev || !isMargin) && actualRevGrowth !== null && !isNaN(actualRevGrowth) && classification.targetNumericValue && !seenQuarterlyMetrics.has('GROWTH')) {
         const minPct = classification.rangeMin !== null ? classification.rangeMin : classification.targetNumericValue;
         const maxPct = classification.rangeMax !== null ? classification.rangeMax : classification.targetNumericValue;
 
@@ -411,9 +448,11 @@ export function reconcileGuidanceVsActual({
           verdictBadge = `🔴 *QUARTERLY MISSED* (${(actualRevGrowth - minPct).toFixed(1)}% below guided lower band)`;
         }
 
-        bestQuarterlyMatch = {
+        seenQuarterlyMetrics.add('GROWTH');
+        quarterlyScorecardItems.push({
           scope: 'QUARTERLY',
           metricType: 'GROWTH',
+          metricLabel: 'Revenue Growth',
           priorQuarter: originQ,
           targetQuarter: classification.targetQuarter || currentQuarter,
           guidedStatement: shortStmt,
@@ -421,7 +460,59 @@ export function reconcileGuidanceVsActual({
           actualValue: `${actualRevGrowth >= 0 ? '+' : ''}${actualRevGrowth}% YoY`,
           verdictBadge,
           diffPct: actualRevGrowth - maxPct
-        };
+        });
+        continue;
+      }
+
+      // Match D: EBITDA Growth (% YoY)
+      if (classification.targetUnit === 'PCT' && isEbitda && actualEbitdaGrowth !== null && !isNaN(actualEbitdaGrowth) && classification.targetNumericValue && !seenQuarterlyMetrics.has('EBITDA_GROWTH')) {
+        const minPct = classification.rangeMin !== null ? classification.rangeMin : classification.targetNumericValue;
+        const maxPct = classification.rangeMax !== null ? classification.rangeMax : classification.targetNumericValue;
+
+        let verdictBadge = "🟡 *QUARTERLY IN-LINE* (EBITDA growth within guided range)";
+        if (actualEbitdaGrowth > maxPct + 1.0) {
+          verdictBadge = `🟢 *QUARTERLY BEAT* (+${(actualEbitdaGrowth - maxPct).toFixed(1)}% above guided EBITDA growth)`;
+        } else if (actualEbitdaGrowth < minPct - 1.0) {
+          verdictBadge = `🔴 *QUARTERLY MISSED* (${(actualEbitdaGrowth - minPct).toFixed(1)}% below guided EBITDA growth)`;
+        }
+
+        seenQuarterlyMetrics.add('EBITDA_GROWTH');
+        quarterlyScorecardItems.push({
+          scope: 'QUARTERLY',
+          metricType: 'EBITDA_GROWTH',
+          metricLabel: 'EBITDA Growth',
+          priorQuarter: originQ,
+          targetQuarter: classification.targetQuarter || currentQuarter,
+          guidedStatement: shortStmt,
+          guidedValue: classification.isRange ? `${minPct}%–${maxPct}% YoY` : `${minPct}% YoY`,
+          actualValue: `${actualEbitdaGrowth >= 0 ? '+' : ''}${actualEbitdaGrowth}% YoY`,
+          verdictBadge,
+          diffPct: actualEbitdaGrowth - maxPct
+        });
+        continue;
+      }
+
+      // Match E: Capex / Capacity Milestone
+      if (isCapexMilestone && !seenQuarterlyMetrics.has('CAPEX_MILESTONE')) {
+        const sLower = (c.status || "").toLowerCase();
+        let statusBadge = "⏳ *Tracking / In Progress*";
+        if (sLower.includes("achieved")) statusBadge = "🟢 *Achieved*";
+        else if (sLower.includes("delayed")) statusBadge = `⚠️ *Delayed* (${c.blockers_and_risks || c.timeline || "Pushed back"})`;
+        else if (sLower.includes("missed")) statusBadge = `🔴 *Missed* (${c.blockers_and_risks || "Target not met"})`;
+
+        seenQuarterlyMetrics.add('CAPEX_MILESTONE');
+        quarterlyScorecardItems.push({
+          scope: 'QUARTERLY',
+          metricType: 'CAPEX_MILESTONE',
+          metricLabel: 'Milestone / Capex',
+          priorQuarter: originQ,
+          targetQuarter: classification.targetQuarter || currentQuarter,
+          guidedStatement: shortStmt,
+          guidedValue: c.target_value || c.statement,
+          actualValue: c.status || 'In Progress',
+          verdictBadge: statusBadge
+        });
+        continue;
       }
     }
 
@@ -429,24 +520,20 @@ export function reconcileGuidanceVsActual({
     if (classification.scope === 'ANNUAL') {
       if (bestAnnualMatch) continue;
 
-      // Filter out stale annual targets from completed prior fiscal years
-      // e.g. An FY26 target should not be matched as pacing for a Q1 FY27 filing
       if (classification.targetFY && currentQParsed.fiscalYear > 0) {
         const targetFyParsed = parseFiscalQuarter(classification.targetFY);
         if (targetFyParsed.fiscalYear > 0 && targetFyParsed.fiscalYear < currentQParsed.fiscalYear) {
-          continue; // Target is for an earlier completed fiscal year
+          continue;
         }
-        // A target more than one fiscal year ahead is a multi-year vision, not something one quarter can "pace" against
         if (targetFyParsed.fiscalYear > currentQParsed.fiscalYear + 1) {
           continue;
         }
       }
 
-      // If targetFY is not explicit, verify origin quarter was not in an earlier fiscal year
       if (!classification.targetFY && c.quarter && currentQParsed.fiscalYear > 0) {
         const originQParsed = parseFiscalQuarter(c.quarter);
         if (originQParsed.fiscalYear > 0 && originQParsed.fiscalYear < currentQParsed.fiscalYear) {
-          continue; // Commitment made in an earlier fiscal year without a forward FY target
+          continue;
         }
       }
 
@@ -475,7 +562,7 @@ export function reconcileGuidanceVsActual({
         const maxPct = classification.rangeMax !== null ? classification.rangeMax : classification.targetNumericValue;
         const isAhead = actualRevGrowth >= maxPct;
         const targetFY = classification.targetFY || "Full-Year";
-        const band = minPct === maxPct ? `${minPct}%` : `${minPct}–${maxPct}%`; // a single target is not a range
+        const band = minPct === maxPct ? `${minPct}%` : `${minPct}–${maxPct}%`;
 
         bestAnnualMatch = {
           scope: 'ANNUAL',
@@ -493,36 +580,40 @@ export function reconcileGuidanceVsActual({
     }
   }
 
+  const bestQuarterlyMatch = quarterlyScorecardItems[0] || null;
   if (!bestQuarterlyMatch && !bestAnnualMatch) return null;
 
   // Build clean, disambiguated markdown presentation
-  let formattedSection = "";
+  const sections = [];
 
-  if (bestQuarterlyMatch && bestAnnualMatch) {
-    formattedSection = `\n🎯 *PREVIOUS GUIDANCE VS. ACTUAL DELIVERY:*
-• *Quarterly Target:* ${bestQuarterlyMatch.guidedValue} _(from ${bestQuarterlyMatch.priorQuarter})_
-• *Actual Delivered:* ${bestQuarterlyMatch.actualValue}
-• *Quarterly Verdict:* ${bestQuarterlyMatch.verdictBadge}
-
-⏳ *${bestAnnualMatch.targetFY || 'ANNUAL'} GUIDANCE PACING:*
-• *Full-Year Target:* ${bestAnnualMatch.guidedValue} _(from ${bestAnnualMatch.priorQuarter})_
-• *Delivery Pacing:* ${bestAnnualMatch.actualValue}
-• *Pacing Verdict:* ${bestAnnualMatch.verdictBadge}\n`;
-  } else if (bestQuarterlyMatch) {
-    formattedSection = `\n🎯 *PREVIOUS QUARTERLY GUIDANCE VS. ACTUAL DELIVERY:*
-• *Guided Target:* ${bestQuarterlyMatch.guidedValue} _(from ${bestQuarterlyMatch.priorQuarter})_
-• *Actual Delivered:* ${bestQuarterlyMatch.actualValue}
-• *Delivery Verdict:* ${bestQuarterlyMatch.verdictBadge}\n`;
-  } else if (bestAnnualMatch) {
-    formattedSection = `\n⏳ *${bestAnnualMatch.targetFY || 'ANNUAL'} GUIDANCE PACING:*
-• *Full-Year Target:* ${bestAnnualMatch.guidedValue} _(from ${bestAnnualMatch.priorQuarter})_
-• *Quarterly Actual:* ${bestAnnualMatch.actualValue}
-• *Pacing Verdict:* ${bestAnnualMatch.verdictBadge}\n`;
+  if (quarterlyScorecardItems.length > 0) {
+    const qLines = ['🎯 *PROMISE VS. DELIVERY SCORECARD:*'];
+    for (const item of quarterlyScorecardItems) {
+      if (item.metricType === 'CAPEX_MILESTONE') {
+        qLines.push(`• *${item.metricLabel}:* ${item.guidedStatement} (${item.verdictBadge})`);
+      } else {
+        qLines.push(`• *${item.metricLabel}:* Guided ${item.guidedValue} | Actual ${item.actualValue} (${item.verdictBadge})`);
+      }
+    }
+    sections.push(qLines.join('\n'));
   }
+
+  if (bestAnnualMatch) {
+    const aLines = [
+      `⏳ *${bestAnnualMatch.targetFY || 'ANNUAL'} GUIDANCE PACING:*`,
+      `• *Full-Year Target:* ${bestAnnualMatch.guidedValue} _(from ${bestAnnualMatch.priorQuarter})_`,
+      `• *Quarterly Actual:* ${bestAnnualMatch.actualValue}`,
+      `• *Pacing Verdict:* ${bestAnnualMatch.verdictBadge}`
+    ];
+    sections.push(aLines.join('\n'));
+  }
+
+  const formattedSection = `\n${sections.join('\n\n')}\n`;
 
   return {
     quarterly: bestQuarterlyMatch,
     annual: bestAnnualMatch,
+    scorecardItems: quarterlyScorecardItems,
     formattedSection,
     // Backward compatibility fields
     guidedValue: bestQuarterlyMatch ? bestQuarterlyMatch.guidedValue : bestAnnualMatch.guidedValue,
