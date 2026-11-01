@@ -78,6 +78,24 @@ describe('whole real documents', () => {
     expect(f.revenue).toBeCloseTo(638.94, 2);
     expect(f.revenueYoYGrowthPct).toBeCloseTo(10.52, 1);
     expect(f.revenueQoQGrowthPct).toBeCloseTo(22.74, 1);
+    expect(f.ebitda).toBeCloseTo(167.69, 2);
+    expect(f.ebitdaMarginPct).toBeCloseTo(26.25, 2);
+    expect(f.patConsolidated).toBeCloseTo(96.35, 2);
+    expect(f.patYoYGrowthPct).toBeCloseTo(9.84, 1);
+  });
+
+  it('HSCL (OCR character noise "Opetations", "Coniol id:o ted", "Profill", statement in crores): consolidated statement is read', () => {
+    const f = extractDeterministicFinancials(doc('HSCL_2026-10-16'));
+    expect(f).not.toBeNull();
+    expect(f.unit).toBe('CRORES');
+    expect(f.statementScope).toBe('CONSOLIDATED');
+    expect(f.revenue).toBeCloseTo(1691.43, 2);
+    expect(f.revenueYoYGrowthPct).toBeCloseTo(57.93, 1);
+    expect(f.revenueQoQGrowthPct).toBeCloseTo(18.13, 1);
+    expect(f.ebitda).toBeCloseTo(356.75, 2);
+    expect(f.ebitdaMarginPct).toBeCloseTo(21.09, 2);
+    expect(f.patConsolidated).toBeCloseTo(232.32, 2);
+    expect(f.patYoYGrowthPct).toBeCloseTo(31.51, 1);
   });
 
   it('ELECON standalone block alone (numbers split by spaces): 53,466 | 39,824 | 49,618 lakhs', () => {

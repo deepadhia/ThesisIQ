@@ -38,23 +38,23 @@ const DASH_TOKEN = /^[-–—]$/;
 const TABLE_JUNK = /[|{}[\]_~`]/g;
 const LINE_FORMULA = /\(\s*\d{1,2}(?:\s*[-+–×x]\s*\d{1,2})+\s*\)/g;
 
-const REVENUE_ROW = /(?:revenue\s+from\s+operations?|sales\s*\/\s*income\s+from\s+operations?|income\s+from\s+operations?|net\s+sales|revenue\s+from\s+sale)/i;
+const REVENUE_ROW = /(?:revenue\s+from\s+ope[rt]ations?|sales\s*\/\s*income\s+from\s+ope[rt]ations?|income\s+from\s+ope[rt]ations?|net\s+sales|revenue\s+from\s+sale)/i;
 const TOTAL_INCOME_ROW = /^\W*(?:[ivx]+\.?\s+|\d+\.?\s+|[a-z]\)\s+)?total\s+income\b/i;
 // "Profit / (Loss)": OCR reads the slash as I, l, 1 or | ("Profit I (Loss) before tax").
-const PBT_ROW = /profit\s*(?:[/Il1|]\s*\(?\s*loss\s*\)?\s*)?\(?(?:loss\)?\s*)?before\s+(?:tax|share\s+of)/i;
+const PBT_ROW = /(?:prof(?:it|ill|il)|p,\s*·?olil)\s*(?:[/Il1|]\s*\(?\s*lo(?:ss|[,.]s)\s*\)?\s*)?\(?(?:lo(?:ss|[,.]s)\)?\s*)?before\s+(?:tax|share\s+of)/i;
 const PBT_BEFORE_EXC_ROW = /profit\s*(?:[/Il1|]\s*\(?\s*loss\s*\)?\s*)?before\s+exceptional/i;
 const PAT_ROW = /(?:net\s+)?profit\s*(?:[/Il1|]\s*\(?\s*loss\s*\)?\s*)?(?:\(\s*loss\s*\)\s*)?(?:after\s+tax\s+)?for\s+the\s+(?:period|quarter|year|half)|(?:net\s+)?profit\s+after\s+tax|^\W*(?:[ivx]+\.?\s+|\d+\.?\s+)?profit\s*(?:[/Il1|]\s*\(?\s*loss\s*\)?)?\s*(?:\(\s*loss\s*\)\s*)?for\s+the/i;
 const PAT_EXCLUDE = /before|comprehensive|attributable|per\s+share|margin|from\s+discontinued|share\s+of/i;
 // "Fi nance costs": a stray space inside the word is a common PDF text-layer glitch.
 const FIN_ROW = /^\W*(?:\S{1,3}\s+)?(?:fi\s?nance\s+costs?|interest\s+expenses?|interest\s+and\s+finance|interest\s+cost)/i;
-const DEP_ROW = /^\W*(?:\S{1,3}\s+)?(?:depreciation|amortisation|amortization)/i;
+const DEP_ROW = /^\W*(?:\S{1,3}\s+)?(?:depre\s*ci\s*ation|amorti[sz]ation)/i;
 const EXC_ROW = /exceptional\s+(?:item|gain|loss|income|expense)s?/i;
-const OWNERS_ROW = /(?:owners|equity\s+holders|shareholders)\s+of\s+the|owners\s+of\s+[a-z]/i;
+const OWNERS_ROW = /(?:owners|ownets|equity\s+holders|shareholders)\s+of\s+the|owners\s+of\s+[a-z]/i;
 
 const SEGMENT_EXCLUDE_LABEL = /total|less|inter|unallocable|unallocated|eliminat|capital\s+employed|assets|liabilit|tax|interest|finance|other\s+income|profit|net\b|exceptional|depreciation|expenses?|income\b|revenue\s+from\s+operations|segment\s+(?:results?|revenue|information)/i;
 
 const digitCount = (t) => t.replace(/\D/g, "").length;
-const hasTwoDecimals = (t) => /\.\d{2}\)?$/.test(t);
+const hasTwoDecimals = (t) => /[.,]\d{2}\)?$/.test(t);
 
 /**
  * Reads one numeric cell whose punctuation may be damaged. The LAST separator is the decimal point when it is followed by
@@ -219,7 +219,7 @@ function parseDatesFromText(text) {
     { re: /\b(January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sept|Sep|Oct|Nov|Dec)\.?\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})\b/gi, build: (m) => new Date(Date.UTC(+m[3], MONTHS[m[1].toLowerCase()], +m[2])) },
     { re: /\b(\d{1,2})(?:st|nd|rd|th)?\s+(January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sept|Sep|Oct|Nov|Dec)\.?,?\s+(\d{4})\b/gi, build: (m) => new Date(Date.UTC(+m[3], MONTHS[m[2].toLowerCase()], +m[1])) },
     // Tolerates a space the text layer put before a separator ("31.03 .2026") and a stray footnote digit after the year ("30.09.20261").
-    { re: /\b(\d{1,2})(?:\s?[\/.]\s?|-)(\d{1,2})(?:\s?[\/.]\s?|-)(\d{4})\d?\b/g, build: (m) => (+m[2] >= 1 && +m[2] <= 12 && +m[1] <= 31) ? new Date(Date.UTC(+m[3], +m[2] - 1, +m[1])) : null }
+    { re: /\b(\d{1,2})(?:\s?[\/.,\s]\s?|-)(\d{1,2})(?:\s?[\/.,\s]\s?|-)(\d{4})\d?\b/g, build: (m) => (+m[2] >= 1 && +m[2] <= 12 && +m[1] <= 31) ? new Date(Date.UTC(+m[3], +m[2] - 1, +m[1])) : null }
   ];
   for (const { re, build } of patterns) {
     let m;
@@ -316,14 +316,14 @@ const HEADING_EXCLUDE = /report|auditor|review|notice|outcome|submission|approve
 function headingScope(line) {
   if (!line || line.length > 190) return null;
   if (HEADING_EXCLUDE.test(line)) return null;
-  const m = line.match(/\b(consolidated|standalone|stand-alone)\b/i);
+  const m = line.match(/\b(consolidated|coniol\s*id:?o?\s*ted|standalone|stand-alone)\b/i);
   if (!m) return null;
   const looksLikeHeading =
-    /(?:^|\b)(?:statement\s+of\s+)?(?:un-?audited\s+|audited\s+)?(?:consolidated|standalone|stand-alone)\b[^.]{0,80}?(?:financial\s+results?|profit\s+and\s+loss|results)/i.test(line) ||
-    /statement\s+of\s+(?:un-?audited\s+|audited\s+)?(?:consolidated|standalone|stand-alone)/i.test(line) ||
+    /(?:^|\b)(?:statement\s+of\s+)?(?:un-?audited\s+|audited\s+)?(?:consolidated|coniol\s*id:?o?\s*ted|standalone|stand-alone)\b[^.]{0,80}?(?:financial\s+results?|profit\s+and\s+loss|results|revenue|segment)/i.test(line) ||
+    /statement\s+of\s+(?:un-?audited\s+|audited\s+)?(?:consolidated|coniol\s*id:?o?\s*ted|standalone|stand-alone)/i.test(line) ||
     /(?:financial\s+results?|profit\s+and\s+loss)[^.]{0,40}\((?:consolidated|standalone)\)/i.test(line);
   if (!looksLikeHeading) return null;
-  return /consolidated/i.test(m[1]) ? "CONSOLIDATED" : "STANDALONE";
+  return /consolidated|coniol/i.test(m[1]) ? "CONSOLIDATED" : "STANDALONE";
 }
 
 function findScope(lines, anchorIdx) {
@@ -331,7 +331,7 @@ function findScope(lines, anchorIdx) {
     const s = headingScope(lines[i]);
     if (s) return s;
   }
-  for (let i = anchorIdx + 1; i <= Math.min(lines.length - 1, anchorIdx + 90); i++) {
+  for (let i = anchorIdx + 1; i <= Math.min(lines.length - 1, anchorIdx + 120); i++) {
     const s = headingScope(lines[i]);
     if (s) return s;
   }
@@ -390,12 +390,23 @@ function locateBlocks(lines) {
     // (note-reference integers can make a row look wider than it really is).
     let cols = Math.min(rawRev.values.length, 6);
     let bestScore = -1;
+    let bestDecs = -1;
     for (let c = Math.min(rawRev.values.length, 6); c >= 3; c--) {
       const find = rowFinder(c);
-      const score = [PBT_ROW, PAT_ROW, DEP_ROW, FIN_ROW, TOTAL_INCOME_ROW]
-        .map(rx => (find(rx, { exclude: /exceptional|before\s+exceptional|comprehensive|attributable/i }) ? 1 : 0))
-        .reduce((x, y) => x + y, 0);
-      if (score > bestScore) { bestScore = score; cols = c; }
+      let score = 0;
+      let decs = 0;
+      for (const rx of [PBT_ROW, PAT_ROW, DEP_ROW, FIN_ROW, TOTAL_INCOME_ROW]) {
+        const found = find(rx, { exclude: /exceptional|before\s+exceptional|comprehensive|attributable/i });
+        if (found) {
+          score++;
+          decs += found.row.values.filter(v => v !== null && Math.round(v * 100) === v * 100 && v % 1 !== 0).length;
+        }
+      }
+      if (score > bestScore || (score === bestScore && decs > bestDecs)) {
+        bestScore = score;
+        bestDecs = decs;
+        cols = c;
+      }
     }
     if (cols < 3) continue;
 
@@ -414,9 +425,9 @@ function locateBlocks(lines) {
 
     // Attributable-to-owners row (only trusted when it follows the PAT row under a "Profit attributable to" heading)
     let owners = null;
-    if (pat) {
-      for (let i = pat.idx + 1; i < Math.min(end, pat.idx + 30); i++) {
-        if (/profit(?:\s+for\s+the\s+(?:period|quarter|year))?\s+attributable\s+to|attributable\s+to\s*:?\s*$/i.test(lines[i]) && !/comprehensive/i.test(lines[i])) {
+    const startLooking = pat ? pat.idx + 1 : (pbt ? pbt.idx + 1 : idx + 1);
+      for (let i = startLooking; i < Math.min(end, startLooking + 30); i++) {
+        if (/(?:(?:profit|l'?rofic)(?:\s+for\s+the\s+(?:period|quarter|year))?\s+attributable\s+to|attributable\s+to\s*:?\s*$)/i.test(lines[i]) && !/comprehensive/i.test(lines[i])) {
           for (let j = i; j < Math.min(end, i + 5); j++) {
             if (OWNERS_ROW.test(lines[j])) {
               const row = parseRow(lines[j], cols);
@@ -426,7 +437,6 @@ function locateBlocks(lines) {
           break;
         }
       }
-    }
 
     // A cell wildly out of scale with its own column's revenue is a mis-read (pieces of a number that happened to complete
     // the column count): blank it so it is neither used nor trusted. The owners' row must also sit near the profit row it splits.
@@ -512,6 +522,7 @@ function extractSegmentRedFlags(lines, totalRevenueYoyBase) {
   const start = lines.findIndex(l => /^\W*(?:\d+\.?\s*)?(?:consolidated\s+)?segment\s+(?:results?|revenue|information|wise)|^\W*segment\s+reporting/i.test(l) && l.length < 120);
   if (start === -1) return flags;
   for (let i = start + 1; i < Math.min(start + 40, lines.length); i++) {
+    if (/^\W*(?:segment\s+(?:assets|liabilit)|capital\s+employed)/i.test(lines[i])) break;
     const row = parseRow(lines[i], null);
     if (!row || row.values.length < 3) continue;
     const label = row.label.replace(/^\W*(?:\d+[.)]?|[a-z]\))\s*/i, "").trim();

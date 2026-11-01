@@ -348,6 +348,9 @@ export function classifyFilingCategory(title = "", text = "", attachmentUrl = ""
     combined.includes("audited financial results") ||
     combined.includes("investor presentation") ||
     combined.includes("earnings presentation") ||
+    combined.includes("regulation 33") ||
+    combined.includes("reg 33") ||
+    combined.includes("limited review report") ||
     (combined.includes("outcome of board meeting") && (combined.includes("results") || combined.includes("quarter")))
   ) {
     return "QUARTERLY_EARNINGS";

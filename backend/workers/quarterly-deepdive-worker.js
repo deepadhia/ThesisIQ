@@ -1302,10 +1302,11 @@ async function processOneDeepDive(item, ctx) {
   const isDeckOrPressRelease = /presentation|investor\s+deck|press\s+release|media\s+release/i.test(`${item.title} ${item.attachment_url || ""}`);
   const hasStatementWords = /revenue\s+from\s+operations|total\s+income|profit\s+before\s+tax/i.test(docText);
   const mentionsFinancialResults = /financial\s+results?|un-?audited|audited\s+financial/i.test(`${item.title} ${docText.slice(0, 6000)}`);
-  // A results filing (the scanner flagged it an earnings release) whose text layer has NO statement rows at all: the statement
-  // pages are images (SKIPPER: 57,366 characters of cover letter and auditor's report, zero statement rows). It is still a
-  // statement filing, so it must be OCR-read, not judged from the cover letter.
-  const statementPagesAreImages = item.is_earnings_release === true && /outcome|results?/i.test(item.title || "") && !hasStatementWords;
+  // A results filing (flagged as an earnings release or QUARTERLY_EARNINGS category) whose text layer has NO statement
+  // rows at all: the statement pages are images or kerning-fragmented (e.g. SKIPPER: 57,366 characters of cover letter
+  // and auditor's report, zero statement rows). It is still a statement filing, so it must be OCR-read.
+  const isEarningsRelease = item.is_earnings_release === true || item.filing_category === "QUARTERLY_EARNINGS";
+  const statementPagesAreImages = isEarningsRelease && mentionsFinancialResults && !hasStatementWords;
   const looksLikeStatementDoc =
     !classification.isTranscript &&
     !classification.isAudio &&

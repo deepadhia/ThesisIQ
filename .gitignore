@@ -80,6 +80,9 @@ scripts/scrape_and_download*
 !scripts/run_server_nim_ingest_pipeline.js
 
 # Generated Research Reports & Runtime Dossiers (runtime output — not source code)
+*.zip
+audit_bundle.txt
+src_and_scripts_only.txt
 reports/
 artifacts/
 audit_output/

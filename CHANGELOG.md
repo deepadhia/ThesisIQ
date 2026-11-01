@@ -1,5 +1,21 @@
 # Changelog
 
+## [v4.4.1] - 2026-11-01 (Statutory Statement OCR Noise Tolerance, Kerning Reconstruction & Reg 33 Earnings Routing)
+
+### Financial Parser OCR Noise Tolerance
+- **ELECON Depreciation Spacing**: Tolerates internal spaces inside `Depre ci ation` in `DEP_ROW` regex, preventing EBITDA and operating profit margins from evaluating as null (`DATA_UNAVAILABLE`).
+- **HSCL Severe OCR Glyph Noise**: Tolerates OCR character swaps and mangled headers (`Opetations`, `Profill (Lo,s)`, `Coniol id:o ted`), and resolves fragmented decimal numbers using a clean-decimal column tie-breaker.
+- **Segment Red Flags Safeguard**: Breaks on `Segment Assets` and `Segment Liabilities` headers so liability reductions are never misinterpreted as segment operating result collapses.
+- **Financial Table Fallback**: Broadened anchor regex to tolerate OCR typos (`ope[rt]ations`).
+
+### Statutory Earnings Detection & Kerning Reconstruction (SKIPPER)
+- **Regulation 33 LODR Classification**: Explicitly recognizes `Regulation 33` and `Limited Review Report` in filing text/titles to classify statutory financial results as `QUARTERLY_EARNINGS` even when filed under generic outcome titles (e.g. `General Updates`).
+- **Kerning / Newline Split Resolution**: Updated statement detection in `quarterly-deepdive-worker.js` so that `QUARTERLY_EARNINGS` filings with newline-separated character streams (such as Skipper's 10,900-line vertical kerning text) are identified as statement documents and routed to Gemini Vision OCR for clean, verified table extraction.
+
+### Verification & Invariants
+- Added test cases and real layout fixture for HSCL Q2 FY27 (`backend/tests/fixtures/real-layouts/HSCL_2026-10-16.txt`).
+- Full test suite verified green: 30/30 test files, 533/533 assertions passing.
+
 ## [v4.4.0] - 2026-10-24 (Results / Concall / Presentation Pipeline Repair & Thesis-Driver Verification)
 
 ### Root causes fixed (alerts silently missing in the Q2 FY27 season)

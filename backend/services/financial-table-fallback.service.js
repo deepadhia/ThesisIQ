@@ -28,7 +28,7 @@ export function selectStatementRegion(docText, maxChars = 14000) {
   const lines = String(docText || "").split("\n");
   const anchors = [];
   lines.forEach((l, i) => {
-    if (/revenue\s+from\s+operations|income\s+from\s+operations|total\s+income/i.test(l) && /\d/.test(l)) anchors.push(i);
+    if (/revenue\s+from\s+ope[rt]ations|income\s+from\s+ope[rt]ations|total\s+income/i.test(l) && /\d/.test(l)) anchors.push(i);
   });
   if (anchors.length === 0) return "";
 
