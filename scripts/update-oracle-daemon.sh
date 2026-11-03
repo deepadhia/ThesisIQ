@@ -44,12 +44,20 @@ else
 fi
 
 # 3. Restart PM2 daemon with updated schedule
-echo "Restarting PM2 daemon with 5-minute (8 AM - 11 PM) schedule..."
+# PM2 evaluates the cron in the SERVER's timezone. The Oracle box runs in UTC, where "8-23" is 13:30-05:30 IST and the whole
+# morning market session (05:30-13:30 IST) was never scanned. The window must be 08:00-23:55 IST whatever the server clock is.
+SERVER_TZ=$(date +%Z)
+case "$SERVER_TZ" in
+  UTC|GMT) SCAN_CRON="*/5 2-18 * * *" ;;   # 02:00-18:55 UTC = 07:30-00:25 IST
+  IST)     SCAN_CRON="*/5 8-23 * * *" ;;
+  *) echo "❌ Server timezone is '$SERVER_TZ'; set SCAN_CRON for it in this script (window: 08:00-23:55 IST). Aborting."; exit 1 ;;
+esac
+echo "Restarting PM2 daemon (server timezone $SERVER_TZ, cron '$SCAN_CRON' = about 08:00-23:55 IST)..."
 pm2 delete multibagger-scanner || true
 pm2 start backend/scripts/scan-announcements-action.js \
   --name "multibagger-scanner" \
   --node-args="--max-old-space-size=512" \
-  --cron "*/5 8-23 * * *" \
+  --cron "$SCAN_CRON" \
   --no-autorestart
 
 # 4. Save PM2 state

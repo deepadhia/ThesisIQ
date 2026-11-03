@@ -97,10 +97,18 @@ echo "Starting PM2 24/7 Daemon..."
 pm2 stop multibagger-scanner || true
 pm2 delete multibagger-scanner || true
 
+# PM2 evaluates the cron in the SERVER's timezone (UTC on Oracle): "8-23" there is 13:30-05:30 IST. Keep the window 08:00-23:55 IST.
+SERVER_TZ=$(date +%Z)
+case "$SERVER_TZ" in
+  UTC|GMT) SCAN_CRON="*/5 2-18 * * *" ;;   # 02:00-18:55 UTC = 07:30-00:25 IST
+  IST)     SCAN_CRON="*/5 8-23 * * *" ;;
+  *) echo "❌ Server timezone is '$SERVER_TZ'; set SCAN_CRON for it in this script (window: 08:00-23:55 IST). Aborting."; exit 1 ;;
+esac
+
 pm2 start backend/scripts/scan-announcements-action.js \
   --name "multibagger-scanner" \
   --node-args="--max-old-space-size=512" \
-  --cron "*/5 8-23 * * *" \
+  --cron "$SCAN_CRON" \
   --no-autorestart
 
 # Save PM2 process list and configure startup on boot
