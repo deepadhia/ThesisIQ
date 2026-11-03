@@ -348,7 +348,8 @@ export function reconcileGuidanceVsActual({
     });
 
     const stmt = c.statement || "";
-    const shortStmt = stmt.length > 80 ? stmt.substring(0, 80) + '...' : stmt;
+    // Cut at a word boundary: "...labor rates and engineering co..." is unreadable.
+    const shortStmt = stmt.length > 110 ? `${stmt.slice(0, 110).replace(/\s+\S*$/, '').replace(/[,;:\s-]+$/, '')}…` : stmt;
     const originQ = c.quarter || "Prior Concall";
     const combinedText = `${c.metric || ''} ${c.statement || ''} ${c.target_value || ''}`.toLowerCase();
 
@@ -493,7 +494,11 @@ export function reconcileGuidanceVsActual({
       }
 
       // Match E: Capex / Capacity Milestone
-      if (isCapexMilestone && !seenQuarterlyMetrics.has('CAPEX_MILESTONE')) {
+      // A milestone is a firm, concrete commitment: a remark such as "hopefully, knowing our resources ... we can add capacity"
+      // is neither, and showing it as a "promise" in the scorecard misleads.
+      const HEDGED = /\b(hopefully|we hope|hope to|hoping|maybe|perhaps|probably|might|could be|try(?:ing)? to|would like|aspire|knowing our)\b/i;
+      const isFirmMilestone = !HEDGED.test(stmt) && /\d/.test(`${stmt} ${c.target_value || ''} ${c.timeline || ''}`);
+      if (isCapexMilestone && isFirmMilestone && !seenQuarterlyMetrics.has('CAPEX_MILESTONE')) {
         const sLower = (c.status || "").toLowerCase();
         let statusBadge = "⏳ *Tracking / In Progress*";
         if (sLower.includes("achieved")) statusBadge = "🟢 *Achieved*";

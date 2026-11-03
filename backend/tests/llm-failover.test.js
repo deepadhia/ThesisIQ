@@ -264,3 +264,21 @@ describe('stats (feed the health alert)', () => {
     expect(JSON.stringify(getLlmStats())).not.toMatch(/nv-key|gq-key|gm-key/);
   });
 });
+
+describe('orderForQuality: judgement calls try OpenRouter (Grok) first, then the normal chain', () => {
+  it('moves OpenRouter entries to the front and keeps every provider and the relative order of the rest', async () => {
+    const { orderForQuality } = await import('../services/llm-failover.service.js');
+    const chain = buildProviders({ ...ALL_KEYS, openrouterKey: 'or-key' });
+    const ordered = orderForQuality(chain);
+    expect(ordered).toHaveLength(chain.length);
+    const firstNonOr = ordered.findIndex(p => !isOpenRouter(p.url));
+    expect(firstNonOr).toBeGreaterThan(0);
+    expect(ordered.slice(0, firstNonOr).every(p => isOpenRouter(p.url))).toBe(true);
+    expect(ordered.slice(firstNonOr).map(p => p.name)).toEqual(chain.filter(p => !isOpenRouter(p.url)).map(p => p.name));
+  });
+  it('without an OpenRouter key the chain is unchanged', async () => {
+    const { orderForQuality } = await import('../services/llm-failover.service.js');
+    const chain = buildProviders(ALL_KEYS);
+    expect(orderForQuality(chain).map(p => p.name)).toEqual(chain.map(p => p.name));
+  });
+});

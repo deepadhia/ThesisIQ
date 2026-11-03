@@ -14,6 +14,7 @@ import { extractDeterministicFinancials } from "./financial-validator.service.js
 
 const ROW_LABELS = {
   revenue: "Revenue from operations",
+  other_income: "Other income",
   finance_costs: "Finance costs",
   depreciation: "Depreciation and amortisation expense",
   pbt_before_exceptional: "Profit before exceptional items and tax",
@@ -104,6 +105,7 @@ Return ONLY this JSON:
   "column_dates": ["YYYY-MM-DD current quarter end", "YYYY-MM-DD previous quarter end", "YYYY-MM-DD year-ago quarter end"],
   "rows": {
     "revenue": ["...", "...", "..."],               // Revenue from operations
+    "other_income": ["...", "...", "..."],           // Other income (null if not printed; it is NOT part of revenue from operations)
     "finance_costs": ["...", "...", "..."],
     "depreciation": ["...", "...", "..."],           // Depreciation and amortisation expense
     "pbt_before_exceptional": ["...", "...", "..."], // Profit before exceptional items and tax (null if not printed)
@@ -172,6 +174,7 @@ ${region}
     `Particulars ${dates.slice(0, cols).join(" ")}`,
     `${ROW_LABELS.revenue} ${accepted.revenue.join(" ")}`
   ];
+  if (accepted.other_income) lines.push(`${ROW_LABELS.other_income} ${accepted.other_income.join(" ")}`);
   if (accepted.finance_costs) lines.push(`${ROW_LABELS.finance_costs} ${accepted.finance_costs.join(" ")}`);
   if (accepted.depreciation) lines.push(`${ROW_LABELS.depreciation} ${accepted.depreciation.join(" ")}`);
   if (accepted.pbt_before_exceptional) lines.push(`${ROW_LABELS.pbt_before_exceptional} ${accepted.pbt_before_exceptional.join(" ")}`);

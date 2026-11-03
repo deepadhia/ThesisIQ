@@ -204,6 +204,12 @@ describe('quarterly deep-dive worker', () => {
     expect(msg).toContain('THESIS GATE AUDIT');
     expect(msg).toContain('THESIS DRIVER CHECK');
     expect(msg).toContain('🟠');
+    // readable order: the signal and its reason first, then the verified numbers, then how they score against the thesis
+    expect(msg).toContain('➡️ *Why:*');
+    expect(msg.indexOf('ACTION SIGNAL')).toBeLessThan(msg.indexOf('➡️ *Why:*'));
+    expect(msg.indexOf('➡️ *Why:*')).toBeLessThan(msg.indexOf('VERIFIED FINANCIALS'));
+    expect(msg.indexOf('VERIFIED FINANCIALS')).toBeLessThan(msg.indexOf('THESIS GATE AUDIT'));
+    expect(msg.indexOf('THESIS GATE AUDIT')).toBeLessThan(msg.indexOf('THESIS DRIVER CHECK'));
     expect(msg).not.toMatch(/-3642|-65\.6/);             // the old garbage numbers
 
     const sendIdx = state.calls.findIndex(c => c.sql === '__SEND__');

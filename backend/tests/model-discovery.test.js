@@ -409,3 +409,15 @@ describe('the chain is built from the registry, with the measured seed list only
     expect(groqEntries.every((p) => p.maxInputTokens > 0)).toBe(true);
   });
 });
+
+describe('OpenRouter: Grok models are admitted and ranked first (the analyst keys added for better judgement were never used)', () => {
+  it.each(['x-ai/grok-4-fast', 'x-ai/grok-3-mini', 'x-ai/grok-4.1-fast'])('%s is a candidate', (id) => {
+    expect(isChatCandidate('openrouter', id)).toBe(true);
+  });
+  it.each(['x-ai/grok-code-fast-1', 'x-ai/grok-2-vision-1212', 'x-ai/grok-4'])('%s is not (code / vision models, and the slow non-fast flagship)', (id) => {
+    expect(isChatCandidate('openrouter', id)).toBe(false);
+  });
+  it('fast Grok ranks ahead of Llama / Qwen / DeepSeek', () => {
+    expect(rankCandidates('openrouter', ['meta-llama/llama-3.3-70b-instruct', 'x-ai/grok-4-fast', 'qwen/qwen-2.5-72b-instruct'])[0]).toBe('x-ai/grok-4-fast');
+  });
+});

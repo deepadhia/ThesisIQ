@@ -95,6 +95,19 @@ export function shouldSendDigest({ queuedAt = [], otherPending = 0, now = Date.n
 
 const asList = (v) => (Array.isArray(v) ? v.filter((x) => typeof x === "string" && x.trim().length > 3) : []);
 
+/** The gate outcome in the small form stored on a digest item (so the digest can explain the signal without re-deriving it). */
+function compactGate(g) {
+  if (!g || typeof g !== "object") return null;
+  const hurdle = g.thesisGate || {};
+  return {
+    classification: g.statusClassification || null,
+    explanation: String(g.decisionExplanation || "").slice(0, 240),
+    hurdleStatus: hurdle.status || null,
+    hurdleReason: String(hurdle.reason || "").slice(0, 200),
+    hurdles: String(hurdle.hurdlesEvaluated || "").slice(0, 200)
+  };
+}
+
 /**
  * Compact, storable record of one processed filing (never includes _raw_text).
  */
@@ -115,6 +128,7 @@ export function buildDigestItem({ kind, title, url = null, filedAt, queuedAt = n
     queuedAt,
     action: failed ? null : (verdict.final_action || verdict.action_signal || null),
     conviction: failed ? null : (verdict.conviction_score ?? null),
+    gate: compactGate(verdict.thesis_gate_result),
     summary: failed || LLM_FILLER.test(summaryRaw) ? "" : summaryRaw,
     positives: positives.slice(0, 4),
     concerns: concerns.slice(0, 4),
@@ -150,12 +164,141 @@ function signalLabel(action) {
   return "HOLD / MONITOR";
 }
 
+const SIGNAL_EMOJI = { "BUY / ACCUMULATE": "🟢", "REASSESS THESIS": "🔴", "HOLD / MONITOR": "🟡" };
+const pctText = (v) => (v === null || v === undefined || Number.isNaN(Number(v)) ? null : `${v >= 0 ? "+" : ""}${Number(v).toFixed(1)}%`);
+
+// Words that carry no meaning when deciding whether two bullets say the same thing ("Rs. 73 Cr" / "₹73 Cr").
+const STOP_WORDS = new Set(["the", "a", "an", "of", "to", "in", "for", "and", "by", "at", "on", "rs", "inr", "cr", "crore", "crores", "was", "were", "is", "are", "its", "from", "with"]);
+const tokenSet = (s) => new Set(norm(s).split(" ").filter((t) => t && !STOP_WORDS.has(t)));
+/** Two bullets are the same statement when one's meaningful words are (almost) all in the other. Short bullets are never merged. */
+function nearDuplicate(a, b) {
+  const small = a.size <= b.size ? a : b;
+  const large = small === a ? b : a;
+  if (small.size < 4) return false;
+  let shared = 0;
+  for (const t of small) if (large.has(t)) shared++;
+  return shared / small.size >= 0.8;
+}
+
+/**
+ * Drops bullets that only restate a verified headline figure (revenue / PAT / EBITDA) the alert already prints in its VERIFIED
+ * FINANCIALS block. The same number three times in one message makes the message long and hides the new information.
+ * A bullet is dropped only when it carries a revenue / profit / EBITDA label AND one of those verified amounts.
+ */
+export function dropRestatedFigures(list = [], fin = null) {
+  if (!fin) return list;
+  const verified = [fin.revenue, fin.patAttributable, fin.patConsolidated, fin.ebitda].filter((v) => typeof v === "number" && v > 0);
+  if (!verified.length) return list;
+  const LABEL = /\b(?:revenue|sales|turnover|pat|net\s+profit|profit\s+after\s+tax|attributable\s+profit|ebitda)\b/i;
+  const HALF_OR_SEGMENT = /half[-\s]?year|h1|9m|nine\s+months|segment|branch|division|standalone|export|domestic|order|backlog|cash|asset/i;
+  return list.filter((t) => {
+    const s = String(t || "");
+    if (!LABEL.test(s) || HALF_OR_SEGMENT.test(s)) return true;
+    const amounts = [...s.replace(/,/g, "").matchAll(/\d+(?:\.\d+)?/g)].map((m) => parseFloat(m[0]));
+    return !amounts.some((a) => verified.some((v) => Math.abs(a - v) < 0.006));
+  });
+}
+
+/** Keeps the first of any group of near-identical bullets (a model that is called per document chunk repeats the same fact). */
+export function dedupeNearDuplicates(list = []) {
+  const kept = [];
+  const sets = [];
+  for (const t of list) {
+    if (typeof t !== "string" || !t.trim()) continue;
+    const ts = tokenSet(t);
+    if (sets.some((s) => nearDuplicate(ts, s))) continue;
+    kept.push(t);
+    sets.push(ts);
+  }
+  return kept;
+}
+
+/**
+ * The single reason the signal is what it is, in priority order: a broken driver, an at-risk driver, a missed thesis hurdle,
+ * missing verified numbers; only then the "all clear" explanations. Pure and deterministic: nothing here is model text.
+ */
+function verdictReason({ signal, board, gate }) {
+  const names = (st) => board.filter((b) => b.status === st).map((b) => plain(b.driver));
+  const broken = names("BROKEN");
+  const atRisk = names("AT_RISK");
+  if (broken.length) return `thesis driver broken: ${broken.join(", ")}.`;
+  if (atRisk.length) return `driver at risk: ${atRisk.join(", ")}.`;
+  if (gate?.hurdleStatus === "FAIL") {
+    return `the drivers are supported but the thesis hurdle was missed (${plain(gate.hurdleReason) || "see results"}), so there is no case to add until it recovers or is explained.`;
+  }
+  if (gate?.classification === "DATA_UNAVAILABLE" || gate?.classification === "UNVERIFIED_FIGURES") return "verified numbers are incomplete, so no buy is authorised.";
+  if (signal === "BUY / ACCUMULATE") return "the numbers pass the thesis hurdles and the drivers are supported by evidence.";
+  if (signal === "REASSESS THESIS") return "the evidence is mixed enough to re-check the thesis.";
+  return "the evidence supports the drivers but not strongly enough to add.";
+}
+
+/**
+ * "HOW THIS SIGNAL WAS REACHED": results -> thesis drivers -> this filing -> concall -> verdict, so the reader can see which
+ * input produced the signal instead of a bare "HOLD (6/10)".
+ */
+export function buildSignalRationale({ lead = null, board = [], fin = null, periodLabel = null, concall = null, itemKinds = [] } = {}) {
+  const lines = ["🧮 *HOW THIS SIGNAL WAS REACHED*"];
+  const gate = lead?.gate || null;
+  const signal = lead?.action ? signalLabel(lead.action) : null;
+
+  if (fin && fin.revenue !== null && fin.revenue !== undefined) {
+    const scope = fin.statementScope && fin.statementScope !== "UNKNOWN" ? fin.statementScope.toLowerCase() : "reported";
+    const parts = [];
+    if (pctText(fin.revenueYoYGrowthPct)) parts.push(`Revenue ${pctText(fin.revenueYoYGrowthPct)} YoY`);
+    if (fin.ebitdaMarginPct !== null && fin.ebitdaMarginPct !== undefined) {
+      const bps = Number.isFinite(fin.ebitdaMarginBpsDelta) ? ` (${fin.ebitdaMarginBpsDelta >= 0 ? "+" : ""}${fin.ebitdaMarginBpsDelta} bps YoY)` : "";
+      parts.push(`EBITDA margin ${fin.ebitdaMarginPct}%${bps}`);
+    }
+    const pat = fin.patAttributable ?? fin.patConsolidated;
+    if (pat !== null && pat !== undefined && pctText(fin.patYoYGrowthPct)) parts.push(`PAT ${pctText(fin.patYoYGrowthPct)} YoY`);
+    lines.push(`1️⃣ *Results (${periodLabel ? `${periodLabel}, ` : ""}${scope}):* ${parts.join(" · ") || `Revenue ₹${fin.revenue} Cr`}`);
+    if (gate?.hurdleStatus === "FAIL") lines.push(`   ❌ Thesis hurdle missed: ${plain(gate.hurdleReason)}`);
+    else if (gate?.hurdleStatus === "PASS") lines.push("   ✅ Thesis hurdles met");
+    else if (gate?.classification === "DATA_UNAVAILABLE" && gate.explanation) lines.push(`   ⚪ ${plain(gate.explanation)}`);
+  } else {
+    lines.push("1️⃣ *Results:* no verified results for this quarter yet, so no numbers check was applied.");
+  }
+
+  const s = summarizeDriverAssessment(board);
+  const tally = [
+    s.confirmed.length ? `${s.confirmed.length} confirmed` : null,
+    s.onTrack.length ? `${s.onTrack.length} on track` : null,
+    s.atRisk.length ? `${s.atRisk.length} at risk` : null,
+    s.broken.length ? `${s.broken.length} broken` : null,
+    s.noEvidence.length ? `${s.noEvidence.length} no evidence yet` : null
+  ].filter(Boolean).join(" · ");
+  if (board.length) {
+    const verdictWord = s.broken.length ? "🔴 thesis under threat" : s.atRisk.length ? "🟠 at risk" : (s.confirmed.length + s.onTrack.length) ? "🟢 drivers intact" : "⚪ no evidence yet";
+    lines.push(`2️⃣ *Thesis drivers:* ${tally} — ${verdictWord}`);
+  } else {
+    lines.push("2️⃣ *Thesis drivers:* no driver contract on file for this stock.");
+  }
+
+  if (lead) {
+    const kind = (KIND_LABEL[lead.kind] || KIND_LABEL.OTHER).replace(/^\S+\s/, "");
+    const first = asList(lead.concerns)[0];
+    lines.push(`3️⃣ *This filing (${kind}):* read as ${signal || "no signal"}${lead.conviction ? ` (${lead.conviction}/10)` : ""}${first ? `; main concern: ${plain(first).slice(0, 140)}` : ""}`);
+  }
+
+  if (concall) {
+    lines.push(concall.status === "ANALYSED"
+      ? `4️⃣ *Concall:* ✅ analysed${itemKinds.includes("CONCALL") ? " in this update" : ""}`
+      : "4️⃣ *Concall:* ⏳ not analysed yet — the signal is provisional until the transcript is filed");
+  }
+
+  if (signal) lines.push(`➡️ *Verdict: ${signal}* — ${verdictReason({ signal, board, gate })}`);
+  return lines.join("\n");
+}
+
 /**
  * One Telegram message for one stock: thesis status first, then what is new.
  * @param {object} p
  * @param {string} p.financialsBlock pre-built "LATEST VERIFIED RESULTS" block (verified numbers only) or ""
  */
-export function formatThesisDigestMessage({ ticker, companyName, items = [], board = [], overall, financialsBlock = "" }) {
+export function formatThesisDigestMessage({ ticker, companyName, items = [], board = [], overall, financialsBlock = "", fin, periodLabel = null, concall }) {
+  // The rationale is shown when the caller supplies the evidence it is built from (`fin`, even null, and/or `concall`).
+  const wantRationale = fin !== undefined || concall !== undefined;
+  const lead = [...items].filter((i) => i.action).sort((x, y) => (Date.parse(y.filedAt) || 0) - (Date.parse(x.filedAt) || 0))[0];
   // Stored company names often carry the screener's "share price" suffix ("Skipper Ltd share price")
   const cleanName = companyName ? plain(companyName).replace(/\s+share\s+price\s*$/i, "").trim() : "";
   const head = cleanName ? `*${String(ticker).toUpperCase()}* | ${cleanName}` : `*${String(ticker).toUpperCase()}*`;
@@ -168,8 +311,17 @@ export function formatThesisDigestMessage({ ticker, companyName, items = [], boa
     c.broken ? `${c.broken} broken` : null
   ].filter(Boolean).join(" · ");
 
-  let msg = `🏢 ${head}\n🧭 *THESIS STATUS:* ${status.emoji} ${status.label}${tally ? `\n_${tally}_` : ""}\n──────────────────────────────`;
+  let msg = `🏢 ${head}\n🧭 *THESIS STATUS:* ${status.emoji} ${status.label}${tally ? `\n_${tally}_` : ""}`;
+  // The signal sits next to the status (with its conviction), so "drivers intact" and "HOLD" are never left to contradict each other unexplained.
+  if (wantRationale && lead) {
+    const sig = signalLabel(lead.action);
+    msg += `\n🎯 *SIGNAL:* ${SIGNAL_EMOJI[sig] || "🟡"} ${sig}${lead.conviction ? ` (conviction ${lead.conviction}/10)` : ""}`;
+  }
+  msg += "\n──────────────────────────────";
   if (financialsBlock) msg += financialsBlock.replace(/\n$/, "");
+  if (wantRationale) {
+    msg += `\n\n${buildSignalRationale({ lead, board, fin: fin || null, periodLabel, concall: concall || null, itemKinds: items.map((i) => i.kind) })}`;
+  }
 
   if (board.length) {
     const rows = [];
@@ -187,7 +339,16 @@ export function formatThesisDigestMessage({ ticker, companyName, items = [], boa
 
   // Per-filing detail: bullets already stated by an earlier filing are dropped; filings left with nothing are collapsed.
   const seen = new Set();
-  const fresh = (list) => (list || []).filter((t) => { const k = norm(t); if (!k || seen.has(k)) return false; seen.add(k); return true; });
+  const seenSets = [];
+  const fresh = (list) => (list || []).filter((t) => {
+    const k = norm(t);
+    if (!k || seen.has(k)) return false;
+    const ts = tokenSet(t);
+    if (seenSets.some((s) => nearDuplicate(ts, s))) return false;
+    seen.add(k);
+    seenSets.push(ts);
+    return true;
+  });
   const ordered = [...items].sort((x, y) => KIND_ORDER.indexOf(x.kind) - KIND_ORDER.indexOf(y.kind));
   const blocks = [];
   const collapsed = [];
@@ -255,7 +416,6 @@ export function formatThesisDigestMessage({ ticker, companyName, items = [], boa
   if (blocks.length) msg += `\n\n🆕 *NEW SINCE LAST UPDATE*\n${blocks.join("\n\n")}`;
   if (collapsed.length) msg += `\n\n📎 _Also filed:_ ${collapsed.join(" • ")}`;
 
-  const lead = [...items].filter((i) => i.action).sort((x, y) => (Date.parse(y.filedAt) || 0) - (Date.parse(x.filedAt) || 0))[0];
   msg += `\n──────────────────────────────\n_${lead ? `System signal: ${signalLabel(lead.action)}${lead.conviction ? ` (conviction ${lead.conviction}/10)` : ""} • ` : ""}Thesis-tracking data, not investment advice._`;
   return msg;
 }

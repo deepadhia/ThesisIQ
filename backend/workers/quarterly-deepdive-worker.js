@@ -33,7 +33,9 @@ import {
   buildThesisStatusBoard,
   overallThesisStatus,
   shouldSendDigest,
-  formatThesisDigestMessage
+  formatThesisDigestMessage,
+  dedupeNearDuplicates,
+  dropRestatedFigures
 } from "../services/thesis-digest.service.js";
 import {
   buildThesisContext,
@@ -149,8 +151,8 @@ export function isProceduralNoise(statement = "", metric = "") {
  * Provider failover (Groq / Gemini / NIM), circuit breaker, Retry-After handling, a hard per-call time budget and a
  * process-wide concurrency cap live in llm-failover.service.js. (The name is historical: NIM is no longer first.)
  */
-async function runNimPrompt(systemPrompt, userPrompt, temperature = 0.05, { maxTotalMs } = {}) {
-  return runLlm(systemPrompt, userPrompt, { temperature, ...(maxTotalMs ? { maxTotalMs } : {}) });
+async function runNimPrompt(systemPrompt, userPrompt, temperature = 0.05, { maxTotalMs, quality = false } = {}) {
+  return runLlm(systemPrompt, userPrompt, { temperature, ...(maxTotalMs ? { maxTotalMs } : {}), ...(quality ? { quality: true } : {}) });
 }
 
 /**
@@ -428,7 +430,7 @@ Return ONLY a valid JSON object:
 Respond with the JSON object only. The first character of your reply must be { (no markdown, no headings).
 `;
     try {
-      const resText = await runNimPrompt(systemPrompt, userPrompt, 0.05, { maxTotalMs: VERDICT_CHUNK_BUDGET_MS });
+      const resText = await runNimPrompt(systemPrompt, userPrompt, 0.05, { maxTotalMs: VERDICT_CHUNK_BUDGET_MS, quality: true });
       const parsed = parseVerdictJson(resText);
       if (parsed) return parsed;
       if (!resText) { unusableChunks += 1; return null; }
@@ -436,7 +438,7 @@ Respond with the JSON object only. The first character of your reply must be { (
       console.warn(`[WORKER CHUNK WARN] Part ${idx + 1} reply was not valid JSON; re-asking once for JSON only.`);
       const strictPrompt = `${userPrompt}
 Your previous reply was not valid JSON. Reply again with ONLY the JSON object described above: no markdown, no headings, no commentary. The first character of your reply must be { and the last must be }.`;
-      const second = parseVerdictJson(await runNimPrompt(systemPrompt, strictPrompt, 0.05, { maxTotalMs: VERDICT_CHUNK_BUDGET_MS }));
+      const second = parseVerdictJson(await runNimPrompt(systemPrompt, strictPrompt, 0.05, { maxTotalMs: VERDICT_CHUNK_BUDGET_MS, quality: true }));
       if (!second) unusableChunks += 1;
       return second;
     } catch (err) {
@@ -845,6 +847,26 @@ async function loadCarriedFinancials(ticker) {
   return null;
 }
 
+/**
+ * True when a concall transcript for this stock was already analysed recently (its digest item is kept on the row after sending).
+ * A failed lookup answers false: the digest then says "not analysed yet", which is the safe wording.
+ */
+async function hasAnalysedConcall(ticker) {
+  try {
+    const { rows } = await pool.query(
+      `SELECT 1 FROM corporate_announcements
+       WHERE ticker = $1 AND event_analysis->'digest_item'->>'kind' = 'CONCALL'
+         AND COALESCE(filing_date, created_at) > NOW() - INTERVAL '45 days'
+       LIMIT 1`,
+      [ticker]
+    );
+    return rows.length > 0;
+  } catch (err) {
+    console.warn(`[WORKER DIGEST] Could not check concall status for ${ticker}:`, err.message);
+    return false;
+  }
+}
+
 const fmtPct = (v) => (v === null || v === undefined || isNaN(v)) ? null : `${v >= 0 ? "+" : ""}${v}%`;
 
 /**
@@ -962,7 +984,7 @@ function cleanCompanyForAlert(item) {
 }
 
 function bulletList(list, max = 3) {
-  return (list || []).filter(x => typeof x === "string" && x.length > 5).slice(0, max).map(x => `• ${x.replace(/^•\s*/, "")}`).join("\n");
+  return dedupeNearDuplicates((list || []).filter(x => typeof x === "string" && x.length > 5)).slice(0, max).map(x => `• ${x.replace(/^•\s*/, "")}`).join("\n");
 }
 
 /**
@@ -987,14 +1009,20 @@ function buildStage1Message({ item, verdict, activeFin, finSource, carried, stag
       dedupedExec.push(itemText);
     }
   }
-  const executionItems = bulletList(dedupedExec, 4);
+  // The verified revenue / PAT / EBITDA are already printed once in the financials block: do not list them again as "proof".
+  const executionItems = bulletList(dropRestatedFigures(dedupedExec, activeFin), 4);
   const executionSec = executionItems ? `\n🛡️ *MANAGEMENT EXECUTION & CAPACITY PROOF:*\n${executionItems}\n` : "";
   const drags = bulletList(verdict.key_concerns_and_drags);
   const dragSec = drags ? `\n⚠️ *KEY DRAGS & FRICTION POINTS:*\n${drags}\n` : "";
   const points = bulletList(verdict.concall_verification_points || verdict.dodged_questions || verdict.concall_checklist);
   const concallSec = points ? `\n🎙️ *OPEN QUERIES FOR CONCALL:*\n${points}\n` : "";
   const docLink = item.attachment_url ? `\n📄 [View Official Filing →](${item.attachment_url})` : "";
-  const summary = verdict._llm_failed ? "" : `\n📋 *Verdict Summary:*\n${verdict.verdict_summary}\n`;
+  const summary = verdict._llm_failed ? "" : `\n📋 *Summary:*\n${verdict.verdict_summary}\n`;
+  // One line that says WHY the signal is what it is, right under the signal, taken from the gate (never from model text).
+  const gate = verdict.thesis_gate_result;
+  const hurdle = gate?.thesisGate;
+  const whyParts = [gate?.decisionExplanation, hurdle?.status === "FAIL" && hurdle.reason && !String(gate?.decisionExplanation || "").includes(hurdle.reason) ? `Hurdle missed: ${hurdle.reason}` : null].filter(Boolean);
+  const whyLine = whyParts.length ? `➡️ *Why:* ${whyParts.join(" ")}` : "";
   const eventLine = /presentation|investor deck/i.test(item.title) && !activeFin
     ? "📑 *Event:* Investor Presentation"
     : `📊 *Event:* Quarterly Results Flash Note • ${stageName}`;
@@ -1003,24 +1031,26 @@ function buildStage1Message({ item, verdict, activeFin, finSource, carried, stag
   const actionLine = actionSignalLine(verdict);
   const divider = "──────────────────────────────";
 
+  // Reading order: what the note concludes (summary), what the numbers are, how they score against the thesis, what is
+  // pending (pacing, cash quality, valuation), then supporting detail and what the concall must answer.
   const bodyBlocks = [
     degradedNote?.trim(),
-    gateSec?.trim(),
+    summary?.trim(),
     finBlock?.trim(),
+    gateSec?.trim(),
+    driverSec?.trim(),
+    guidanceSection?.trim(),
     cashFlowSec?.trim(),
     valSec?.trim(),
-    guidanceSection?.trim(),
-    driverSec?.trim(),
     executionSec?.trim(),
     dragSec?.trim(),
     commText?.trim(),
-    summary?.trim(),
     concallSec?.trim()
   ].filter(Boolean);
 
   const footer = `${divider}\n${docLink ? `${docLink}\n` : ""}_Stage 1 snapshot judged against the stock's thesis drivers. Concall transcript will verify the open queries._`;
 
-  return `${header}\n${divider}\n${actionLine}\n${divider}\n\n${bodyBlocks.join("\n\n")}\n\n${footer}`.trim();
+  return `${header}\n${divider}\n${actionLine}${whyLine ? `\n${whyLine}` : ""}\n${divider}\n\n${bodyBlocks.join("\n\n")}\n\n${footer}`.trim();
 }
 
 /**
@@ -1846,11 +1876,16 @@ async function flushThesisDigestsOnce({ now = Date.now() } = {}) {
       const board = buildThesisStatusBoard(entries, drivers);
 
       const carried = await loadCarriedFinancials(ticker);
+      const carriedPeriod = carried ? (quarterFromPeriodEnd(carried.fin?.quarterEnded) || getIndianFiscalQuarter(carried.filingDate)) : null;
       const financialsBlock = carried
-        ? buildVerifiedFinancialsBlock(carried.fin, { carried: true, periodLabel: quarterFromPeriodEnd(carried.fin?.quarterEnded) || getIndianFiscalQuarter(carried.filingDate) })
+        ? buildVerifiedFinancialsBlock(carried.fin, { carried: true, periodLabel: carriedPeriod })
         : "";
+      const concall = { status: items.some(i => i.kind === "CONCALL") || await hasAnalysedConcall(ticker) ? "ANALYSED" : "PENDING" };
 
-      const message = formatThesisDigestMessage({ ticker, companyName: group[0].company_name, items, board, overall: overallThesisStatus(board), financialsBlock });
+      const message = formatThesisDigestMessage({
+        ticker, companyName: group[0].company_name, items, board, overall: overallThesisStatus(board), financialsBlock,
+        fin: carried?.fin || null, periodLabel: carriedPeriod, concall
+      });
       try {
         await sendTelegramMessage(message);
       } catch (err) {

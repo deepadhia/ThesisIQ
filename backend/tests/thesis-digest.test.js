@@ -208,3 +208,106 @@ describe('digest hygiene (live SKIPPER dry run, 2026-10-31)', () => {
     expect(msg).not.toMatch(/share price/i);
   });
 });
+
+describe('signal rationale: the digest says HOW the signal was reached (results -> drivers -> this filing -> concall -> verdict)', () => {
+  const fin = { statementScope: 'CONSOLIDATED', revenue: 456.48, revenueYoYGrowthPct: 27.43, ebitda: 99.71, ebitdaMarginPct: 21.84, ebitdaMarginBpsDelta: -295, patAttributable: 66.56, patYoYGrowthPct: 9.41 };
+  const gateFail = { classification: 'TEMPORARY_FRICTION', explanation: 'Top-line and profit are expanding but EBITDA margin compressed.', hurdleStatus: 'FAIL', hurdleReason: 'EBITDA Margin 21.84% < target 22%' };
+  const board = buildThesisStatusBoard([{ filedAt: '2026-11-03T10:00:00Z', source: 'Deck', assessment: [a('Order execution', 'CONFIRMED', 'Order book at 2,268 Cr, a record'), a('Working capital discipline', 'ON_TRACK', 'Receivable days steady'), NO('Capacity ramp-up')] }], drivers);
+  const item = { kind: 'DECK', title: 'Investor Presentation', filedAt: '2026-11-03T10:00:00Z', action: 'HOLD / MONITOR', conviction: 6, summary: 'Strong order book.', positives: ['Order backlog at a record'], concerns: ['EBITDA margin compressed 295 bps YoY'], guidance: [], commitmentFlags: [], gate: gateFail };
+  const base = { ticker: 'INOXINDIA', items: [item], board, overall: overallThesisStatus(board), fin, periodLabel: 'Q2 FY27' };
+
+  it('buildDigestItem keeps a compact copy of the gate result and never the raw verdict', () => {
+    const di = buildDigestItem({ kind: 'DECK', title: 'Deck', filedAt: '2026-11-03T10:00:00Z', verdict: { final_action: 'HOLD / MONITOR', conviction_score: 6, thesis_gate_result: { statusClassification: 'TEMPORARY_FRICTION', decisionExplanation: 'Margin compressed.', thesisGate: { status: 'FAIL', reason: 'EBITDA Margin 21.84% < target 22%', hurdlesEvaluated: 'Primary: EBITDA margin >= 22%' }, secret: 'x' } } });
+    expect(di.gate).toMatchObject({ classification: 'TEMPORARY_FRICTION', hurdleStatus: 'FAIL', hurdleReason: 'EBITDA Margin 21.84% < target 22%' });
+    expect(JSON.stringify(di.gate)).not.toContain('secret');
+  });
+
+  it('explains why a stock whose drivers are intact is still only HOLD: the missed hurdle is named, with the numbers', () => {
+    const msg = formatThesisDigestMessage({ ...base, concall: { status: 'PENDING' } });
+    expect(msg).toContain('HOW THIS SIGNAL WAS REACHED');
+    expect(msg).toMatch(/Results \(Q2 FY27, consolidated\).*Revenue \+27\.4% YoY/s);
+    expect(msg).toContain('EBITDA Margin 21.84% < target 22%');
+    expect(msg).toMatch(/Thesis drivers.*1 confirmed · 1 on track/s);
+    expect(msg).toMatch(/Verdict: HOLD \/ MONITOR.*hurdle/s);
+    // the signal is stated at the top, next to the thesis status, not only in the footer
+    expect(msg.indexOf('SIGNAL')).toBeLessThan(msg.indexOf('DRIVER BOARD'));
+  });
+
+  it('says plainly when the concall has not been analysed yet, and when it has', () => {
+    expect(formatThesisDigestMessage({ ...base, concall: { status: 'PENDING' } })).toMatch(/Concall:.*not analysed yet.*provisional/s);
+    expect(formatThesisDigestMessage({ ...base, items: [{ ...item, kind: 'CONCALL' }], concall: { status: 'ANALYSED' } })).toMatch(/Concall:.*analysed/s);
+    expect(formatThesisDigestMessage({ ...base, items: [{ ...item, kind: 'CONCALL' }], concall: { status: 'ANALYSED' } })).not.toMatch(/not analysed yet/);
+  });
+
+  it('a broken or at-risk driver is the named reason, ahead of any hurdle', () => {
+    const risky = buildThesisStatusBoard([{ filedAt: '2026-11-03T10:00:00Z', source: 'Deck', assessment: [a('Order execution', 'CONFIRMED', 'Order book at 2,268 Cr'), a('Working capital discipline', 'AT_RISK', 'Receivable days rose to 128 from 96'), NO('Capacity ramp-up')] }], drivers);
+    const msg = formatThesisDigestMessage({ ...base, board: risky, overall: overallThesisStatus(risky) });
+    expect(msg).toMatch(/Verdict: HOLD \/ MONITOR.*Working capital discipline/s);
+  });
+
+  it('with no verified results the message says so instead of implying a numbers check happened', () => {
+    const msg = formatThesisDigestMessage({ ...base, fin: null, periodLabel: null, items: [{ ...item, gate: null }] });
+    expect(msg).toMatch(/Results:.*no verified results/s);
+  });
+
+  it('a BUY signal is explained by passing numbers and confirmed drivers', () => {
+    const buy = { ...item, action: 'BUY / ACCUMULATE', conviction: 8, gate: { classification: 'THESIS_CONFIRMED_BEAT', explanation: 'Numbers beat.', hurdleStatus: 'PASS', hurdleReason: '' } };
+    const msg = formatThesisDigestMessage({ ...base, items: [buy], concall: { status: 'ANALYSED' } });
+    expect(msg).toMatch(/Verdict: BUY \/ ACCUMULATE.*hurdles/s);
+  });
+
+  it('near-identical bullets from one filing ("Rs. 73 Cr" / "₹73 Cr") are shown once', () => {
+    const dup = { ...item, concerns: ['Interest expenses increased 22% YoY to Rs. 73 Cr in Q2 FY27.', 'Interest expenses increased 22% YoY to ₹73 Cr in Q2 FY27.', 'Working capital days stood at 82 days in H1FY27.'] };
+    const msg = formatThesisDigestMessage({ ...base, items: [dup] });
+    const detail = msg.split('NEW SINCE LAST UPDATE')[1];   // the rationale line may quote the main concern once; the detail lists it once too
+    expect((detail.match(/Interest expenses increased 22%/g) || []).length).toBe(1);
+    expect(detail).toContain('Working capital days stood at 82 days');
+  });
+
+  it('stays within Telegram limits with the extra block', () => {
+    expect(formatThesisDigestMessage({ ...base, concall: { status: 'PENDING' } }).length).toBeLessThan(3500);
+  });
+});
+
+describe('driver evidence that admits there is no evidence is not evidence', () => {
+  it('a driver marked ON_TRACK/CONFIRMED on text saying the figures are "not separately detailed" becomes NO_EVIDENCE; quantified evidence with a caveat stays', async () => {
+    const { normalizeDriverAssessment } = await import('../services/thesis-driver-context.service.js');
+    const ds = [{ name: 'Subsidiary turnaround', materiality: 'HIGH' }, { name: 'Order book', materiality: 'HIGH' }, { name: 'Margins', materiality: 'HIGH' }];
+    const out = normalizeDriverAssessment([
+      { driver: 'Subsidiary turnaround', status: 'ON_TRACK', evidence: 'Consolidated figures reflect subsidiary inclusion, but specific standalone Huron EBITDA figures are not separately detailed in this slide deck excerpt.' },
+      { driver: 'Order book', status: 'CONFIRMED', evidence: 'Order book at Rs. 5,082 Cr; segment-wise split not disclosed.' },
+      { driver: 'Margins', status: 'AT_RISK', evidence: 'Margin commentary was not provided; consolidated margin fell.' }
+    ], ds);
+    expect(out.find(o => o.driver === 'Subsidiary turnaround').status).toBe('NO_EVIDENCE');
+    expect(out.find(o => o.driver === 'Order book').status).toBe('CONFIRMED');
+    expect(out.find(o => o.driver === 'Margins').status).toBe('AT_RISK');   // a risk flag is never erased by this rule
+  });
+});
+
+describe('dropRestatedFigures: bullets that only repeat the verified headline numbers are not shown a second time', () => {
+  const fin = { revenue: 2030.22, patAttributable: 103.94, patConsolidated: 103.94, ebitda: 237.93 };
+  it('removes "Consolidated Revenue: ₹2030.22 Cr" and "Attributable PAT: ₹103.94 Cr" but keeps other facts', async () => {
+    const { dropRestatedFigures } = await import('../services/thesis-digest.service.js');
+    const out = dropRestatedFigures([
+      'Consolidated Revenue: ₹2030.22 Cr',
+      'Attributable PAT (Q2 FY27): ₹103.94 Cr',
+      'Consolidated revenue grew 32.33% YoY to ₹2,030.22 Cr.',
+      'International branch revenues (half year): ₹648.01 Cr',
+      'Order backlog of ₹14,218 Cr, up from ₹12,000 Cr',
+      'Cash and cash equivalents closing balance: ₹607.93 Cr'
+    ], fin);
+    expect(out).toEqual([
+      'International branch revenues (half year): ₹648.01 Cr',
+      'Order backlog of ₹14,218 Cr, up from ₹12,000 Cr',
+      'Cash and cash equivalents closing balance: ₹607.93 Cr'
+    ]);
+  });
+  it('without verified figures nothing is dropped', async () => {
+    const { dropRestatedFigures } = await import('../services/thesis-digest.service.js');
+    expect(dropRestatedFigures(['Consolidated Revenue: ₹2030.22 Cr'], null)).toEqual(['Consolidated Revenue: ₹2030.22 Cr']);
+  });
+  it('a number that merely equals a headline figure inside an unrelated line is kept (needs the revenue/profit/EBITDA label)', async () => {
+    const { dropRestatedFigures } = await import('../services/thesis-digest.service.js');
+    expect(dropRestatedFigures(['Order book stands at 2030.22 Cr'], fin)).toEqual(['Order book stands at 2030.22 Cr']);
+  });
+});

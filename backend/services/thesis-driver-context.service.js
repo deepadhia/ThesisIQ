@@ -106,7 +106,11 @@ For EVERY listed thesis driver return one entry in "thesis_driver_assessment":
     "AT_RISK" (evidence of slippage but the falsification trigger is not met), "BROKEN" (the falsification trigger is
     EXPLICITLY met by facts in this filing), or "NO_EVIDENCE" (the filing does not address this driver).
   • evidence = <=200 characters quoting concrete facts / numbers from THIS filing. For NO_EVIDENCE write "No new evidence in this filing".
-  • NEVER mark BROKEN or CONFIRMED without quoting a figure or statement from the filing. Do NOT reuse the contract's old evidence.`;
+  • NEVER mark BROKEN or CONFIRMED without quoting a figure or statement from the filing. Do NOT reuse the contract's old evidence.
+  • A filing that merely does not detail a driver is NO_EVIDENCE, never ON_TRACK.
+  • If the filing reports a deterioration (a fall in profit, margin or order inflow, a legal or regulatory action) that falls inside what a driver covers, mark that driver AT_RISK even when other facts about it look positive, and quote the deterioration.`;
+
+const ABSENCE_OF_EVIDENCE = /\b(?:not|no|nor|without|neither)\b[^.]{0,50}\b(?:separately\s+)?(?:detail(?:ed|s)?|disclos(?:ed|ure)|provid(?:ed|e)|available|mention(?:ed)?|address(?:ed)?|specif(?:ied|ic)|stat(?:ed|e)|explicit(?:ly)?|quantif(?:ied|y)|break-?down)\b/i;
 
 const VALID_STATUS = new Set(["CONFIRMED", "ON_TRACK", "AT_RISK", "BROKEN", "NO_EVIDENCE"]);
 const STATUS_SEVERITY = { BROKEN: 4, AT_RISK: 3, CONFIRMED: 2, ON_TRACK: 1, NO_EVIDENCE: 0 };
@@ -143,6 +147,12 @@ export function normalizeDriverAssessment(rawAssessments, drivers = []) {
     const hasEvidence = evidence.length >= 12 && !/^no new evidence/i.test(evidence);
     if ((status === "BROKEN" || status === "CONFIRMED") && !hasEvidence) {
       status = status === "BROKEN" ? "AT_RISK" : "ON_TRACK";
+    }
+    // "Specific EBITDA figures are not separately detailed in this deck" is a statement that the filing is SILENT on the driver,
+    // not evidence that it is on track. Only unquantified text is judged so: a figure plus a caveat is real evidence, and a
+    // risk flag (AT_RISK / BROKEN) is never erased by this rule.
+    if ((status === "CONFIRMED" || status === "ON_TRACK") && !/\d/.test(evidence) && ABSENCE_OF_EVIDENCE.test(evidence)) {
+      status = "NO_EVIDENCE";
     }
     if (status === "NO_EVIDENCE") evidence = "No new evidence in this filing";
 

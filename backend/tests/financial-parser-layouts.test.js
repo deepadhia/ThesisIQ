@@ -78,8 +78,9 @@ describe('whole real documents', () => {
     expect(f.revenue).toBeCloseTo(638.94, 2);
     expect(f.revenueYoYGrowthPct).toBeCloseTo(10.52, 1);
     expect(f.revenueQoQGrowthPct).toBeCloseTo(22.74, 1);
-    expect(f.ebitda).toBeCloseTo(167.69, 2);
-    expect(f.ebitdaMarginPct).toBeCloseTo(26.25, 2);
+    // 12,476 PBT + 1,033 finance + 3,260 depreciation = 16,769 lakh, less other income 1,979 lakh = 14,790 lakh
+    expect(f.ebitda).toBeCloseTo(147.90, 2);
+    expect(f.ebitdaMarginPct).toBeCloseTo(23.15, 2);
     expect(f.patConsolidated).toBeCloseTo(96.35, 2);
     expect(f.patYoYGrowthPct).toBeCloseTo(9.84, 1);
   });
@@ -92,8 +93,9 @@ describe('whole real documents', () => {
     expect(f.revenue).toBeCloseTo(1691.43, 2);
     expect(f.revenueYoYGrowthPct).toBeCloseTo(57.93, 1);
     expect(f.revenueQoQGrowthPct).toBeCloseTo(18.13, 1);
-    expect(f.ebitda).toBeCloseTo(356.75, 2);
-    expect(f.ebitdaMarginPct).toBeCloseTo(21.09, 2);
+    // 307.34 + 27.72 + 21.69 = 356.75, less other income 11.79 (the filing's own EBITDA definition subtracts it)
+    expect(f.ebitda).toBeCloseTo(344.96, 2);
+    expect(f.ebitdaMarginPct).toBeCloseTo(20.39, 2);
     expect(f.patConsolidated).toBeCloseTo(232.32, 2);
     expect(f.patYoYGrowthPct).toBeCloseTo(31.51, 1);
   });
@@ -184,5 +186,114 @@ describe('whole real documents', () => {
     const f = extractDeterministicFinancials(good + bad);
     expect(f).not.toBeNull();
     expect(f.revenue).toBeLessThan(50000);
+  });
+});
+
+describe('TRANSRAILL Q2 FY27 (OCR letters inside numbers, header split over two lines, OCI "owners" row): the statement is read for the right period', () => {
+  // Consolidated statement, Rs. crore, columns: Sep-26 | Jun-26 | Sep-25 | H1 Sep-26 | H1 Sep-25. Verified by eye against the PDF:
+  //   revenue 2,030.22 | 1,702.45 | 1,534.25      profit for the period 103.94 | 107.88 | 92.42 ("197.GO" is OCR for 197.60)
+  //   PBT before exceptional 158.09 | 144.01 | 125.02    finance 73.38 | 55.72 | 60.33    depreciation 19.93 | 19.49 | 14.80
+  // The previous parser returned PAT = 14.74 (the OTHER COMPREHENSIVE INCOME "owners" row), period 2025-09-30, EBITDA null.
+  const f = extractDeterministicFinancials(doc('TRANSRAILL_2026-11-03'));
+
+  it('reads the profit for the period (103.94), never the other-comprehensive-income row (14.74)', () => {
+    expect(f.statementScope).toBe('CONSOLIDATED');
+    expect(f.patConsolidated).toBeCloseTo(103.94, 2);
+    expect(f.patAttributable).toBeCloseTo(103.94, 2);
+    expect(f.patYoYGrowthPct).toBeCloseTo(12.47, 1);   // (103.94 - 92.42) / 92.42
+    expect(f.patQoQGrowthPct).toBeCloseTo(-3.65, 1);   // (103.94 - 107.88) / 107.88
+  });
+
+  it('labels the period from the statement heading when the column header is unusable: 2026-09-30, not 2025-09-30', () => {
+    expect(f.quarterEnded).toBe('2026-09-30');
+  });
+
+  it('computes EBITDA when the depreciation label is damaged ("Depreci~tion & amortisation")', () => {
+    expect(f.revenue).toBeCloseTo(2030.22, 2);
+    expect(f.revenueYoYGrowthPct).toBeCloseTo(32.33, 1);
+    // 158.09 + 73.38 + 19.93 - other income 13.47 = 237.93: the company's own "EBITDA Rs. 238 Cr" (press release)
+    expect(f.ebitda).toBeCloseTo(237.93, 2);
+    expect(f.ebitdaMarginPct).toBeCloseTo(11.72, 1);
+    expect(f.ebitdaYoYGrowthPct).toBeCloseTo(27.81, 1); // vs 125.02 + 60.33 + 14.80 - 13.99 = 186.16
+  });
+
+  it('row tokenizer: a letter the OCR put in place of a digit is read as that digit only inside a number', () => {
+    expect(parseRow('Profit for the period 103.94 107.88 92.42 211.82 197.GO', 5).values).toEqual([103.94, 107.88, 92.42, 211.82, 197.60]);
+    expect(parseRow('Profit 156.89 143.69 122.72 300.58 268.BO', 5).values).toEqual([156.89, 143.69, 122.72, 300.58, 268.80]);
+    // words are never numbers
+    expect(parseRow('Owners of the company BO', 1)).toBeNull();
+    expect(parseRow('Note GO', 1)).toBeNull();
+  });
+});
+
+describe('JYOTICNC Q2 FY27 (OCR "ProfiU(Loss)", letter-spaced "Fin a nc e Cos ts", consolidated header printed out of order, year printed "20 26")', () => {
+  // Hand-checked against the PDF. Consolidated, Rs. crore, columns: Q2 FY27 | Q1 FY27 | Q2 FY26 | H1 FY27 | H1 FY26 | FY26
+  //   revenue 602.01 | 508.47 | 507.90     PBT before exceptional 103.72 | 73.41 | 109.05    finance 13.92    depreciation 15.97
+  //   net profit after tax 72.58 | 57.14 | 85.50  (company deck: PAT 72.6 Cr vs 85.5 Cr, -15.1%); standalone PAT 114.89
+  // The consolidated header prints "30-Sep-26 30-Sep-25 31-Mar-26 30-Sep-26 30-Jun-26 30-Sep-25" (not the real column order), so
+  // reading the year-ago column from it would pick the PREVIOUS QUARTER (508.47) as the base.
+  // Before the fix no statement was recognised at all: the filing got no results alert, only a "could not be machine-read" failure.
+  const f = extractDeterministicFinancials(doc('JYOTICNC_2026-11-03'));
+
+  it('recognises the consolidated statement and its revenue growth against the year-ago quarter (507.90), not the previous quarter', () => {
+    expect(f).not.toBeNull();
+    expect(f.statementScope).toBe('CONSOLIDATED');
+    expect(f.revenue).toBeCloseTo(602.01, 2);
+    expect(f.revenueYoYGrowthPct).toBeCloseTo(18.53, 1);
+    expect(f.revenueQoQGrowthPct).toBeCloseTo(18.40, 1);
+  });
+
+  it('reads the consolidated profit after tax: 72.58 Cr, down 15.1% YoY (the decline the investor deck reports)', () => {
+    expect(f.patConsolidated).toBeCloseTo(72.58, 2);
+    expect(f.patYoYGrowthPct).toBeCloseTo(-15.11, 1);
+    expect(f.isYoYDecline).toBe(true);
+    expect(f.patStandalone).toBeCloseTo(114.89, 2);
+  });
+
+  it('labels the period 2026-09-30 and computes EBITDA from PBT + finance + depreciation', () => {
+    expect(f.quarterEnded).toBe('2026-09-30');
+    // 103.72 + 13.92 + 15.97 - other income 2.28 = 131.33: exactly the "EBITA" row the company prints (21.8% margin in its deck)
+    expect(f.ebitda).toBeCloseTo(131.33, 2);
+  });
+});
+
+describe('sanity guard: a profit figure that cannot belong to this statement is withheld, never shown', () => {
+  const stmt = (patRow) => `
+STATEMENT OF CONSOLIDATED UNAUDITED FINANCIAL RESULTS FOR THE QUARTER ENDED SEPTEMBER 30, 2026
+(Rs. in Crores)
+Particulars | Quarter Ended 30-09-2026 | Quarter Ended 30-06-2026 | Quarter Ended 30-09-2025
+Revenue from operations 2,000.00 1,700.00 1,500.00
+Other income 13.00 16.00 14.00
+Total income 2,013.00 1,716.00 1,514.00
+Finance costs 73.00 55.00 60.00
+Depreciation and amortisation 20.00 19.00 15.00
+Total expenses 1,855.00 1,572.00 1,392.00
+Profit before tax 158.00 144.00 122.00
+${patRow}
+`;
+  it('PAT of 14.74 against PBT of 158.00 (9%) is withheld with a reason; growth figures built on it are withheld too', () => {
+    const f = extractDeterministicFinancials(stmt('Profit for the period 14.74 0.61 10.87'));
+    expect(f).not.toBeNull();
+    expect(f.revenue).toBe(2000);
+    expect(f.patConsolidated).toBeNull();
+    expect(f.patAttributable).toBeNull();
+    expect(f.patYoYGrowthPct).toBeNull();
+    expect(f.patRejectedReason).toMatch(/PBT/);
+  });
+  it('a normal PAT / PBT relationship (about 70%) is kept', () => {
+    const f = extractDeterministicFinancials(stmt('Profit for the period 110.00 100.00 90.00'));
+    expect(f.patConsolidated).toBe(110);
+    expect(f.patRejectedReason).toBeUndefined();
+  });
+  it('a tax credit that lifts PAT above PBT is kept (within 1.6x)', () => {
+    const f = extractDeterministicFinancials(stmt('Profit for the period 180.00 150.00 120.00'));
+    expect(f.patConsolidated).toBe(180);
+  });
+});
+
+describe('period label when the column header is garbled and names several dates (HSCL: "Three months ended 30.09.2026 ... Previous three months ended 30 06,2026")', () => {
+  it('is the LATEST period end named in the heading lines (the current quarter), never the previous quarter that is printed nearer to the table', () => {
+    const f = extractDeterministicFinancials(doc('HSCL_2026-10-16'));
+    expect(f.quarterEnded).toBe('2026-09-30');
   });
 });

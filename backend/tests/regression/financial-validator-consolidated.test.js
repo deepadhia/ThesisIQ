@@ -47,9 +47,9 @@ Profit for the period (Net Profit after Tax) 131.25 114.00 97.50
     expect(fin.patAttributable).toBe(131.25);
     expect(fin.patStandalone).toBe(67.5);
 
-    // EBITDA = PBT (175) + Finance (35) + Depreciation (45) = 255
-    expect(fin.ebitda).toBe(255);
-    expect(fin.ebitdaMarginPct).toBe(26.84);
+    // EBITDA = PBT (175) + Finance (35) + Depreciation (45) - Other income (15) = 240: other income is not operating profit
+    expect(fin.ebitda).toBe(240);
+    expect(fin.ebitdaMarginPct).toBe(25.26);   // 240 / 950
 
     // Revenue YoY: (950 - 760) / 760 = +25%
     expect(fin.revenueYoYGrowthPct).toBe(25);
@@ -81,9 +81,9 @@ Profit for the period 4125.00 3675.00 3225.00
     // 4,125 Lakhs / 100 = 41.25 Cr
     expect(fin.patConsolidated).toBe(41.25);
     expect(fin.patStandalone).toBe(41.25);
-    // EBITDA = (5500 + 1000 + 1500) / 100 = 80 Cr
-    expect(fin.ebitda).toBe(80);
-    expect(fin.ebitdaMarginPct).toBe(26.67);
+    // EBITDA = (5500 + 1000 + 1500 - other income 500) / 100 = 75 Cr
+    expect(fin.ebitda).toBe(75);
+    expect(fin.ebitdaMarginPct).toBe(25);   // 75 / 300
   });
 
   it('is not fooled by Page 1 cover letters mentioning Consolidated when only Standalone exists', () => {

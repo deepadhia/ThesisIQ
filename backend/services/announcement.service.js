@@ -380,9 +380,14 @@ export function extractConcallSchedule(text = "", hint = {}, now = new Date()) {
     }
   }
 
-  const links = [...src.matchAll(/https?:\/\/[^\s"'<>)\]]+/gi)].map(m => m[0].replace(/[.,;]+$/, ""))
-    .filter(u => !/nseindia|bseindia|sebi\.gov/i.test(u));
-  const link = links.find(u => /diamondpass|choruscall|zoom|webex|teams|meet\.|webcast|researchbytes|orientcapital|bit\.ly|tinyurl|link/i.test(u)) || links[0] || null;
+  // Only a conferencing / registration link counts: a known provider, or any link written next to "join", "dial-in",
+  // "register" or "webcast". A stray URL elsewhere in the document (a slide's source footnote) is not how to join the call.
+  const links = [...src.matchAll(/https?:\/\/[^\s"'<>)\]]+/gi)].map(m => ({ url: m[0].replace(/[.,;]+$/, ""), idx: m.index }))
+    .filter(l => !/nseindia|bseindia|sebi\.gov/i.test(l.url));
+  const joinWords = /\b(?:join|dial[\s-]?in|register|registration|webcast|webinar|pre-?register)/i;
+  const nearJoinWord = (l) => joinWords.test(src.slice(Math.max(0, l.idx - 80), l.idx));
+  const link = (links.find(l => /diamondpass|choruscall|zoom|webex|teams|meet\.|webcast|researchbytes|orientcapital|bit\.ly|tinyurl|link/i.test(l.url))
+    || links.find(nearJoinWord))?.url || null;
 
   return { date, time, link };
 }

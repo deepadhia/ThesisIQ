@@ -10,7 +10,7 @@
  */
 import { NVIDIA_API_KEY, GROQ_API_KEY, GEMINI_API_KEY } from "../config/env.js";
 import * as env from "../config/env.js";
-import { runLlmPrompt, buildProviders, SEED_MODELS } from "./llm-failover.service.js";
+import { runLlmPrompt, buildProviders, orderForQuality, SEED_MODELS } from "./llm-failover.service.js";
 import { loadRegistry, refreshModelRegistry, needsRefresh } from "./model-discovery.service.js";
 
 const keys = {
@@ -113,11 +113,15 @@ export function hasLlmProvider() {
   return getConfiguredProviders().length > 0;
 }
 
-/** @param {{temperature?: number, maxTotalMs?: number}} [opts] maxTotalMs bounds this logical call across all providers */
-export function runLlm(systemPrompt, userPrompt, { temperature = 0.05, maxTotalMs } = {}) {
+/**
+ * @param {{temperature?: number, maxTotalMs?: number, quality?: boolean}} [opts] maxTotalMs bounds this logical call across all
+ *   providers; quality puts OpenRouter (Grok) first for calls whose answer is the thesis judgement itself
+ */
+export function runLlm(systemPrompt, userPrompt, { temperature = 0.05, maxTotalMs, quality = false } = {}) {
+  const chain = getConfiguredProviders();
   return runLlmPrompt(systemPrompt, userPrompt, {
     temperature,
-    providers: getConfiguredProviders(),
+    providers: quality ? orderForQuality(chain) : chain,
     onPermanentFailure: () => markModelsDirty(),
     ...(maxTotalMs ? { maxTotalMs } : {})
   });

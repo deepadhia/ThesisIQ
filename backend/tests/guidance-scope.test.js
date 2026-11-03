@@ -361,3 +361,28 @@ describeFn('Guidance vs Actual Delivery Invariants', () => {
 
 });
 
+
+describe('scorecard shows only firm, concrete milestones (INOXINDIA 2026-11-03 showed "hopefully, knowing our resources in India and the labor rates...")', () => {
+  const fin = { revenue: 456.48, revenueYoYGrowthPct: 27.43 };
+  const run = (commitments) => reconcileGuidanceVsActual({ commitments, currentQuarter: 'Q2 FY27', currentFinancials: fin });
+
+  it('a hedged remark about capacity is not a milestone', () => {
+    const rec = run([{ statement: 'hopefully, knowing our resources in India and the labor rates and engineering costs we can add capacity', metric: 'Capacity', target_value: '', timeline: 'Q2 FY27', quarter: 'Q1 FY27', status: 'In Progress' }]);
+    expectFn(rec === null || !String(rec.formattedSection).includes('Milestone / Capex')).toBe(true);
+  });
+
+  it('a firm, dated milestone with a figure is still shown, whole and not cut mid-sentence', () => {
+    const rec = run([{ statement: 'Commission the new 10,000 MT plant by Q2 FY27 as planned.', metric: 'Plant Commissioning', target_value: '10,000 MT', timeline: 'Q2 FY27', quarter: 'Q1 FY27', status: 'Achieved' }]);
+    expectFn(rec).not.toBeNull();
+    expectFn(rec.formattedSection).toContain('Milestone / Capex');
+    expectFn(rec.formattedSection).toContain('Commission the new 10,000 MT plant by Q2 FY27 as planned.');
+  });
+
+  it('a long firm milestone is shortened at a word boundary, never mid-word', () => {
+    const long = 'Commission the new 10,000 MT cryogenic tank manufacturing plant in the western region together with the associated testing facility by Q2 FY27 as planned.';
+    const rec = run([{ statement: long, metric: 'Plant Commissioning', target_value: '10,000 MT', timeline: 'Q2 FY27', quarter: 'Q1 FY27', status: 'In Progress' }]);
+    const line = rec.formattedSection.split('\n').find(l => l.includes('Milestone / Capex'));
+    expectFn(line).toMatch(/Commission the new 10,000 MT .* [a-z]+…/);   // ends after a whole word, then the ellipsis
+    expectFn(line).not.toContain('...');
+  });
+});

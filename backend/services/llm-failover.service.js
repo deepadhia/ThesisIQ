@@ -133,6 +133,16 @@ export function buildProviders({ nvidiaKey, groqKey, geminiKey, openrouterKey, r
   return chain;
 }
 
+/**
+ * Chain for calls whose answer IS the product (the thesis verdict and driver judgement): OpenRouter (Grok and the larger open
+ * models) first, the speed-ordered chain after it. A stable partition, so the rest keeps its order and nothing is dropped; when
+ * OpenRouter fails, times out or has no key the call falls through exactly as before.
+ */
+export function orderForQuality(chain = []) {
+  const isOr = (p) => String(p.url).includes("openrouter.ai");
+  return [...chain.filter(isOr), ...chain.filter((p) => !isOr(p))];
+}
+
 /** Deliberately pessimistic (3.2 chars/token): numeric Indian filings tokenise far denser than English prose (~6 chars/token). */
 const estimateTokens = (...texts) => Math.ceil(texts.reduce((n, t) => n + String(t || "").length, 0) / 3.2);
 

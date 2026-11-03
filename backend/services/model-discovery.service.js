@@ -31,7 +31,7 @@ const PROBE_TIMEOUT_MS = 15000;
 /** A model that answers, but slower than this, is dropped: it would hold up every call for its whole timeout. */
 const SLOW_PROBE_MS = 10000;
 const PROBE_CONCURRENCY = 4;
-const KEEP = { groq: 3, gemini: 4, openrouter: 2, nim: 3 };
+const KEEP = { groq: 3, gemini: 4, openrouter: 3, nim: 3 };
 const MIN_PARAMS_B = 15;
 
 /** Names that are never text-chat models for this pipeline (speech, image, embedding, safety, vision, code, multimodal). */
@@ -65,7 +65,8 @@ export function isChatCandidate(kind, id) {
   const name = String(id);
   if (NOISE.test(name)) return false;
   if (kind === "gemini") return GEMINI_FLASH.test(name) || GEMINI_ALIAS.test(name);
-  if (kind === "openrouter") return /llama-3\.3-70b|qwen.*72b|deepseek-chat/i.test(name);
+  // Grok "fast" / "mini" models only: the flagship is too slow for a pipeline whose daemon restarts every 5 minutes.
+  if (kind === "openrouter") return /llama-3\.3-70b|qwen.*72b|deepseek-chat|x-ai\/grok-[\w.-]*(?:fast|mini)/i.test(name);
   const size = paramsB(name);
   if (size !== null && size < MIN_PARAMS_B) return false;
   return true;
@@ -85,9 +86,10 @@ function nimRankKey(id) {
 }
 
 function openrouterRankKey(id) {
-  if (/llama-3\.3-70b/i.test(id)) return 0;
-  if (/qwen.*72b/i.test(id)) return 1;
-  return 2;
+  if (/x-ai\/grok/i.test(id)) return [0, /fast/i.test(id) ? 0 : 1];
+  if (/llama-3\.3-70b/i.test(id)) return [1];
+  if (/qwen.*72b/i.test(id)) return [2];
+  return [3];
 }
 
 function compareKeys(a, b) {

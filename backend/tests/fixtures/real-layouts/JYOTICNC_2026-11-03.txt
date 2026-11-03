@@ -1,0 +1,689 @@
+JYOTI CNC AUTOMATION LIMITED
+CIN: L29221GJ1991PLC014914
+Regd. Off.: G – 506, Lodhika GIDC, Vill.: Metoda,
+Dist.: Rajkot – 360 021. Gujarat India.
+Date: November 03, 2026
+To, To,
+The Department of Corporate Services, The Listing Compliance Dept.
+BSE Limited, Mumbai National Stock Exchange of India Ltd, Mumbai
+BSE Script Code: 544081 NSE Script Symbol: JYOTICNC
+Respected Sir/ Madam,
+Ref.: Our Intimation Dated October 29, 2026, Regarding Convening of Board Meeting.
+SUB: Outcome of Board Meeting.
+Kindly take note that the board of directors of the company had at their meeting held on November
+03, 2026, approved below financial documents and the same has been submitted herewith.
+(I) Standalone Financial Results of the Company for the quarter and half year ended on
+September 30, 2026, as well as Statement of Assets & Liabilities and Cash Flow Statement as
+on date.
+(II) Consolidated Financial Results of the Company and its Subsidiaries for the quarter and half
+year ended on September 30, 2026, as well as Consolidated Statement of Assets & Liabilities
+and Consolidated Cash Flow Statement as on date.
+The Auditor of the company undertook a limited review of above financial results and has issued
+their report thereon. The same has also been submitted herewith.
+The meeting of Board of Directors of the Company commenced at 11:15 A.M. and concluded at 11:55
+A.M.
+Kindly take the same on your records.
+Thanking You,
+For Jyoti CNC Automation Limited
+____________________________
+Maulik B. Gandhi
+Company Secretary and Compliance Officer
+Mem. No.: A23849
+Encl.: [1] Financial Documents Stated as Above.
+[2] Limited Review Reports Issued by Auditor.
+
+-- 1 of 14 --
+
+(A 8,Q/C. ~kk· f3 Wo,.
+I N D I A ~ had en,,/ 00J.,.o ,uda 11 /J
+708/709, Raheja Chambers, Free Press Journal Road , Nariman Point , Mumba i - 400 021.
+Suburb : Bldg. No. B- 1, Office No . 107/108, 1st Floor, Koldongri CHS. ,Parsiwada, Sahar Road ,
+Andheri (East) , Mumbai - 400 099 .
+Email : gkcmumbai@gmail.com • Di al: 35503224
+Independent Auditor's Review Report on unaudited standalone financial results
+of Jyoti CNC Automation Limited for the quarter ended September 30, 2026 and
+year to date results for the period from April 1 2026 to September 30, 2026
+pursuant to Regulation 33 of Securities and Exchange Board of India (Listing
+Obligations and Disclosure Requirements) Regulations, 2015, as amended
+To
+The Board of Directors of
+Jyoti CNC Automation Limited
+1. We have reviewed the accompanying Statement of unaudited standalone financial
+results of Jyoti CNC Automation Limited (hereinafter referred to as "the Company") for
+the quarter ended 30 September 2026 and year to date results for the period from April
+1, 2026 to September 30 , 2026 ("the Statement") being submitted by the company
+pursuant to requirements of Regulation 33 of the SEBI (Li sting Obligations and
+Disclosures Requirements) Regulations, 2015, as amended ('the Listing Regulations') .
+2. The preparation of the statement in accordance with the recognition and measurement
+principles laid down in Indian Accounting Standards 34,(lnd AS 34) "Interim Financial
+Reporting" prescribed under Section 133 of the Companies Act, 2013 read with relevant
+rules issued thereunder, as amended and other accounting principles generally
+accepted in India, read with circular is the responsibility of the Com pa ny's management
+and has been approved by the Board of the Company. Our respon sibility is to express
+a conclusion on the Statement based on our review.
+3. We conducted our review of the Statement in accordance with the Standard on Review
+Engagements (SRE) 2410 "Review of Interim Financial Information Performed by the
+Independent Auditor of the Entity", issued by the Institute of Ch a rt e red Accountants of
+India. A review of interim financial information consists of maki ng inquiries, primarily of
+persons responsible for financial and accounting matters, an d app ly i ng an alytical and
+other review procedures. A review is substantially less in scope than an audit conducted
+in accordance with Standards on Auditing and consequently does not enable us to
+obtain assurance that we would become aware of all significant matters that might be
+identified in an audit and accordingly, we do not express an audit opinion.
+4. Attention is invited to Note 4 of the accompanying Statement of Una udited Standalone
+Financial Results for the Quarter and Half Year Ended September 30, 2026 , regarding
+non provision of impairment of investment in subsidiary .
+Our opinion is not qualified in respect of this matter.
+5. Attention is further i'nvited to Note 5 of the accompanying Statement of Unaudited
+Standalone Financial Results for the Quarter and Half Year Ended Se ptember 30 , 2026
+regarding the ongoing judicial investigation in the case of the step down subsid iary viz.
+Huron Graffenstaden SAS and consequential restrictions im
+Our opinion is not qualified in respect of this matter.
+
+-- 2 of 14 --
+
+6. Based on our review conducted as above, nothing has come to our attention that causes
+us to believe that the Statement has not been prepared in all material respects in
+accordance with the recognition and measurement principles laid down in the aforesaid
+Indian Accounting Standard and other accounting principles generally accepted in India
+and has not disclosed the information required to be disclosed in terms of Regulation
+33 of the Listing Regulations, 2015 including the manner in which it is to be disclosed,
+or that it contains any material misstatement.
+Place: Rajkot
+Date: 03 rd November,2026
+For G.K. Choksi & Co.
+Chartered Accountants
+Firm Registration No.: 125442W
+~(Himanshu C. Vora)
+Partner
+Membership No .: 103203
+UDIN: 261032.03f ({)WU(,::243 61-
+
+-- 3 of 14 --
+
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+14
+JYOTI
+JYOTI CNC AUTOMATION LIMITED
+CIN : L29221GJ1991PLC014914
+Plot No . G-506, Lodhika GI DC, Viii. Metoda, Dist. Rajkot-360 021, India
+Tel.: +91-2827-235100, 235101, Fax: +91-2827-235141
+E-ma il : info@jyoti.co.in Web : jyoti.co.in
+STATEMENT OF UNAUDITED STANDALONE FINANCIAL RESULTS FOR THE QUARTER AND HALF YEAR ENDED SEPTEMBER 30, 2026
+Amount fin Cr
+Standa lone
+Particulars Quarter ended Half Year Ended Year Ended
+30-Sep-26 30 -Jun-26 30-Sep-25 30 -Sep-26 3 0-S ep -2 5 31-Mar-26
+/Un audited\ /Unaudited\ !Un audited\ !Unaudit e d\ !Unaudit ed \ !Audited)
+Revenue from operations 587 .53 509.06 448.22 1,096.59 820 .5 4 1,949.01
+Other In co me 3.90 3.84 9. 40 7.74 23.94 54.18
+Total Revenue 591.43 512.91 457.62 1104.33 844.48 2003.19
+Expenses
+a} Cost of material consumed 339.77 260.52 196.59 600.29 369.38 912 .26
+b} Changes in inventories of fini shed goods and
+work-in progress (77.03) (20.19} 19.76 (97.22) 31.22 23.22
+c) Employees Cost 76 .3 8 57.79 60.87 134.17 105.17 211 .51
+d) Fin a nc e Cos ts 8.80 20.01 8.53 28.81 15.38 53.47
+e} Depreciation and Amortisation Expenses 12 .93 12.06 8.94 24 .9 9 19.87 41 .93
+O Other Expenditure 84.56 72 .2 8 60.48 156.84 105 .6 5 237.81
+Total expenses 445.41 402 .47 355.17 847.88 646 .6 7 1 480.20
+ProfiU(Loss) before exceptional/ Extraordinary items and
+Taxf3-4I 146.02 110.43 102.45 256.45 197.81 522.99
+Exceptional/ Extraordinarv Items . .
+ProfiU(Loss ) before Tax (5-6) 146.02 110.43 102.45 256.45 197.81 522.99
+EBITA 163. 85 138.65 110.52 302.52 209 .12 564.21
+Tax Expense
+Current Tax 28.66 18.80 23.35 47.46 45 .3 8 122.82
+Deferred Tax 2.47 4.16 0. 16 6.63 1.37 8.42
+Tax Adiustment for earlier vears 0 .5 0
+Total Tax ExPenses 31 .13 22.96 23 . 51 54.09 46.75 131 .74
+Net ProfiU(Loss) After Tax (7-8\ 114.89 87.47 78.94 202.36 151 .06 391.25
+Other comprehensive In come
+Item s th at wi ll not be reclassified s ub sequen tly to profit or loss
+(Net of Tax} (1.78) (0.69) (3.67) (2.47) (3.89) (2 .8 1)
+Items th at w ill be re cla ssi fi ed to profit or loss
+Total Comorehensive Income/ (Lo ss ) for th e peri od 11 .78\ I0.691 /3.67 (2.47 13 .89 (2 .81)
+Total Comprehensive Incom e for the oeriod after Tax (9+10) 113.11 86.78 75 .27 199.89 147.17 388.44
+Paid- up Equity Share Capital {Face value of, 21- each} 45.48 45.48 45.48 45.48 45.48 45.48
+Other Equity 2,408.64
+Earnings per Share (Not Annualised for all Quarters)
+Basic (inf) 5.05 3.85 3.47 8 .9 0 6.64 17 . 21
+Dilut ed (in f ) 5.05 3. 85 3.47 8.90 6.64 17.21
+
+-- 4 of 14 --
+
+JYCITI
+JYOTI CNC AUTOMATION LIMITED
+CIN: L29221GJ1991PLC014914
+Plot No . G-506, Lodhika GIDC, Viii . Metoda, Dist. Rajkot -3 60 021, India
+Tel. : +91-2827-235100, 235101, Fax: +91-2827-235141
+E-mail : info@jyoti.co.in Web : jyoti.co.in
+NOTES OF STANDALONE FINANCIAL RESULTS FOR THE QUARTER AND HALF YEAR
+ENDED ON SEPTEMBER 30, 2026
+1 The Audit Committee has reviewed, and the Board of Directors has approved the above results and its
+release at their respective meetings held on November 03, 2026. The St atutory Auditors of the
+Company have carried out a limited review with unmodified opinion on the above results.
+2 These financial results have been prepared in accordance with Indian Account i ng Standards ('Ind AS')
+prescribed under Section 133 of the Companies Act.2013 and other accounting principles generally
+accepted in India and in terms of Regulation 33 of the SEBI (Listing Obli ga tions and Disclosure
+Requirements) Regulations, 2015.
+3 The figures for the quarter ended on March 31, 2026 are balancing figur es between audited figures in
+respect of full financial year and the year-to-date figures till the third quarter of respective financial
+year which were subject to limited review.
+4 The Company has made investment over the years in its subsidiary which in turn was further invested
+in its operating Step-Down Subsidiary. The company also has certain oth er receivables from the
+subsidiary and its step-down subsidiary. This subsidiary, including step down subsidiary, is making
+losses over certain years which has resulted in the erosion of net worth of company's subsidiary. The
+Company's management, in view of the expected recovery in near future of the business of the
+operating step -down subsidiary and in view of the strategic nature of investm en t in subsidiary is of the
+opinion that no impairment is warranted.
+5 Based on suspicion of exporting certain machines with dual-use technology in violation of Europ ean
+Union laws, Investigation Agencies in France has initiated a Judicial Investigation against Huron
+Graffenstanden SAS and certain of its employees. The Investigations is still go ing on and had taken
+certain restrictive interim measures.
+As on the date of this result, the matter remains at the investigation sta ge , with no significant
+developments having taken place and the investigation has not yet culminated in any proceedings
+before a competent court of law. The Group has obtained appropriate le ga l advice and guidanc e in the
+matter and is evaluating the course of further action in consultation with its le ga l advisors.
+6 The Company's business falls within single business segment of Mac hin e Tool Industry. Hence,
+disclosures under Ind AS 108- Operating Segments are not reported separately.
+7 The figures for previous periods are reclassified, regrouped and rearranged wherever necessary so as
+to make them comparable with current period's figures.
+8 The Aforesaid Financial Results are available on website of BSE Limit ed (www.bseindia.com),
+National Stock Exchange of India Limited (www.nseindia.com) and on th e Company's Web site
+(https://jyoti .co. i n/i nvestors/fi na ncials-reports-a nd-returns/) .
+Place: Metoda
+Dated: November 03, 2026
+Fo;J~{~tomat;on Um aed
+Parakramsinh G. Jadeja
+Chairman & Managing Director
+DIN No: 00125050
+
+-- 5 of 14 --
+
+JYDTI
+JYOTI CNC AUTOMATION LIMITED
+CIN : L29221GJ1991PLC014914
+Plot No. G-506, Lodhika GIDC, Viii. Metoda, Dist. Rajkot-360 021, India
+Tel.: +91-2827-235100, 235101, Fax: +91-2827-235141
+E-mail : info@jyoti.co.in Web : jyoti.co.in
+STANDALONE STATEMENT OF ASSETS AND LIABILITIES
+Amount~ in Cr
+As at As at
+Particulars September 30 2026 March 31 2026
+(Unaudited) (Audited)
+ASSETS
+Non-current assets
+a. Property , plant and equipment 654.32 503.56
+b. Right-of-use assets 2.76 3. 10
+C. Capital work -i n-progress 67.27 89.20
+d. Intangible Asset under Dev elo pm ent 29 .28 25 .65
+e. Other int angible assets 26 .62 15 .16
+f. Financial asse ts
+i. Inv estmen ts 357.84 357.35
+ii . Other Finacial Asset 5.83 12.68
+i. Other non-current assets 270.50 247.38
+Total non-current assets 1,414.42 1,254 .08
+Current Assets
+a. Inventori es 1,245.90 1,025 .68
+b. Finan cial asse ts
+i. Trade recei vables 505.78 553.38
+ii. Cash and cash equivalents 7.36 22.73
+iii. Bank balances other than (ii) above 91.3 9 84.25
+iv . Loans 201 .04 165.71
+v. Other financial assets 59602 560 .03
+c. Oth er current assets 76.63 62 .22
+Current Tax Asset (Net of Provision) 0.11 0.44
+Total current assets 2,724.23 2,474.44
+Total assets 4,138.65 3,728.52
+EQUITY AND LIABILITIES
+Equity
+a. Equity Share Capital 45.48 45.48
+b. Other equity 2,608.53 2,408.64
+Total equity 2,654 .01 2,454 .12
+Liabilities
+Non-current liabilities
+a. Financial liabi lities
+i. Non Current Borrowing s 454 .22 322 .25
+ii. Lea se Li ab ilities 2.29 2.56
+b. Non Current Provisions 28.66 22.21
+c. Deferr ed Tax Liabilities (Net) 28.00 22. 19
+Total non-current liabilities 513 .17 369.21
+Current liabilities
+a. Finan cial liabilities
+i. Current Borrowing 252.84 267.10
+ii. Lease Li abi lities 0.51 0.48
+iii. Trade payables
+a. Total outstanding dues of micro enterprises and small enterprises* 12.36 5.72
+b. Total outstanding dues oth er than (iii)(a) above 516.47 483 .23
+iv. Other fianancial liabiliti es 14.2 5 11.57
+b. Other cu rr en t liabilites 138.06 111 .65
+c. Provisions 4.66 3.63
+Current Ta x Liability (Net of Provision) 32.32 21 .81
+Total current liabilities 971 .47 905 .19
+Total liabilities 1,484 .64 1,274.40
+Total equity and liabilities O~~'TION I. 4,138 .65 3,728 .52
+§~~ 1lt' ~
+lu ff',
+,~\
+•'
+
+-- 6 of 14 --
+
+.JYCITI
+JYOTI CNC AUTOMATION LIMITED
+CIN : L29221GJ1991PLC014914
+Plot No. G-506, Lodhika GIDC , Viii. Metoda , Dist. Rajkot-360 021 , India
+Tel. : +91-2827-235100, 235101 , Fax: +91 -2827-2 351 41
+E-mail : info@jyoti.co.in Web : jyoti.co.in
+STANDALONE STATEMENT OF CASH FLOWS
+Amount f in Cr
+For the period ended For the period ended
+Particulars Sep tember 30 2026 September 30 2025
+(Unadited) (Unadited)
+Cash flow from /(used in) operating activities
+Profit before ta x 256 .45 19 7 .81
+Adjustment for:
+Depreciation and Amortisation Expenses 24.99 19.87
+Gain on fair va lue of Investment through P&L (0.49) -0.23
+Interest & Commission Income (7.17) (5.33)
+Finance Cost 28. 81 15.38
+Provision for Expected Credit Lo ss 0 .2 8 6. 11
+Provisi on for Warranty (0.45) 0.89
+Provision for Gratuity & Leave Expense 4.35 2.48
+Povision for lm pairement -
+Unrealised Forex 0.39 (17.69)
+Unwinding Interest Income (0.09) (0 .0 8)
+Operating Profit before changes in current & non current
+liabilities & assets 307 .07 219.21
+Movement in working capital :
+lncrease/(decrease) in current f3. nc:m current liabilities 69 .46 (117.14)
+(lncrease)/decrease in current & non current assets 3. 09 (21 .87)
+Change in Inventory (220.22) (39.12)
+Cash generated in operations 159.40 41.08
+Direct ta xes pa id (net of refunds) (37. 29) (30. 62)
+Cash generated in operations (A) 122.11 10.46
+Cash flow from/(used) investing activities
+Purchase of Property, Plant & Equipment (Including Capital Advance) (184.84) (108 .3 9)
+Movement in Deposit with Banks and Others (7.14) (5 .6 4)
+Sale/ (Purchase) of Investments (Net) - (13.39)
+Sa le of Ass et -
+Interest & Commission Receiv ed 0.69 2. 93
+Cash generated from /(used) in investing activities (B) (1 91.29) (124.49)
+Cash flow from/(used in) financing activities
+Increase/ (Decrease) in Non Current Borrowings 131.70 157.62
+Increase/ (Decrease) in Current Borrowings (13 .7 5) 40.46
+Increase in Share Capital (Including Premium) -
+Pa yment of Acutua l Rent fo r Right of Use Asset -
+Payment of Processing Fees for Te rm Loan
+Loan Given (35.33) (18 .75)
+Finance Cost paid (28.81) (15.20)
+Cash used in financing activities (C) 53 .81 164 .14
+Net increase /( decrease) in cash and cash equivalents (A+B+C) (15.37) 50.11
+Add : Cash and cas h equ ivalents at the beg inning of the year 22.73 5.21
+Cash and cash equ iva lents at th e e nd of the year 7.3b 55.32
+
+-- 7 of 14 --
+
+(A &: 0/C. ~wk· fj ~-
+I N D I A Yflia4(' 1'NI n( /, ,r•r1111daNl.1
+708/709, Raheja Chambers, Free Press Journal Road, Nariman Point, Mumbai - 400 021.
+Suburb : Bldg. No. 8-1, Office No. 107/108, 1st Floor, Koldongri CHS . ,Parsiwada, Sahar Road,
+Andheri (East). Mumbai - 400 099.
+Email: gkcmumbai@gmail.com • Dial: 35503224
+Independent Auditor's Review Report on unaudited consolidated financial
+results of Jyoti CNC Automation Limited for the quarter ended September 30
+2026 and year to date results for the period from April 1 2026 to September 30
+2026 pursuant to Regulation 33 of Securities and Exchange Board of India
+(Listing Obligations and Disclosure Requirements) Regulations, 2015, as
+amended
+To
+The Board of Directors of
+Jyoti CNC Automation Limited
+1. We have reviewed the accompanying Statement of Consolidated unaudited financial
+results of Jyoti CNC Automation Limited ("the Parent") and its subsidiaries (the
+parent and subsidiaries together known as "the Group"), for the quarter ended
+September 30, 2026 and year to date results for the period from April 1, 2026 to
+September 30, 2026 ("the Statement"), being submitted by the Parent pursuant to the
+requirements of Regulation 33 of the Securities and Exchange Board of India (Listing
+Obligations and Disclosure Requirements) Regulations, 2015, as amended ("Listing
+Regulations") .
+2. The preparation of the statement in accordance with the recognition a nd measurement
+principles laid down in Indian Accounting Standards 34, (Ind AS 34) "Interim Financial
+Reporting" prescribed under Section 133 of the Companies Act, 2013 read with
+relevant rules issued thereunder, as amended and other accounting principles
+generally accepted in India, read with circular is the responsibility of the Parent's
+Management and has been approved by the Parent's Board of Directors. Our
+responsibility is to express a conclusion on the Statement based on our review.
+3. We conducted our review of the Statement in accordance with the Sta ndard on Review
+Engagements (SRE) 2410 "Review of Interim Financial Information Performed by the
+Independent Auditor of the Entity", issued by the Institute of Chartered Accountants of
+India. A review of interim financial information consists of making inquiries, primarily
+of persons responsible for financial and accounting maters, and applying analytical
+and other review procedures, A review is substantially less in scope than an audit
+conducted in accordance with Standards on Auditing and consequently does not
+enable us to obtain assurance that we would become aware of all significant matters
+that might be identified in an audit. Accordingly, we do not express an audit opinion .
+We also performed procedures in accordance with the circular issued by the SEBI
+under Regulation 33(8) of the SEBI (Listing Obligations and Disclosure Requirements)
+Regulations, 2015, as amended , to the extent applicable .
+
+-- 8 of 14 --
+
+4. The Statement includes the results of the following entities:
+Jyoti SAS Subsidiary
+Huron Graffenstaden SAS (Huron Step Down Subsidiary
+France)
+Huron Frasmaschinen Gmbh (Huron Step Down Subsidiary
+GmbH)
+Huron Canada INC (Huron Canada) Step Down Subsidiary
+Huron Makina Servis Ve Di~ Ticaret Step Down Subsidiary
+Limited Sirketi (Huron Turkey)
+Huron Shanghai Limited (China) Step Down Subsidiary (share capital
+subscribed on June 29, 2026)
+5. Based on our review conducted and procedures performed as stated in paragraph 3
+above, nothing has come to our attention that causes us to believe that the
+accompanying statement, prepared in accordance with the recognition and
+measurement principles laid down in the aforesaid Indian Accounting Standard and
+other accounting principles generally accepted in India, has not disclosed the
+information required to be disclosed in terms of Regulation 33 of the SEBI (Listing
+Obligations and Disclosure Requirements) Regulations, 2015, as amended , including
+the manner in which it is to be disclosed, or that it contains any material misstatement.
+6. Attention is further invited to Note 5 of the accompanying Statement of Unaudited
+Consolidated Financial Results for the Quarter and Half Year Ended Septem ber 30 ,
+2026 regarding the ongoing judicial investigation in the case of the step-down subsidiary
+viz. Huron Graffenstaden S.A.S and consequential restrictions imposed.
+Our opinion is not qualified in respect of this matter.
+7. The subsidiary including step down subsidiaries located outside Ind ia whose inte rim
+financial information has been prepared in accordance with the a cc ounting principles
+generally accepted in their respective country and which has been reviewed by other
+auditor and independent report of the sam~ is issued. An independent chartered
+accountant has converted the said interim financial information of such subsidiary and
+its step-down subsidiaries located outside India to accounti ng principles generally
+accepted in India and issued a review report on the same . Our co nclusion on the
+Statement, in so far as it relates to the interim financial information of the subsidiaries,
+located outside India is based on the reports of other auditor and the Independent
+Chartered Accountant .as referred above. Our conclusion is not modified in respect of
+the above matter.
+The accompanying Statement includes the interim financial resu lts and other financial
+information in respect of subsidiaries and step-down subsidiaries who se un audited
+interim financial results/statements and other financial information re flect Group's Share
+of Total Assets of ~ 851.03 crores as at September 30, 2026, Group's share of total
+
+-- 9 of 14 --
+
+revenues oft 43.77 crores and Rs. 75 .98 crores, Group's share of total net profit/ (loss)
+after tax of t(42.92) crores and ~(72 .99) crores, Group's share of total comprehensive
+profit/(loss) of t (42.99) crores and ~(72.99) crores, for the quarter ended September
+30,2026 and for the period from April 1,2026 to September 30,2026 , respectively , and
+net cash outflow of ~ 10.81 crores for the period from April 1,2026 to September
+30,2026, as considered in the Statement which have been reviewed by their respective
+auditors .
+The independent auditors report on interim financial results/statements and other
+financial information of these entities referred to above have been furnished to us by the
+Management and our conclusion on the statement, in so far as it relates to the amounts
+and disclosures in respect of these subsidiaries (including step down subsidiar ie s) is
+based solely on the report of such auditors and procedures perform ed by us as stated
+above.
+Our conclusion on the Statement is not modified in respect of the above matter.
+Place: Rajkot
+Date: 3 rd November, 2026
+For G.K. Choksi & C o.
+Chartered Accou nta nts
+Firm Registration No.: 125442W
+( • anshu C. Vora)
+Partner
+Membership No.: 103203
+UDIN: 26103203C YAR R01855
+
+-- 10 of 14 --
+
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+14
+JYOTI
+JYOTI CNC AUTOMATION LIMITED
+GIN: L29221GJ1991PLC014914
+Plot No. G-506, Lodhika GIDC, Viii. Meloda, Dist. Rajkot-360 021, India
+Tel. : +91 -2827-235100, 235101 , Fax: +91-2827-235141
+E-mail : info@jyoti.co.in Web : jyoti.co.in
+STATEMENT OF UNAUDITED CONSOLIDATED FINANCIAL RESULTS FOR THE QUARTER AND HALF YEAR ENDED SEPTEMBER 30 , 20 26
+AmounHinCr
+Consolidated
+Quarter ended Half Year Ended Year Ended
+Particulars 30-Sep-26 30-Sep-25 31-Mar- 26 30-Sep-26 30-Jun-26 30-Sep-25
+/Unauditedl /Unauditedl /Unauditedl /Unaudit ed) /Unaudited! /Audited\
+Revenue from operations 602. 01 508.47 507.90 1,11 0.48 918.07 2,093.1 3
+Other Income 2.28 3.98 9.13 6.26 29.63 60.48
+Total Revenue 604.29 512.45 517.03 1,116.74 947.70 2 153.61
+Expenses
+a) Cost of material consum ed 354.78 250 .53 217.08 605.31 386.89 941.45
+b) Changes in inventories offini shed goods and
+work- in progress (97.82) (37.89) 6.36 (135. 71) 17.20 (2 .16)
+c) Employees Cost 106.74 9 3. 27 86.45 200.01 1 58 .95 330.02
+d) Finance Costs 13.92 24.34 14.19 38 .2 6 26 .37 69.84
+e) Depreciation and Amortisation Expen se s 15.97 1 5. 06 10.47 31.03 22 .72 50 .2 0
+0 Other Exoenditure 106.98 9 3. 73 73.43 200.71 130.24 297.07
+Total exoenses 500 .57 439 .04 407 , 98 939.61 742. 37 1 686.42
+ProfiU(Loss) before exceptional/ Extraordinary items and
+Tax/3-41 103.72 73.41 109.05 177. 13 205 .3 3 467 .19
+Exceptional I Extraordinary Items
+• Bad De bt s
+- Loss on sa le of long temn in vestments (ne t)
+- Provision for diminution in th e value of the investments
+ProfiU(Loss) before Tax (5-6) 103.72 73.41 109.05 177.13 205 .33 467.19
+EBITA 131 .33 108.83 124. 58 2 40 .16 224.79 526 .75
+Tax Expense
+Current Tax 28.66 18.80 23 .35 47.46 45.38 122.82
+Deferred Tax 2.48 ( 2. 53) 0 .20 (0.05) 3.03 7 .8 7
+Tax Adiustm ent for earlier ve ars . . 0.50
+Total Tax Expenses 31 .14 16.27 23.55 47.41 48 .41 131 .19
+Net ProfiU(Loss) After Tax (7-8) 72 . 58 57 .14 85.50 129. 72 156 ,9 2 336.00
+Other comp re hensive Income
+Items that will not be reclassified subse qu ently to profit or loss
+(Net of Tax) 7.79 (0 .69)
+Items that will be reclassified to profit or loss
+(3.67) 7. 10 (3.89) (20.8 2)
+Total Comorehensive Income //Loss! for the period 7.79 (0 ,6 9 /3.67 7.10 (3 .89) (20.82)
+Total Comprehensive Income for the period after Tax /9+1 0l 80.37 56 .4 5 81.83 136.82 153.03 315.18
+Paid-up Equity Share Capital (Face va lu e o/ f 2/- each) 45.48 45.48 45 .4 8 45.48 45.48 45.48
+Other Equity
+Earnings per Share (Not Annuali se d for a ll Quarte rs) 1,955.85
+Basic (inf) 3.19 2.51 3. 76 5.70 6. 90 14,78
+Diluted (in f ) 3.19 2. 51 3.76 5. 70 6. 90 14.78
+
+-- 11 of 14 --
+
+JYCITI
+JYOTI CNC AUTOMATION LIMITED
+CIN : L29221GJ1991PLC014914
+Plot No. G-506, Lodhika GIDC, Viii. Metoda, Dist. Rajkot-360 021, India
+Tel.: +91-2827-235100, 235101 , Fax: +91-2827-235141
+E-mail : info@jyoti.co.in Web : jyoti.co.in
+NOTES OF CONSOLIDATED FINANCIAL RESULTS FOR THE QUARTER AND HALF YEAR
+ENDED ON SEPTEMBER 30, 2026
+1 Based on the recommendation of the Audit Committee, the above con solidated financial results are
+for the quarter/ half year ended on September 30, 2026, of Jyoti CNC Auto m ation Limited and its
+Subsidiaries have been approved by the Board of Directors of the Company at their meetings held on
+November 03, 2026. The said financial results were subject to limited review by statutory auditor of
+the company, and the statutory auditor of the company have issued an unmodified opinion thereon.
+2 The consolidated financial results include the financial results of Jyoti CNC Automation Limited
+('Parent Company') and the financial results of its subsidiary and step-down subsidiaries namely Jyoti
+SAS (France), Huron Graffenstaden SAS (Huron France), Huron Frasm aschin en Gmbh (Huron GmbH),
+Huron Canada I NC (Huron Canada), Huron Makina Servis Ve Di~ Ticaret Limited ~irketi (Huron Turl <ey)
+and Huron Shanghai Limited (Huron China) (together called as the "group').
+3 These financial results have been prepared in accordance with Indian Accounting Standards ('Ind AS')
+prescribed under Section 133 of the Companies Act.2013 and other accounting principles generally
+accepted in India and in terms of Regulation 33 of the SEBI (Listin g Obli ga tions and Disclosure
+Requirements) Regulations, 2015 .
+4 The Figures for the quarter ended on March 31, 2026 are balanc i ng figures between audited figures in
+respect of full financial year and the year-to-date figures till the third quarter of respective financial
+year which were subject to limited review.
+5 Based on suspicion of exporting certain machines with dual-use technology in violation of European
+Union laws, Investigation Agencies in France has initiated a Judicial Invest igation against Huron
+Graffenstanden SAS and certain of its employees. The Investigations is still going on and had taken
+certain restrictive interim measures.
+As on the date of this result, the matter remains at the investigation stage, with no significant
+developments having taken place and the investigation has not yet culmin ated in any proceedings
+before a competent court of law. The Group has obtained appropriate l ega l advic e and guidance in the
+matter and is eva luating the course of further action in consultat ion witl1 its l ega l advisors .
+6 The Group's business falls within single business segment of Machine Tool Industry. Hence,
+disclosures under Ind AS 108- Operating Segments are not reported separately.
+7 The figures for previous periods are reclassified, regrouped and rearran ged wh erever necessary so as
+to make them comparable with current period's figures.
+8 The Aforesaid Financial Results are available on website of BSE Limited (www.bseindia .com),
+National Stock Exchange of India Limited (www.nseindia.com) and on th e Company's Website
+(https ://jyoti .co. i n/i nvesto rs/financials-reports-and-returns/).
+Place: Rajkot
+Dated: November 03, 2026
+For, Jyoti CNC Automation Limited
+.Jfff G. Jadeja
+Chairman & Managing Director
+DIN No: 00125050
+
+-- 12 of 14 --
+
+JYOTI
+JYOTI CI\IC AUTDMATIDI\I LIMITED
+CIN : L29221GJ1991PLC014914
+Plot No . G-506, Lodhika GIDC, Viii. Metoda, Dist. Rajkot-360 021, India
+Tel. : +91 -2827-235100, 235101 , Fa x: +91 -2827- 235141
+E-mail : info@jyoti.co.in Web : jyot i. co .in
+CONSOLIDATED STATEMENT OF ASSETS & LIABILITIES
+Amount f in Cr
+As at As at
+Particulars September 30 2026 March 31 2026
+(Unaudited) (Audited)
+ASSETS
+Non -current assets
+a. Prop erty, plant and eq uipm ent 837.75 690.41
+b. Right -of-use assets 2.76 3.10
+C. Capital work-in-progress 67.27 89.30
+d. Intangible Asset under De ve lopment 29.28 25. 65
+e. Other int angibl e assets 38. 01 26.84
+f. Financial assets
+i. Investments 16 .23 15.75
+ii. Other Finacial Asset 6. 79 13.65
+g. Other non-current assets 115 .87 92.76
+h. Deferred Tax Asset (Net) 0.17 -
+Total non-current assets 1,114 .13 957.46
+Current Assets
+a. Inventories 1,4 40 .52 1, 165 .97
+b. Financial assets
+i. Tr ade receivables 506 .00 599.10
+ii. Cash and cash equivalents 26.69 52. 87
+iii. Bank balances other than (ii) above 91.3 9 84.25
+iv. Loans 5.43 6.13
+v. Other financi al assets 64 5 50 62 4.38
+c. Oth er current asset s 150 .5 6 124 .73
+Current Tax Asset 0.1 1 0. 44
+Total current assets 2,866.20 2,657 .87
+Total assets 3,980 .33 3,615.33
+EQUITY AND LIABILITIES
+Equity
+a. Equity Share Capital 45.4 8 45.48
+b. Other equity 2,092.67 1,95 5.85
+Total equity 2,138 .15 2,001.33
+Liabilities
+Non-current liabilities
+a. Financial liabilities
+i. Non Cur rent Borrowings 511 .92 41 0.23
+ii. Le ase Liabilities 2.29 2.5 6
+b. Non Curre nt Provisions 28.66 22.21
+c. Deferred Tax Liabilities (Net) 0.62
+Total non-current liabilities 542 .87 435.62
+Current liabilities
+a. Financial li abi liti es
+i. Current Borrowing 4310 5 439.48
+ii. Lease Li abilities 0.53 0.4 8
+iii. Trade payables
+a. Total outstanding dues of mi cro enterprises and small enterprises 12.36 5.72
+b. Total outstanding dues other than (ii)(a) above 554.58 504 .04
+iv . Other fianancial liabiliti es 25.95 11.57
+b. Other current li abilites 237 .87 19165
+c. Provisi ons 4.66 3.63
+Current Tax Liability 32.3 1 21.8 1
+Total current liabilities 1,299.31 1,178 .38
+Total liabilities 1,842.18 1,614.00
+Total equity and liabilities 3,980.33 3,615.33
+~~~ -'It~
+~~~!~ ~Ci - it
+'~~ ' . ~-t'. ~~
+,.,[_--\lM~,o
+
+-- 13 of 14 --
+
+JYOTI
+JYOTI CNC AUTOMATION LIMITED
+CIN : L29221GJ19 91 PLC01 4914
+Pl ot N o. G-5 06 , Lodhika GIDC, Viii. Metod a, Di st. Rajkot-360 021 , In dia
+Te l. : +91 -2827-235100, 235101 , Fax: +9 1-2 827-23 5141
+E-ma il : info @jyoti.co .i n Web : jyoti.co.in
+CONSOLIDATED STATEMENT OF CASH FLOWS
+Amount f in Cr
+For the period ended For the period ended
+Particulars September 30 2026 September 30 2025
+fUnadited\ IUnaditedl
+Cash flow from/(used in) operating activities
+Profit before ta x 177. 13 205 .33
+Adjustment for:
+Depreciation and Amortisation Expenses 31.03 22.7 2
+Gain on fair value of Investment th ro ugh P&L (0.49) (0 .2 4)
+Interest & Commission Income (2 .91 ) (4. 85)
+Finance Cost 38.26 26.37
+Expected Credit Loss 0 .2 8 3.61
+Warranty (0.45) 0.89
+Gratuity & Leave 4.35 2.48
+Unrea lis ed Forex 10.52 ( 28 .34 )
+Unwinding Interest Income (0.09 I0.08)
+Operating Profit Before changes in Operating Asset & Liabilities 257.64 227.89
+Movement in working capital:
+lncrease/(d ecre a se) in current & non current liabilities 118.08 (9 1.67)
+(lncrease)/decrease in current & non current as se ts 47.78 (1 0.73)
+Change in Inventory (274.55 /81 .72)
+Cash generated in operations 148.98 43 .77
+Direct taxes pa id (net of refund s) (3 7. 29 ) (30 .62)
+Cash generated in operations before exceptional item 111 . 69 13.15
+Cash generated in operations (A) 11 1. 69 13.1 5
+Cash flow from/(used) Investing activities
+Purchase of Property, Pl a nt & Equipment {Including Capital Advance) (187.06) (134 .7 7)
+Movement in Deposit with Ban ks a nd Others (7 .14) (5.64)
+Sale/ (Purchase) of Investments (N e t) - (7.26)
+Interest & Commission Received 0.69 2.94
+Cash generated from /(used) in investing activities (B) (1 93. 51) (144. 73 )
+Cash flow from/(used In) financing activities
+Incre as e/ (D ecr ea se) in No n Cur re nt Borrowings 10 1.42 156.25
+Increase/ (D ecrease) in Current Borrowings (8.39) 71 .12
+Loan Given 0.70 (0 .28)
+Payment of Acutual Rent for Right of Use Asset
+Payment of Pro ce ssing Fe es fo r Term Loan
+Finance Co st paid (38.26 125.47)
+Cash used in financing activities (C) 55.47 201.6 3
+Net increase/(decrease) in cash and cash equivalents (A+B+C) (2 6.35) 70.0 5
+Add : Cas h and c as h equivalents at the be ginning of the yea r 53. 04 13 .38
+Cash a nd c as h eauivalents at th e end of the vear 26 . 69 83 .43
+
+-- 14 of 14 --

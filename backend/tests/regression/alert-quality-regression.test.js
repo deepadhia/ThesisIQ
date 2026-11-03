@@ -174,8 +174,8 @@ describe('scanned results PDF read by vision OCR (GRAVITA Q2 FY27)', () => {
     expect(fin.quarterEnded).toBe('2026-09-30');
     expect(fin.revenue).toBe(1427.35);
     expect(fin.revenueYoYGrowthPct).toBeCloseTo(37.84, 1);     // (1427.35-1035.50)/1035.50
-    expect(fin.ebitda).toBeCloseTo(151.98, 2);                  // PBT 124.21 + finance 13.88 + depreciation 13.89
-    expect(fin.ebitdaMarginPct).toBeCloseTo(10.65, 1);
+    expect(fin.ebitda).toBeCloseTo(133.98, 2);                  // PBT 124.21 + finance 13.88 + depreciation 13.89 - other income 18.00
+    expect(fin.ebitdaMarginPct).toBeCloseTo(9.39, 1);
     expect(fin.patAttributable).toBe(102.01);                   // owners of the holding company
     expect(fin.patYoYGrowthPct).toBeCloseTo(6.27, 1);           // 102.01 vs 95.99
   });
@@ -196,35 +196,35 @@ describe('consolidated statement with PDF text-layer glitches (ANANTRAJ Q2 FY27)
     expect(fin.quarterEnded).toBe('2026-09-30');
     expect(fin.revenue).toBe(661.53);
     expect(fin.revenueYoYGrowthPct).toBeCloseTo(4.87, 1);       // (661.53-630.79)/630.79
-    expect(fin.ebitda).toBeCloseTo(215.37, 2);                  // PBT 187.78 + finance 1.09 + depreciation 26.50
-    expect(fin.ebitdaMarginPct).toBeCloseTo(32.55, 1);          // 215.37 / 661.53
+    expect(fin.ebitda).toBeCloseTo(197.95, 2);                  // PBT 187.78 + finance 1.09 + depreciation 26.50 - other income 17.42
+    expect(fin.ebitdaMarginPct).toBeCloseTo(29.92, 1);          // 197.95 / 661.53
     expect(fin.patAttributable).toBe(156.88);                   // owners of the company
     expect(fin.patYoYGrowthPct).toBeCloseTo(13.58, 1);          // 156.88 vs 138.12
   });
 
-  // Live dry run 2026-10-31: the model wrote "EBITDA margin expanded ~390 bps YoY to ~31.7%" under a verified 32.56% / +435 bps.
+  // Live dry run 2026-10-31: the model wrote "EBITDA margin expanded ~390 bps YoY to ~31.7%" under a verified 32.56% / +435 bps (that figure included other income; the verified margin is now 29.92% / +331 bps).
   // 31.7 passed the old flat +/-1.0 percentage tolerance and bps claims were never checked in the bullet lists.
   test('bullets that contradict the verified EBITDA margin or bps move are dropped; consistent and forward-looking ones stay', () => {
     const fin = extractDeterministicFinancials(text);
-    expect(fin.ebitdaMarginBpsDelta).toBe(435);
+    expect(fin.ebitdaMarginBpsDelta).toBe(331);   // 29.92% vs (164.43 + 2.87 + 10.64 - 10.10) / 630.79 = 26.61%
     const out = applyInstitutionalGuard({
       _raw_text: text,
       action_signal: 'ADD', conviction_score: 8, credibility_tier: 'Tier 2',
       verdict_summary: 'Structural catalysts remain intact.',
       key_drivers: [],
       key_positives: [
-        'EBITDA margin expanded ~390 bps YoY to ~31.7%',                 // contradicts 435 bps / 32.56%
-        'EBITDA margin expanded 435 bps YoY to 32.56%',                  // matches the parser
-        'Management targets an EBITDA margin of 33.5% next year',       // guidance, not a measured result
+        'EBITDA margin expanded ~390 bps YoY to ~31.7%',                 // contradicts 331 bps / 29.92%
+        'EBITDA margin expanded 331 bps YoY to 29.92%',                  // matches the parser
+        'Management targets an EBITDA margin of 30.5% next year',       // guidance, not a measured result
         'Consolidated revenue of Rs 661.53 Cr'                           // unrelated, grounded
       ],
-      key_concerns_and_drags: ['EBITDA margin fell 120 bps QoQ to 30.1%'],  // contradicts verified bps and margin
+      key_concerns_and_drags: ['EBITDA margin fell 120 bps QoQ to 28.4%'],  // contradicts verified bps and margin
       thesis_operational_kpis: []
     }, fin, 'Outcome of Board Meeting', 'ANANTRAJ');
 
     expect(out.key_positives).not.toContain('EBITDA margin expanded ~390 bps YoY to ~31.7%');
-    expect(out.key_positives).toContain('EBITDA margin expanded 435 bps YoY to 32.56%');
-    expect(out.key_positives).toContain('Management targets an EBITDA margin of 33.5% next year');
+    expect(out.key_positives).toContain('EBITDA margin expanded 331 bps YoY to 29.92%');
+    expect(out.key_positives).toContain('Management targets an EBITDA margin of 30.5% next year');
     expect(out.key_positives).toContain('Consolidated revenue of Rs 661.53 Cr');
     expect(out.key_concerns_and_drags).toEqual([]);
   });

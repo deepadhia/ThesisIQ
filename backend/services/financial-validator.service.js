@@ -41,20 +41,42 @@ const LINE_FORMULA = /\(\s*\d{1,2}(?:\s*[-+–×x]\s*\d{1,2})+\s*\)/g;
 const REVENUE_ROW = /(?:revenue\s+from\s+ope[rt]ations?|sales\s*\/\s*income\s+from\s+ope[rt]ations?|income\s+from\s+ope[rt]ations?|net\s+sales|revenue\s+from\s+sale)/i;
 const TOTAL_INCOME_ROW = /^\W*(?:[ivx]+\.?\s+|\d+\.?\s+|[a-z]\)\s+)?total\s+income\b/i;
 // "Profit / (Loss)": OCR reads the slash as I, l, 1 or | ("Profit I (Loss) before tax").
-const PBT_ROW = /(?:prof(?:it|ill|il)|p,\s*·?olil)\s*(?:[/Il1|]\s*\(?\s*lo(?:ss|[,.]s)\s*\)?\s*)?\(?(?:lo(?:ss|[,.]s)\)?\s*)?before\s+(?:tax|share\s+of)/i;
+// "ProfiU(Loss ) before Tax": OCR turns the "t" of Profit into other letters and spaces the closing bracket, so the word is
+// "prof" plus up to three characters and a bracket may be preceded by a space.
+const PBT_ROW = /(?:prof\w{0,3}|p,\s*·?olil)\s*(?:[/Il1|]\s*\(?\s*lo(?:ss|[,.]s)\s*\)?\s*)?\(?(?:lo(?:ss|[,.]s)\s*\)?\s*)?before\s+(?:tax|share\s+of)/i;
 const PBT_BEFORE_EXC_ROW = /profit\s*(?:[/Il1|]\s*\(?\s*loss\s*\)?\s*)?before\s+exceptional/i;
-const PAT_ROW = /(?:net\s+)?profit\s*(?:[/Il1|]\s*\(?\s*loss\s*\)?\s*)?(?:\(\s*loss\s*\)\s*)?(?:after\s+tax\s+)?for\s+the\s+(?:period|quarter|year|half)|(?:net\s+)?profit\s+after\s+tax|^\W*(?:[ivx]+\.?\s+|\d+\.?\s+)?profit\s*(?:[/Il1|]\s*\(?\s*loss\s*\)?)?\s*(?:\(\s*loss\s*\)\s*)?for\s+the/i;
+const PAT_ROW = /(?:net\s+)?profit\s*(?:[/Il1|]\s*\(?\s*loss\s*\)?\s*)?(?:\(\s*loss\s*\)\s*)?(?:after\s+tax\s+)?for\s+the\s+(?:period|quarter|year|half)|(?:net\s+)?profit\s+after\s+tax|(?:net\s+)?prof\w{0,3}\s*[/(]*\s*lo(?:ss|[,.]s)\s*\)?\s*after\s+tax|^\W*(?:[ivx]+\.?\s+|\d+\.?\s+)?profit\s*(?:[/Il1|]\s*\(?\s*loss\s*\)?)?\s*(?:\(\s*loss\s*\)\s*)?for\s+the/i;
 const PAT_EXCLUDE = /before|comprehensive|attributable|per\s+share|margin|from\s+discontinued|share\s+of/i;
 // "Fi nance costs": a stray space inside the word is a common PDF text-layer glitch.
-const FIN_ROW = /^\W*(?:\S{1,3}\s+)?(?:fi\s?nance\s+costs?|interest\s+expenses?|interest\s+and\s+finance|interest\s+cost)/i;
-const DEP_ROW = /^\W*(?:\S{1,3}\s+)?(?:depre\s*ci\s*ation|amorti[sz]ation)/i;
+// "d) Fin a nc e Cos ts": letter-spaced labels.
+const FIN_ROW = /^\W*(?:\S{1,3}\s+)?(?:f\s?i\s?n\s?a\s?n\s?c\s?e\s+c\s?o\s?s\s?t\s?s?\b|fi\s?nance\s+costs?|interest\s+expenses?|interest\s+and\s+finance|interest\s+cost)/i;
+// "Depreci~tion": the text layer swaps or drops a letter inside the word, so tolerate up to four stray characters between "depre" and "tion".
+const DEP_ROW = /^\W*(?:\S{1,3}\s+)?(?:depre\s*ci\s*ation|depre\w{0,4}\W?\w{0,2}tion|amorti[sz]ation)/i;
 const EXC_ROW = /exceptional\s+(?:item|gain|loss|income|expense)s?/i;
+// "III Other income" / "Oth er In co me" (line item between revenue and total income). Not "other operating revenue" (that is revenue),
+// not "other comprehensive income", not "total income".
+const OTHER_INCOME_ROW = /^\W*(?:[ivx]+\.?\s+|\d+\.?\s+|[a-z]\)\s+)?(?:\S{1,3}\s+)?o\s?t\s?[a-z0-9]{0,3}\s?e\s?r\s+i\s?n\s?c\s?o\s?m\s?e\b(?!\s+(?:tax|for|attrib))/i;
+const OTHER_INCOME_EXCLUDE = /operating|comprehensive|total|before|expense/i;
 const OWNERS_ROW = /(?:owners|ownets|equity\s+holders|shareholders)\s+of\s+the|owners\s+of\s+[a-z]/i;
 
 const SEGMENT_EXCLUDE_LABEL = /total|less|inter|unallocable|unallocated|eliminat|capital\s+employed|assets|liabilit|tax|interest|finance|other\s+income|profit|net\b|exceptional|depreciation|expenses?|income\b|revenue\s+from\s+operations|segment\s+(?:results?|revenue|information)/i;
 
 const digitCount = (t) => t.replace(/\D/g, "").length;
 const hasTwoDecimals = (t) => /[.,]\d{2}\)?$/.test(t);
+
+// Letters an OCR engine prints in place of digits ("197.GO" is 197.60, "268.BO" is 268.80, "l.11" is 1.11).
+const OCR_DIGIT = { O: "0", o: "0", G: "6", B: "8", l: "1", I: "1", S: "5", Z: "2" };
+const OCR_NUMBER = /^\(?-?[\dOoGBlISZ][\dOoGBlISZ,.]*[.,][\dOoGBlISZ]{2}\)?$/;
+
+/**
+ * Repairs a token only when it is unmistakably a damaged number: a decimal separator followed by exactly two characters and
+ * at least two genuine digits, with the look-alike letters confined to those positions. A word is never a number.
+ */
+function repairOcrDigits(token) {
+  if (!/[OoGBlISZ]/.test(token) || !OCR_NUMBER.test(token)) return token;
+  if ((token.match(/\d/g) || []).length < 2) return token;
+  return token.replace(/[OoGBlISZ]/g, (ch) => OCR_DIGIT[ch]);
+}
 
 /**
  * Reads one numeric cell whose punctuation may be damaged. The LAST separator is the decimal point when it is followed by
@@ -64,9 +86,10 @@ const hasTwoDecimals = (t) => /[.,]\d{2}\)?$/.test(t);
  */
 function canonicalNumber(token) {
   if (token === null || token === undefined) return null;
-  const t = String(token).trim();
+  let t = String(token).trim();
   if (!t) return null;
   if (DASH_TOKEN.test(t)) return { value: null, decimals: 0, hasPoint: false, digits: 0 };
+  t = repairOcrDigits(t);
   if (!NUMERIC_TOKEN.test(t) || DATE_TOKEN.test(t)) return null;
   const negative = /^\(.*\)$/.test(t) || t.startsWith("-");
   const body = t.replace(/[()\-]/g, "").replace(/[,.]+$/, "");
@@ -236,7 +259,30 @@ function daysBetween(a, b) {
 }
 
 /**
- * Header dates -> column roles. Returns { yoyIdx, qoqIdx, dates }.
+ * The period the statement says it covers, read from its own heading ("...for the Quarter and Half Year ended September 30, 2026"),
+ * looking a few lines above the first row. Used to label the period when the column header is unreadable, and to reject a "header"
+ * whose first date is not that period. Returns a Date or null.
+ */
+function periodEndFromHeading(lines, anchorIdx) {
+  // Several heading lines name a period end (the title, "Three months ended 30.09.2026", "Previous three months ended 30.06.2026").
+  // The current period is the LATEST of them; a line nearer the table may well be the previous quarter's column.
+  const found = [];
+  for (let i = anchorIdx - 1; i >= Math.max(0, anchorIdx - 14); i--) {
+    // the date may wrap onto the next line of the title ("...Half Year ended" / "September 30, 2026")
+    // "SEPTEMBER 30 , 20 26": the text layer spaces the comma and splits the year
+    const text = `${lines[i]} ${lines[i + 1] && i + 1 < anchorIdx ? lines[i + 1] : ""}`
+      .replace(/(\d)\s+,/g, "$1,").replace(/\b(20)\s(\d{2})\b/g, "$1$2");
+    const m = text.match(/(?:quarter|three\s+months?)[^.]{0,60}?\bended\s+(.{6,30})/i);
+    if (!m) continue;
+    const d = parseDatesFromText(m[1])[0];
+    const isMonthEnd = d && new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 0)).getUTCDate() === d.getUTCDate();
+    if (isMonthEnd) found.push(d);
+  }
+  return found.length ? found.reduce((a, b) => (b.getTime() > a.getTime() ? b : a)) : null;
+}
+
+/**
+ * Header dates -> column roles. Returns { yoyIdx, qoqIdx, dates, headingPeriodEnd }.
  */
 function mapColumns(lines, anchorIdx, cols) {
   const regionStart = Math.max(0, anchorIdx - 40);
@@ -257,9 +303,19 @@ function mapColumns(lines, anchorIdx, cols) {
   let yoyIdx = cols >= 3 ? 2 : null;
   let qoqIdx = cols >= 2 ? 1 : null;
   let dates = null;
+  const headingPeriodEnd = periodEndFromHeading(lines, anchorIdx);
 
   if (all.length >= cols && cols >= 2) {
     dates = all.slice(all.length - cols);
+    // A real column header lists period ends (month-end dates) with the current period first and latest. Dates swept up from
+    // a notes page or a previous table ("2026-08-06", "2026-05-26") are not a header: use the standard layout instead.
+    const isMonthEnd = (d) => new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 0)).getUTCDate() === d.getUTCDate();
+    const looksLikeHeader = dates.every(isMonthEnd) && dates.every(d => d.getTime() <= dates[0].getTime())
+      && (!headingPeriodEnd || daysBetween(dates[0], headingPeriodEnd) <= 10);
+    if (!looksLikeHeader) dates = null;
+  }
+
+  if (dates) {
     const d0 = dates[0];
     let foundYoy = null;
     let foundQoq = null;
@@ -269,12 +325,18 @@ function mapColumns(lines, anchorIdx, cols) {
       if (foundYoy === null && gap > 350 && gap < 380) foundYoy = j;
       if (foundQoq === null && gap > 80 && gap < 100) foundQoq = j;
     }
-    if (foundYoy !== null) yoyIdx = foundYoy;
-    if (foundQoq !== null) qoqIdx = foundQoq;
+    // Quarter columns always come first and in order (current, previous quarter, year-ago quarter). A header whose previous
+    // quarter sits AFTER the year-ago column has been scrambled by the text layer; its dates say nothing about the columns.
+    if (foundYoy !== null && foundQoq !== null && foundQoq > foundYoy) {
+      dates = null;
+    } else {
+      if (foundYoy !== null) yoyIdx = foundYoy;
+      if (foundQoq !== null) qoqIdx = foundQoq;
+    }
     // Without a proper quarter-end header (e.g. only 2 quarter columns) do not invent a YoY column
     if (foundYoy === null && cols < 3) yoyIdx = null;
   }
-  return { yoyIdx, qoqIdx, dates };
+  return { yoyIdx, qoqIdx, dates, headingPeriodEnd };
 }
 
 const UNIT_PATTERN = /(?:(?:rs\.?|₹|inr|rupees)\s*(?:in\s+)?(crores?|crs?\b|lakhs?|lacs?|millions?|mn\b)|\bin\s+(crores?|crs?\b|lakhs?|lacs?|millions?|mn\b)|\(\s*(?:rs\.?|₹)?\s*(crores?|crs?\b|lakhs?|lacs?|millions?|mn\b)\s*\))/i;
@@ -422,6 +484,8 @@ function locateBlocks(lines) {
     const dep = findRow(DEP_ROW);
     const exc = findRow(EXC_ROW, { exclude: /before|profit/i });
     const totalIncome = findRow(TOTAL_INCOME_ROW);
+    // Other income sits between revenue and total income: only look there, never in the notes further down.
+    const otherIncome = findRow(OTHER_INCOME_ROW, { exclude: OTHER_INCOME_EXCLUDE });
 
     // Attributable-to-owners row (only trusted when it follows the PAT row under a "Profit attributable to" heading)
     let owners = null;
@@ -429,6 +493,9 @@ function locateBlocks(lines) {
       for (let i = startLooking; i < Math.min(end, startLooking + 30); i++) {
         if (/(?:(?:profit|l'?rofic)(?:\s+for\s+the\s+(?:period|quarter|year))?\s+attributable\s+to|attributable\s+to\s*:?\s*$)/i.test(lines[i]) && !/comprehensive/i.test(lines[i])) {
           for (let j = i; j < Math.min(end, i + 5); j++) {
+            // A "...comprehensive income attributable to:" heading starts a different split (OCI / total comprehensive income):
+            // its owners' row is not the profit. When the profit's own owners' row is unreadable, no owners' row is better than that one.
+            if (j > i && /comprehensive/i.test(lines[j])) break;
             if (OWNERS_ROW.test(lines[j])) {
               const row = parseRow(lines[j], cols);
               if (row && row.values.length === cols) { owners = { idx: j, row }; break; }
@@ -468,6 +535,7 @@ function locateBlocks(lines) {
       owners: ownersValues,
       fin: inScale(fin?.row),
       dep: inScale(dep?.row),
+      otherIncome: otherIncome && (!totalIncome || otherIncome.idx < totalIncome.idx) ? inScale(otherIncome.row) : null,
       exc: exc?.row || null,
       isFull,
       hasStatement: Boolean(pbt || pat),
@@ -576,7 +644,9 @@ function buildResult(primary, standalone, lines) {
     isFinancialResult: true,
     statementScope: primary.scope,
     unit: primary.unit.name,
-    quarterEnded: primary.colMap.dates ? primary.colMap.dates[0].toISOString().slice(0, 10) : null,
+    quarterEnded: primary.colMap.dates
+      ? primary.colMap.dates[0].toISOString().slice(0, 10)
+      : ((primary.colMap.headingPeriodEnd || standalone?.colMap?.headingPeriodEnd)?.toISOString().slice(0, 10) ?? null),
     revenue: null,
     revenueYoYGrowthPct: null,
     ebitda: null,
@@ -619,7 +689,9 @@ function buildResult(primary, standalone, lines) {
     }
   }
 
-  // EBITDA = PBT before exceptional items + finance costs + depreciation (needs a depreciation row)
+  // EBITDA = PBT before exceptional items + finance costs + depreciation - OTHER INCOME (needs a depreciation row).
+  // Other income (treasury, interest, FX gains) is not operating profit; companies report EBITDA without it (Transrail 237.9,
+  // Jyoti 131.33 for Q2 FY27). When a statement shows no readable other-income row the figure is the older, inclusive one.
   const ebitdaFor = (idx) => {
     if (idx === null || idx === undefined || !primary.dep) return null;
     const pbtBase = primary.pbtBefore ? primary.pbtBefore[idx] : (primary.pbt ? primary.pbt[idx] : null);
@@ -628,7 +700,8 @@ function buildResult(primary, standalone, lines) {
     const depV = primary.dep[idx] ?? 0;
     let base = pbtBase;
     if (!primary.pbtBefore && idx === 0 && exceptionalFound) base = pbtBase - exceptionalNet / f;
-    return (base + finV + depV) * f;
+    const otherV = primary.otherIncome ? (primary.otherIncome[idx] ?? 0) : 0;
+    return (base + finV + depV - otherV) * f;
   };
 
   const ebitda0 = ebitdaFor(0);
@@ -744,6 +817,21 @@ function buildResult(primary, standalone, lines) {
       result.patAttributable = null;
       result.patYoYGrowthPct = null;
       result.normalisedPat = null;
+    }
+    // Profit after tax of a profitable quarter sits in a narrow band around its own profit before tax (tax 20-35%, minorities,
+    // credits). A figure far outside it is another row (other comprehensive income was read as profit: 14.74 against PBT 158.09)
+    // or a mis-read cell. Withhold it and every growth rate built on it: "PAT not available" is honest, a wrong PAT is not.
+    const pbt0 = primary.pbt ? scaled(primary.pbt, 0, f) : null;
+    const patNow = result.patAttributable ?? result.patConsolidated;
+    if (pbt0 !== null && pbt0 > 0 && patNow !== null && patNow > 0) {
+      const ratio = patNow / pbt0;
+      if (ratio < 0.25 || ratio > 1.6) {
+        result.patRejectedReason = `PAT ${patNow} is ${Math.round(ratio * 100)}% of PBT ${round2(pbt0)}: not a plausible profit-after-tax for this statement`;
+        console.warn(`[FINANCIAL VALIDATOR] ${result.patRejectedReason}. Clearing PAT fields.`);
+        for (const key of ["patConsolidated", "patAttributable", "patTotalIncludingMinority", "patYoYGrowthPct", "patQoQGrowthPct", "normalisedPat", "normalisedPatYoYGrowthPct", "patTurnaround"]) {
+          if (key in result) result[key] = null;
+        }
+      }
     }
     if (result.ebitdaMarginPct !== null && (result.ebitdaMarginPct > 95 || result.ebitdaMarginPct < -100)) {
       result.ebitda = null;

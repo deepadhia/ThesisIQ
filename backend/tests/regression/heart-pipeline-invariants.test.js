@@ -53,8 +53,8 @@ describe('Financial parser on real Q2 FY27 filings', () => {
     expect(fin.revenueYoYGrowthPct).toBe(11.96);
     expect(fin.patConsolidated).toBe(38.51);   // not the standalone 31.03
     expect(fin.patYoYGrowthPct).toBe(-57.55);  // 38.51 vs 90.71
-    expect(fin.ebitda).toBe(76.48);            // 49.53 + 18.85 + 8.10
-    expect(fin.ebitdaMarginPct).toBe(10.25);
+    expect(fin.ebitda).toBe(64.03);            // 49.53 + 18.85 + 8.10 - other income 12.45
+    expect(fin.ebitdaMarginPct).toBe(8.58);    // 64.03 / 746.03 (year-ago 135.95 / 666.35 = 20.40%: about -1,182 bps)
     expect(fin.ebitdaMarginBpsDelta).toBeLessThan(-1000); // real compression, not the absurd -3,642 bps
     expect(fin.ebitdaMarginBpsDelta).toBeGreaterThan(-1200);
     expect(fin.isYoYDecline).toBe(true);
@@ -315,7 +315,21 @@ describe('Text-grounded fallback for unparseable results tables', () => {
     expect(fin.revenue).toBe(746.03);
     expect(fin.revenueYoYGrowthPct).toBe(11.96);   // computed by code, not by the model
     expect(fin.patYoYGrowthPct).toBe(-57.55);
-    expect(fin.ebitda).toBe(76.48);
+    expect(fin.ebitda).toBe(76.48);   // no other-income row transcribed: the inclusive figure (49.53 + 18.85 + 8.10)
+  });
+
+  it('EBITDA excludes other income when the model also located the other-income row (same definition as the rule-based reader)', async () => {
+    const reply = JSON.stringify({
+      scope: 'CONSOLIDATED', unit: 'CRORES', column_dates: ['2026-09-30', '2026-06-30', '2025-09-30'],
+      rows: {
+        revenue: ['746.03', '858.67', '666.35'], other_income: ['12.45', '10.34', '5.54'],
+        finance_costs: ['18.85', '14.57', '13.30'], depreciation: ['8.10', '7.58', '6.67'],
+        pbt: ['49.53', '71.05', '121.52'], pat: ['38.51', '51.59', '90.71'], pat_owners: null
+      }
+    });
+    const fin = await extractFinancialsViaLlm({ docText: mangled, ticker: 'SHAKTIPUMP', runPrompt: async () => reply });
+    expect(fin.verification).toBe('LLM_LOCATED_TEXT_GROUNDED');
+    expect(fin.ebitda).toBe(64.03);   // 49.53 + 18.85 + 8.10 - 12.45
   });
 
   it('rejects a transcription containing a figure that is not in the filing text (no AI-guessed numbers)', async () => {
@@ -354,6 +368,17 @@ describe('Concall scheduled heads-up', () => {
     expect(sch.link).toContain('choruscall');
     const past = extractConcallSchedule('Earnings call was held on 1st October 2026 at 10:00 AM', {}, NOW);
     expect(past.date).toBeNull();
+  });
+
+  it('a link that is merely somewhere in the document (a source footnote on a slide) is never offered as the joining link', () => {
+    // INOXINDIA 2026-11-03: the investor deck footnote "Source: https://www.iea.org/com..." was shown as "Join:" for the call.
+    const deck = 'INOX India Q2 FY27 Investor Presentation. Earnings call on 4th November 2026 at 11:00 AM IST. Source: https://www.iea.org/com';
+    const sch = extractConcallSchedule(deck, {}, NOW);
+    expect(sch.date).toBe('2026-11-04');
+    expect(sch.link).toBeNull();
+    // a link next to the words "join" / "dial-in" / "registration" is still taken
+    const withJoin = extractConcallSchedule('Earnings call 4th November 2026 11:00 AM IST. To join, register at https://example-events.com/q2call. Source: https://www.iea.org/com', {}, NOW);
+    expect(withJoin.link).toBe('https://example-events.com/q2call');
   });
 
   it('prefers the model-extracted date/time when supplied', () => {
