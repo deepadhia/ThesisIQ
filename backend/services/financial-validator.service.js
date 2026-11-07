@@ -354,7 +354,7 @@ function unitFactor(word) {
   return { factor: 1, name: "CRORES" };
 }
 
-function detectUnit(lines, anchorIdx) {
+function detectUnit(lines, anchorIdx, declaredUnit = null) {
   let best = null;
   for (let d = 0; d <= 80; d++) {
     for (const idx of d === 0 ? [anchorIdx] : [anchorIdx - d, anchorIdx + d]) {
@@ -376,7 +376,27 @@ function detectUnit(lines, anchorIdx) {
   if (top[1] > 0) {
     return { ...unitFactor(top[0] === "LAKHS" ? "lakh" : top[0] === "MILLIONS" ? "million" : "crore"), explicit: true };
   }
+  // Nothing printed near the statement or counted in the text handed to the parser (a vision-OCR transcription carries rows only):
+  // the unit the same filing declares in its own text is the next best evidence, the crore default the last.
+  if (declaredUnit) return { ...unitFactor(declaredUnit), explicit: true, fromDocument: true };
   return { factor: 1, name: "CRORES", explicit: false };
+}
+
+/**
+ * The unit a filing declares in its own text ("(Rs. in million)", "(Rs. in Lakhs)", "(R, in million except per share data)"), by
+ * majority of its declarations; null when it declares none or declares two units equally often. An amount written in words
+ * ("Rupees Ten Crore only") is not a declaration. Used when the text a statement is parsed from has lost its unit line.
+ * @returns {"crore"|"lakh"|"million"|null}
+ */
+export function detectDocumentUnit(text = "") {
+  const counts = { CRORES: 0, LAKHS: 0, MILLIONS: 0 };
+  for (const l of String(text || "").split(/\r?\n/)) {
+    const m = l.length < 200 ? l.match(UNIT_PATTERN) : null;
+    if (m) counts[unitFactor(m[1] || m[2] || m[3]).name]++;
+  }
+  const ranked = Object.entries(counts).sort((a, b) => b[1] - a[1]);
+  if (ranked[0][1] === 0 || ranked[0][1] === ranked[1][1]) return null;
+  return ranked[0][0] === "LAKHS" ? "lakh" : ranked[0][0] === "MILLIONS" ? "million" : "crore";
 }
 
 const HEADING_EXCLUDE = /report|auditor|review|notice|outcome|submission|approved|pursuant|we\s+have|item\s+no|include|include|enclos|reviewed|resolution|covering/i;
@@ -409,7 +429,7 @@ function findScope(lines, anchorIdx) {
 /**
  * Locates full statement blocks. Each block carries parsed rows for the quarter columns.
  */
-function locateBlocks(lines) {
+function locateBlocks(lines, declaredUnit = null) {
   const anchors = [];
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
@@ -554,7 +574,7 @@ function locateBlocks(lines) {
       isFull,
       hasStatement: Boolean(pbt || pat),
       scope: findScope(lines, idx),
-      unit: detectUnit(lines, idx),
+      unit: detectUnit(lines, idx, declaredUnit),
       colMap: mapColumns(lines, idx, cols)
     });
   }
@@ -599,27 +619,73 @@ function scaled(values, idx, factor) {
   return v * factor;
 }
 
-function extractSegmentRedFlags(lines, totalRevenueYoyBase) {
+const SEG_REVENUE_HEADER = /^\W*segment\s+revenue\b/i;
+const SEG_RESULT_HEADER = /^\W*segment\s+results?\b/i;
+const SEG_END = /^\W*(?:segment\s+(?:assets|liabilit)|capital\s+employed)/i;
+const SEG_LEGACY_START = /^\W*(?:\d+\.?\s*)?(?:consolidated\s+)?segment\s+(?:results?|revenue|information|wise)|^\W*segment\s+reporting/i;
+
+/** Number of single-character edits between two short strings. */
+function editDistance(a, b) {
+  const m = a.length, n = b.length;
+  let prev = Array.from({ length: n + 1 }, (_, j) => j);
+  for (let i = 1; i <= m; i++) {
+    const cur = [i];
+    for (let j = 1; j <= n; j++) cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    prev = cur;
+  }
+  return prev[n];
+}
+
+/**
+ * Segments whose revenue or result (profit) fell more than 25% YoY.
+ * The table is the one of the statement's own scope: a filing prints a standalone and a consolidated segment table (the standalone
+ * one first), and the alert used to quote the standalone one under a consolidated headline. Revenue rows and result rows are told
+ * apart (`metric`), and a result label the filing itself mis-spells ("Etectronics", HBLENGINE 2026-11-07) is read as the revenue
+ * label of the same table it is one or two edits from, so one segment never appears under two names.
+ * @returns {Array<{segment:string, metric:"revenue"|"result", currentValue:number, prevValue:number, yoyDeclinePct:number}>}
+ */
+export function extractSegmentRedFlags(lines, totalRevenueYoyBase, scope = null) {
   const flags = [];
-  const start = lines.findIndex(l => /^\W*(?:\d+\.?\s*)?(?:consolidated\s+)?segment\s+(?:results?|revenue|information|wise)|^\W*segment\s+reporting/i.test(l) && l.length < 120);
-  if (start === -1) return flags;
+  const tables = [];
+  lines.forEach((l, i) => {
+    if (!SEG_REVENUE_HEADER.test(l) || l.length > 60) return;
+    const title = lines.slice(Math.max(0, i - 10), i).reverse().find((t) => /segment/i.test(t) && /consolidated|standalone/i.test(t)) || "";
+    tables.push({ start: i, scope: /consolidated/i.test(title) ? "CONSOLIDATED" : /standalone/i.test(title) ? "STANDALONE" : null });
+  });
+  let start;
+  let split = true;
+  if (tables.length) {
+    start = ((scope && tables.find((t) => t.scope === scope)) || tables[0]).start;
+  } else {
+    // no "Segment Revenue / Segment Results" split: the older single-section layout, every row read as revenue
+    start = lines.findIndex((l) => SEG_LEGACY_START.test(l) && l.length < 120);
+    split = false;
+    if (start === -1) return flags;
+  }
+  let section = "revenue";
+  const revenueLabels = [];
   for (let i = start + 1; i < Math.min(start + 40, lines.length); i++) {
-    if (/^\W*(?:segment\s+(?:assets|liabilit)|capital\s+employed)/i.test(lines[i])) break;
+    if (SEG_END.test(lines[i])) break;
+    if (split && SEG_RESULT_HEADER.test(lines[i])) { section = "result"; continue; }
+    if (split && SEG_REVENUE_HEADER.test(lines[i])) break;           // the next table begins
     const row = parseRow(lines[i], null);
     if (!row || row.values.length < 3) continue;
     const label = row.label.replace(/^\W*(?:\d+[.)]?|[a-z]\))\s*/i, "").trim();
     if (label.length < 3 || SEGMENT_EXCLUDE_LABEL.test(label)) continue;
+    let name = label.toUpperCase();
+    if (section === "revenue") revenueLabels.push(name);
+    else if (!revenueLabels.includes(name) && name.length >= 5) {
+      const near = revenueLabels.find((r) => editDistance(r, name) <= 2);
+      if (near) name = near;
+    }
     const cur = row.values[0];
     const prev = row.values[2];
     if (cur === null || prev === null || prev <= 0 || cur < 0) continue;
     const yoy = ((cur - prev) / prev) * 100;
     // Materiality: segment must be a meaningful slice of the year-ago revenue base
     const material = !totalRevenueYoyBase || prev >= 0.03 * totalRevenueYoyBase;
-    if (yoy < -25 && material) {
-      const name = label.toUpperCase();
-      if (!flags.some(f => f.segment === name)) {
-        flags.push({ segment: name, currentValue: cur, prevValue: prev, yoyDeclinePct: parseFloat(yoy.toFixed(1)) });
-      }
+    if (yoy < -25 && material && !flags.some((f) => f.segment === name && f.metric === section)) {
+      flags.push({ segment: name, metric: section, currentValue: cur, prevValue: prev, yoyDeclinePct: parseFloat(yoy.toFixed(1)) });
     }
   }
   return flags;
@@ -630,13 +696,13 @@ function extractSegmentRedFlags(lines, totalRevenueYoyBase) {
  * @param {string} pdfText Raw text extracted from PDF
  * @returns {object|null} Financial metrics object, or null when no full statement table is present
  */
-export function extractDeterministicFinancials(pdfText = "", { periodEndHint = null } = {}) {
+export function extractDeterministicFinancials(pdfText = "", { periodEndHint = null, declaredUnit = null } = {}) {
   if (!pdfText || typeof pdfText !== "string") {
     return null;
   }
 
   const lines = pdfText.split("\n").map(l => l.trim()).filter(Boolean);
-  const blocks = locateBlocks(lines);
+  const blocks = locateBlocks(lines, declaredUnit);
   if (blocks.length === 0) {
     return null;
   }
@@ -903,7 +969,7 @@ function buildResult(primary, standalone, lines, { periodEndHint = null } = {}) 
   }
 
   // Segment red flags (generic, materiality-filtered)
-  result.segmentRedFlags = extractSegmentRedFlags(lines, revYoy);
+  result.segmentRedFlags = extractSegmentRedFlags(lines, revYoy, result.statementScope);
   if (result.segmentRedFlags.some(fl => fl.yoyDeclinePct < -30)) result.isYoYDecline = true;
 
   // Unit sanity: when no unit was declared and the magnitude looks like Lakhs, rescale

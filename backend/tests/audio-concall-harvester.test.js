@@ -2,7 +2,10 @@ import { describe, it, expect, vi } from "vitest";
 import {
   extractAudioUrlFromFiling,
   resolveAudioMediaUrl,
-  transcribeAudioWithGroqWhisper
+  transcribeAudioWithGroqWhisper,
+  getYtDlpPath,
+  isYtDlpAvailable,
+  downloadYouTubeAudio
 } from "../services/audio-transcript-analyzer.service.js";
 
 // Production runs on plain Node (AbortSignal.timeout exists); the jsdom test environment's AbortSignal lacks it.
@@ -137,6 +140,56 @@ Yours faithfully,`;
       const res = await resolveAudioMediaUrl("https://www.company.com/media/audio.html", { fetchFn: fakeFetch });
       expect(res.type).toBe("DIRECT_AUDIO");
       expect(res.url).toBe("https://www.company.com/downloads/q2_call_recording.mp3");
+    });
+
+    it("returns YOUTUBE for embed and live YouTube URLs", async () => {
+      expect(await resolveAudioMediaUrl("https://www.youtube.com/embed/AbCdEf12345")).toEqual({
+        type: "YOUTUBE",
+        url: "https://www.youtube.com/embed/AbCdEf12345"
+      });
+      expect(await resolveAudioMediaUrl("https://www.youtube.com/live/AbCdEf12345")).toEqual({
+        type: "YOUTUBE",
+        url: "https://www.youtube.com/live/AbCdEf12345"
+      });
+    });
+
+    it("resolves iframe embedded YouTube link in landing page", async () => {
+      const iframeHtml = `
+        <html><body><iframe src="https://www.youtube.com/embed/zYxWvU98765" width="560" height="315"></iframe></body></html>
+      `;
+      const fakeFetch = vi.fn().mockResolvedValue({
+        ok: true,
+        headers: new Headers({ "content-type": "text/html" }),
+        text: async () => iframeHtml
+      });
+      const res = await resolveAudioMediaUrl("https://www.company.com/concall-video", { fetchFn: fakeFetch });
+      expect(res.type).toBe("YOUTUBE");
+      expect(res.url).toBe("https://www.youtube.com/embed/zYxWvU98765");
+    });
+  });
+
+  describe("yt-dlp integration", () => {
+    it("getYtDlpPath honors YT_DLP_PATH when file exists, otherwise falls back to yt-dlp", () => {
+      const orig = process.env.YT_DLP_PATH;
+      try {
+        process.env.YT_DLP_PATH = "C:\\Windows\\notepad.exe";
+        expect(getYtDlpPath()).toBe("C:\\Windows\\notepad.exe");
+        process.env.YT_DLP_PATH = "/non/existent/yt-dlp";
+        expect(getYtDlpPath()).toBe("yt-dlp");
+      } finally {
+        if (orig !== undefined) process.env.YT_DLP_PATH = orig;
+        else delete process.env.YT_DLP_PATH;
+      }
+    });
+
+    it("isYtDlpAvailable returns a boolean without throwing", async () => {
+      const avail = await isYtDlpAvailable();
+      expect(typeof avail).toBe("boolean");
+    });
+
+    it("downloadYouTubeAudio rejects with clear error if yt-dlp is not available or execution fails", async () => {
+      await expect(downloadYouTubeAudio("https://youtu.be/invalid_test_video", "dummy.mp3"))
+        .rejects.toThrow();
     });
   });
 

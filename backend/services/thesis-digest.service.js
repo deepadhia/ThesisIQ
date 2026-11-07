@@ -284,6 +284,25 @@ export function compactHighlights(ch = {}) {
 
 const GUIDANCE_CUT = /\b(?:cut|reduc\w*|lower\w*|trim\w*|downgrad\w*|scal\w* back|pared)\b/i;
 
+const GUIDANCE_RAISE_MARK = /\((?:raised|increas\w*|upgrad\w*)[^)]*\)/i;
+
+/**
+ * A guidance CUT stated in the recent past (a call, a recording or a deck of the same stock; `changes` newest first) vetoes a buy on
+ * whatever is judged next: SJS cut its revenue growth guide on the 2026-11-05 call and the results alert for the same quarter still
+ * said STRONG BUY 9/10. A NEWER raise cancels an older cut. Only ever downgrades a buy (AGENTS.md I7: numbers authorise, vetoes win).
+ * @returns {{vetoed: false} | {vetoed: true, action: string, conviction: number, cut: string}}
+ */
+export function recentGuidanceVeto({ action, conviction, changes } = {}) {
+  const list = Array.isArray(changes) ? changes.filter((t) => typeof t === "string") : [];
+  if (!list.length || !/\b(?:BUY|ADD|ACCUMULATE)\b/i.test(String(action || ""))) return { vetoed: false };
+  const firstCut = list.findIndex((t) => guidanceCutsOf({ guidance_changes: [t] }).length > 0);
+  if (firstCut === -1) return { vetoed: false };
+  const firstRaise = list.findIndex((t) => GUIDANCE_RAISE_MARK.test(t));
+  if (firstRaise !== -1 && firstRaise < firstCut) return { vetoed: false };
+  const c = Number(conviction);
+  return { vetoed: true, action: "HOLD / MONITOR", conviction: Number.isFinite(c) ? Math.min(c, 5) : 5, cut: list[firstCut] };
+}
+
 /** Guidance changes that are reductions (a "-> ... (cut)" revision), as they were stated. */
 export function guidanceCutsOf(ch = {}) {
   // The model marks each change "(raised)", "(cut)" or "(reaffirmed)": that marker decides; wording elsewhere in the bullet

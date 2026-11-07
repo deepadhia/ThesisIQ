@@ -8,7 +8,7 @@ import { evaluateSmoke } from "../services/smoke-check.service.js";
 
 const good = () => ({
   node: "v22.1.0", env: { DATABASE_URL: "postgres://x", TELEGRAM_BOT_TOKEN: "t", TELEGRAM_CHAT_ID: "1", GROQ_API_KEY: "gsk_abc", GEMINI_API_KEY: "g", ALLOCATION_GATE: undefined },
-  ffmpeg: true, canvas: true, db: { ok: true, tables: ["corporate_announcements", "system_settings", "market_data_snapshots"] },
+  ffmpeg: true, ytDlp: true, canvas: true, db: { ok: true, tables: ["corporate_announcements", "system_settings", "market_data_snapshots"] },
   modelRegistryAgeHours: 3, sourceProblems: []
 });
 
@@ -44,12 +44,13 @@ describe("evaluateSmoke", () => {
     expect(evaluateSmoke({ ...good(), env: { ...good().env, GROQ_API_KEY: "", GROK_API_KEY: "nvapi-123" } }).ok).toBe(false);
   });
 
-  it("warnings (gate off, stale model registry) do not fail the run but are shown", () => {
-    const r = evaluateSmoke({ ...good(), env: { ...good().env, ALLOCATION_GATE: "off" }, modelRegistryAgeHours: 80 });
+  it("warnings (gate off, stale model registry, yt-dlp missing) do not fail the run but are shown", () => {
+    const r = evaluateSmoke({ ...good(), env: { ...good().env, ALLOCATION_GATE: "off" }, modelRegistryAgeHours: 80, ytDlp: false });
     expect(r.ok).toBe(true);
     const warned = r.checks.filter((c) => !c.ok && c.severity === "warn");
     expect(warned.map((c) => c.name).join(" ")).toMatch(/gate/i);
     expect(warned.map((c) => c.name).join(" ")).toMatch(/registry/i);
+    expect(warned.map((c) => c.name).join(" ")).toMatch(/yt-dlp/i);
   });
 
   it("a Node version below 20 fails", () => {

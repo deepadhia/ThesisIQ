@@ -17,13 +17,13 @@ import { classifyFilingForWorker, looksLikeStatementFiling } from "../services/f
 import { runLlm } from "../services/llm.service.js";
 import { decideLlmFailureAction, backoffDelayMs, audioBackoffDelayMs, quotaPauseMs, isQuotaPaused, batchSizeAfterPause } from "../services/retry-policy.service.js";
 import { dbStore } from "../services/llm-health.service.js";
-import { extractDeterministicFinancials, quarterEndBefore } from "../services/financial-validator.service.js";
+import { extractDeterministicFinancials, detectDocumentUnit, quarterEndBefore } from "../services/financial-validator.service.js";
 import {
   extractDeterministicCashFlow,
   extractEarningsQualityMetrics,
   formatCashFlowAndQualitySection
 } from "../services/cash-flow-analyzer.service.js";
-import { applyInstitutionalGuard, sanitizeConcallHighlights } from "../services/institutional-guard.service.js";
+import { applyInstitutionalGuard, sanitizeConcallHighlights, dropContradictingStance } from "../services/institutional-guard.service.js";
 import { getVerifiedGroundTruth } from "../services/verified-data-layer.service.js";
 import { evaluateDualLayerActionGate } from "../services/thesis-gate-evaluator.service.js";
 import { extractFinancialsViaLlm } from "../services/financial-table-fallback.service.js";
@@ -32,6 +32,7 @@ import {
   buildDigestItem,
   hasAnalysedConcallItem,
   guidanceCutsOf,
+  recentGuidanceVeto,
   dedupeByLabel,
   isContentFreeDigestItem,
   buildThesisStatusBoard,
@@ -76,6 +77,8 @@ import {
   extractAudioUrlFromFiling, 
   resolveAudioMediaUrl,
   downloadAndExtractMp3, 
+  downloadYouTubeAudio,
+  isYtDlpAvailable,
   transcribeAudioWithGroqWhisper,
   getWhisperApiKey,
   analyzeAudioWithGemini,
@@ -84,6 +87,7 @@ import {
 } from "../services/audio-transcript-analyzer.service.js";
 import { splitTranscript, buildHighlightPrompts, parseHighlightReply, mergeConcallHighlights } from "../services/concall-highlights.service.js";
 import { countTickersHoldingDocument, isForeignCopy, setAsideForeignFiling } from "../services/foreign-filing.service.js";
+import { scaleSanity } from "../services/scale-sanity.service.js";
 
 
 /**
@@ -1270,7 +1274,7 @@ const fmtPct = (v) => (v === null || v === undefined || isNaN(v)) ? null : `${v 
 /**
  * Verified-number block built straight from the deterministic parser (never from LLM text).
  */
-function buildVerifiedFinancialsBlock(fin, { carried = false, periodLabel = null } = {}) {
+export function buildVerifiedFinancialsBlock(fin, { carried = false, periodLabel = null } = {}) {
   if (!fin || fin.revenue === null || fin.revenue === undefined) return "";
   const scope = fin.statementScope && fin.statementScope !== "UNKNOWN" ? fin.statementScope.toLowerCase() : "reported";
   const lines = [];
@@ -1291,7 +1295,9 @@ function buildVerifiedFinancialsBlock(fin, { carried = false, periodLabel = null
     lines.push(`• ⚠️ *Exceptional gain:* ₹${fin.exceptionalGain} Cr → Normalised PAT ₹${fin.normalisedPat} Cr${fmtPct(fin.normalisedPatYoYGrowthPct) ? ` (${fmtPct(fin.normalisedPatYoYGrowthPct)} YoY)` : ""}`);
   }
   for (const flag of (fin.segmentRedFlags || []).slice(0, 2)) {
-    lines.push(`• 🔴 *Segment red flag:* ${flag.segment} down ${Math.abs(flag.yoyDeclinePct)}% YoY (₹${flag.currentValue} Cr vs ₹${flag.prevValue} Cr)`);
+    const segmentName = String(flag.segment).toLowerCase().replace(/(^|[^a-z])([a-z])/g, (m, pre, c) => pre + c.toUpperCase());
+    const measure = flag.metric === "result" ? "profit (segment result)" : "revenue";
+    lines.push(`• 🔴 *Segment red flag:* ${segmentName} ${measure} down ${Math.abs(flag.yoyDeclinePct)}% YoY (₹${flag.currentValue} Cr vs ₹${flag.prevValue} Cr)`);
   }
   const head = carried
     ? `📊 *LATEST VERIFIED RESULTS${periodLabel ? ` (${periodLabel})` : ""}:*`
@@ -1388,7 +1394,7 @@ function bulletList(list, max = 3) {
 /**
  * Stage-1 flash note: financial results / investor presentation / press release.
  */
-function buildStage1Message({ item, verdict, activeFin, finSource, carried, stageName, periodLabel, guidanceSection, commText, degradedNote, allocationLine = "" }) {
+export function buildStage1Message({ item, verdict, activeFin, finSource, carried, stageName, periodLabel, guidanceSection, commText, degradedNote, allocationLine = "" }) {
   const finBlock = buildVerifiedFinancialsBlock(activeFin, { carried: finSource === "CARRIED_FORWARD", periodLabel: carried?.periodLabel || periodLabel });
   const gateSec = buildGateSection(verdict.thesis_gate_result);
   const driverSec = formatDriverAssessmentSection(verdict.thesis_driver_assessment);
@@ -1418,7 +1424,11 @@ function buildStage1Message({ item, verdict, activeFin, finSource, carried, stag
   const concallSec = points ? `\n🎙️ *OPEN QUERIES FOR CONCALL:*\n${points}\n` : "";
   const docLink = item.attachment_url ? `\n📄 [View Official Filing →](${item.attachment_url})` : "";
   // At most the first two sentences of the model's summary (the numbers, drivers and signal are printed below it anyway).
-  const shortSummary = String(verdict.verdict_summary || "").split(/(?<=[.!?])\s+/).slice(0, 2).join(" ").slice(0, 360).trim();
+  // Strip guard-injected bullet tags from the prose summary: they are printed in the dedicated blocks below.
+  const cleanSummary = String(verdict.verdict_summary || "")
+    .replace(/(?:🔴\s*SEGMENT RED FLAG|⚠️\s*EXCEPTIONAL ITEM DISCLOSURE)[^.!?]+(?:[.!?]|$)/gi, "")
+    .trim();
+  const shortSummary = cleanSummary.split(/(?<=[.!?])\s+/).slice(0, 2).join(" ").slice(0, 360).trim();
   const summary = verdict._llm_failed || !shortSummary ? "" : `\n📋 *Summary:*\n${shortSummary}\n`;
   // One line that says WHY the signal is what it is, right under the signal, taken from the gate (never from model text).
   const gate = verdict.thesis_gate_result;
@@ -1641,23 +1651,28 @@ async function processOneDeepDive(item, ctx) {
         return { success: true, ticker: item.ticker, stage: "audio-covered-by-transcript" };
       }
       const resolvedMedia = await resolveAudioMediaUrl(classification.audioUrl);
-      const isYoutube = resolvedMedia?.type === "YOUTUBE";
-      const targetAudioUrl = isYoutube ? null : (resolvedMedia?.url || classification.audioUrl);
+      const isYoutube = resolvedMedia?.type === "YOUTUBE" || /(?:youtube\.com\/(?:watch\?v=|embed\/|live\/|shorts\/)|youtu\.be\/)/i.test(classification.audioUrl);
+      const targetAudioUrl = resolvedMedia?.url || classification.audioUrl;
 
       if (isYoutube) {
-        // A YouTube recording cannot be downloaded here; a link on its own is not analysis, so nothing is sent.
-        console.warn(`[WORKER AUDIO] ${item.ticker}: the recording is a YouTube link (${resolvedMedia.url}); the written transcript will be analysed when filed.`);
-        await pool.query("UPDATE corporate_announcements SET deep_dive_status = 'completed' WHERE id = $1", [item.id]);
-        return { success: true, ticker: item.ticker, stage: "audio-youtube" };
-      }
+        const ytAvailable = await isYtDlpAvailable();
+        if (!ytAvailable) {
+          console.warn(`[WORKER AUDIO] ${item.ticker}: YouTube recording link found (${targetAudioUrl}), but yt-dlp is not available on host. The written transcript will be analysed when filed.`);
+          await pool.query("UPDATE corporate_announcements SET deep_dive_status = 'completed' WHERE id = $1", [item.id]);
+          return { success: true, ticker: item.ticker, stage: "audio-youtube-skipped" };
+        }
 
-      if (await audioHandledByEarlierTwin(item, targetAudioUrl)) {
-        console.log(`[WORKER AUDIO] ${item.ticker}: this recording is already being handled through its other exchange copy; skipping the duplicate.`);
-        await pool.query("UPDATE corporate_announcements SET deep_dive_status = 'completed' WHERE id = $1", [item.id]);
-        return { success: true, ticker: item.ticker, stage: "audio-duplicate" };
-      }
+        console.log(`[WORKER AUDIO] ${item.ticker}: Ingesting YouTube concall audio via yt-dlp: ${targetAudioUrl}`);
+        await downloadYouTubeAudio(targetAudioUrl, mp3Path);
+      } else {
+        if (await audioHandledByEarlierTwin(item, targetAudioUrl)) {
+          console.log(`[WORKER AUDIO] ${item.ticker}: this recording is already being handled through its other exchange copy; skipping the duplicate.`);
+          await pool.query("UPDATE corporate_announcements SET deep_dive_status = 'completed' WHERE id = $1", [item.id]);
+          return { success: true, ticker: item.ticker, stage: "audio-duplicate" };
+        }
 
-      await downloadAndExtractMp3(targetAudioUrl, mp3Path);
+        await downloadAndExtractMp3(targetAudioUrl, mp3Path);
+      }
 
       let audioAudit = null;
       let transcriptText = null;
@@ -1793,13 +1808,16 @@ async function processOneDeepDive(item, ctx) {
   const onlyStandaloneParsed = Boolean(extractedFin?.revenue) && extractedFin.statementScope === "STANDALONE" && filingHasConsolidatedStatement;
   if ((!extractedFin || !extractedFin.revenue || onlyStandaloneParsed) && looksLikeStatementDoc && item.attachment_url) {
     const usable = (f) => Boolean(f?.revenue) && (!onlyStandaloneParsed || f.statementScope === "CONSOLIDATED");
+    // A vision-OCR transcription carries rows without the unit line (SJS 2026-11-04: ₹2,827.28 million read as crores, a 10x
+    // error). The unit the filing declares in its own embedded text is the fallback for a statement that prints none.
+    const declaredUnit = detectDocumentUnit(docText);
     // A transcription only counts when it parses into the statements we need; otherwise the next OCR model is tried.
     const ocr = await extractPdfTextDetailed(item.attachment_url, {
       forceOcr: true,
-      acceptOcr: (t) => usable(extractDeterministicFinancials(t, { periodEndHint }))
+      acceptOcr: (t) => usable(extractDeterministicFinancials(t, { periodEndHint, declaredUnit }))
     });
     if (ocr.text && ocr.text.trim().length >= 200 && ocr.text !== docText) {
-      const ocrFin = extractDeterministicFinancials(ocr.text, { periodEndHint });
+      const ocrFin = extractDeterministicFinancials(ocr.text, { periodEndHint, declaredUnit });
       if (usable(ocrFin)) {
         console.log(`[PDF OCR] ${item.ticker}: embedded text layer was unreadable; vision-OCR text parsed into verified financials.`);
         // Clean statements first (they are what the verdict and the gate read), the embedded text layer after them.
@@ -1807,6 +1825,19 @@ async function processOneDeepDive(item, ctx) {
         extractedFin = ocrFin;
         figuresFromOcr = true;
       }
+    }
+  }
+  // Scale sanity (SJS 2026-11-04: ₹580.3 million read as crore, sent as a verified alert): a quarter's profit larger than the whole
+  // trailing year's (market cap / P/E) means the unit is wrong. Such figures are never alerted as verified, and the AI-located
+  // fallback is skipped (it would read the same numbers); the filing goes down the "statement cannot be trusted" path below.
+  let scaleSuspect = null;
+  if (extractedFin?.revenue && looksLikeStatementDoc) {
+    const snap = await loadPriceSnapshot(item.ticker);
+    const check = scaleSanity({ patCr: extractedFin.patAttributable ?? extractedFin.patConsolidated, marketCapCr: snap?.market_cap, pe: snap?.pe_ratio });
+    if (check.suspect) {
+      scaleSuspect = check;
+      console.warn(`[SCALE CHECK] ${item.ticker}: ${check.reason}. The figures are withheld.`);
+      extractedFin = null;
     }
   }
   const groundTruth = getVerifiedGroundTruth(item.ticker);
@@ -1842,7 +1873,7 @@ async function processOneDeepDive(item, ctx) {
   // those that literally appear in the filing, and run them through the same deterministic arithmetic.
   // These are shown as unverified and can never authorise a buy.
   let tableLocateOutage = false; // the AI providers were down while the figures were being located
-  if (!deterministicFin && looksLikeStatementDoc) {
+  if (!deterministicFin && looksLikeStatementDoc && !scaleSuspect) {
     const runPrompt = async (...args) => {
       try {
         return await runNimPrompt(...args);
@@ -1868,7 +1899,9 @@ async function processOneDeepDive(item, ctx) {
   // guard cannot catch it because the garbled numbers do exist in the text. Retry (OCR/LLM providers are often just
   // overloaded), then dead-letter with a failure alert that links the filing (AGENTS.md I5).
   if (looksLikeStatementDoc && !deterministicFin) {
-    const failureMessage = "The results statements could not be machine-read (scanned or garbled PDF; OCR and the text-grounded fallback did not recover them). Open the filing for the numbers.";
+    const failureMessage = scaleSuspect
+      ? `The figures read from the results statement do not fit the market data: ${scaleSuspect.reason}. They were withheld, not alerted. Open the filing for the numbers.`
+      : "The results statements could not be machine-read (scanned or garbled PDF; OCR and the text-grounded fallback did not recover them). Open the filing for the numbers.";
     if (tableLocateOutage) {
       // Parser and OCR found nothing AND the AI that would locate the figures was unreachable: that is an outage, not a
       // hopeless PDF. Wait it out without consuming the filing's attempts; escalate only after the give-up time.
@@ -1997,6 +2030,8 @@ async function processOneDeepDive(item, ctx) {
   // Hard mechanical gate enforcement outside model subjectivity:
   verdict.action_signal = gateResult.finalAction;
   verdict.final_action = gateResult.finalAction;
+  // the model's own summary may state a stance the gates just overrode (HBLENGINE: REASSESS, "a HOLD stance is warranted")
+  verdict.verdict_summary = dropContradictingStance(verdict.verdict_summary, gateResult.finalAction);
   verdict.conviction_score = gateResult.calibratedConviction;
   verdict.thesis_gate_result = gateResult;
   verdict.reporting_period = periodLabel;
@@ -2137,10 +2172,29 @@ async function processOneDeepDive(item, ctx) {
       if (cuts.length && /BUY|ADD/i.test(String(verdict.final_action || verdict.action_signal || ""))) {
         verdict.final_action = "HOLD / MONITOR";
         verdict.action_signal = "HOLD / MONITOR";
+        verdict.verdict_summary = dropContradictingStance(verdict.verdict_summary, "HOLD / MONITOR");
         verdict.conviction_score = Math.min(Number(verdict.conviction_score) || 5, 5);
         if (verdict.thesis_gate_result) {
           verdict.thesis_gate_result = { ...verdict.thesis_gate_result, decisionExplanation: `Management cut guidance on the call (${cuts[0].slice(0, 140)}), so no buy is authorised. ${verdict.thesis_gate_result.decisionExplanation || ""}`.trim() };
         }
+      }
+    }
+  }
+
+  // A guidance CUT stated in the last 21 days (call, recording or deck of this stock) vetoes a buy on whatever is judged next, not
+  // only on the filing that stated it: SJS cut its revenue guide on the 2026-11-05 call and the results alert still said STRONG
+  // BUY 9/10. A newer raise cancels it (see recentGuidanceVeto). A failed lookup changes nothing.
+  {
+    const earlier = await loadPreviousView(item.ticker, [item.id]);
+    const veto = recentGuidanceVeto({ action: verdict.final_action || verdict.action_signal, conviction: verdict.conviction_score, changes: earlier?.guidanceChanges });
+    if (veto.vetoed) {
+      console.log(`[WORKER] ${item.ticker}: a recent guidance cut vetoes the buy (${veto.cut.slice(0, 120)}).`);
+      verdict.final_action = veto.action;
+      verdict.action_signal = veto.action;
+      verdict.conviction_score = veto.conviction;
+      verdict.verdict_summary = dropContradictingStance(verdict.verdict_summary, veto.action);
+      if (verdict.thesis_gate_result) {
+        verdict.thesis_gate_result = { ...verdict.thesis_gate_result, decisionExplanation: `Management cut guidance recently (${veto.cut.slice(0, 140)}), so no buy is authorised on these results alone. ${verdict.thesis_gate_result.decisionExplanation || ""}`.trim() };
       }
     }
   }

@@ -16,6 +16,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..")
 // The same resolver the audio pipeline uses (FFMPEG_PATH, a known local install, then PATH).
 const ffmpegBinary = await import("../services/audio-transcript-analyzer.service.js").then((m) => m.getFfmpegPath()).catch(() => "ffmpeg");
 const ffmpeg = (() => { try { return spawnSync(ffmpegBinary, ["-version"], { stdio: "ignore" }).status === 0; } catch { return false; } })();
+const ytDlp = await import("../services/audio-transcript-analyzer.service.js").then((m) => m.isYtDlpAvailable()).catch(() => false);
 const canvas = await import("@napi-rs/canvas").then(() => true).catch(() => false);
 
 let db = { ok: false, tables: [], error: "DATABASE_URL not set" };
@@ -34,7 +35,7 @@ if (process.env.DATABASE_URL) {
 }
 
 const result = evaluateSmoke({
-  node: process.version, env: process.env, ffmpeg, canvas, db, modelRegistryAgeHours, sourceProblems: findControlCharSources(root)
+  node: process.version, env: process.env, ffmpeg, ytDlp, canvas, db, modelRegistryAgeHours, sourceProblems: findControlCharSources(root)
 });
 console.log(formatSmokeReport(result));
 process.exit(result.ok ? 0 : 1);

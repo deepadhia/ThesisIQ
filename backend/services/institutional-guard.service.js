@@ -160,12 +160,12 @@ export function applyInstitutionalGuard(llmOutput = {}, financialData = null, ti
     // C. Segment Red Flag Scanner & Injection
     if (financialData.segmentRedFlags && financialData.segmentRedFlags.length > 0) {
       for (const flag of financialData.segmentRedFlags) {
-        const flagMsg = `🔴 SEGMENT RED FLAG: ${flag.segment} segment result declined ${flag.yoyDeclinePct}% YoY (₹${flag.currentValue} Cr vs ₹${flag.prevValue} Cr).`;
-        if (!summaryText.includes(flag.segment)) {
+        const flagMsg = `🔴 SEGMENT RED FLAG: ${flag.segment} segment ${flag.metric === "result" ? "result" : "revenue"} declined ${flag.yoyDeclinePct}% YoY (₹${flag.currentValue} Cr vs ₹${flag.prevValue} Cr).`;
+        if (!summaryText.includes(flagMsg)) {
           summaryText = `${summaryText} ${flagMsg}`.trim();
         }
         if (guarded.key_drivers && Array.isArray(guarded.key_drivers)) {
-          guarded.key_drivers.unshift(`SEGMENT RED FLAG: ${flag.segment} EBIT down ${flag.yoyDeclinePct}% YoY`);
+          guarded.key_drivers.unshift(`SEGMENT RED FLAG: ${flag.segment} ${flag.metric === "result" ? "EBIT" : "revenue"} down ${flag.yoyDeclinePct}% YoY`);
         }
       }
     }
@@ -439,6 +439,37 @@ const PLACEHOLDER_PATTERNS = [
  * rounded to the precision the claim itself uses (a correct "₹294 Cr" for a verified 293.6, a correct "662" for 661.53).
  * Merely "close" is not enough: 156.49 (profit for the period) is 0.25% off the owners' PAT 156.88 and does not match.
  */
+const STANCE_FAMILY = { BUY: "BUY", ADD: "BUY", ACCUMULATE: "BUY", HOLD: "HOLD", REASSESS: "REASSESS", TRIM: "REASSESS", SELL: "REASSESS", EXIT: "REASSESS", REDUCE: "REASSESS" };
+const STANCE_WORDS = "BUY|ADD|ACCUMULATE|HOLD|REASSESS|TRIM|SELL|EXIT|REDUCE";
+// A stance is STATED when an upper-case stance word sits next to a stance noun ("a HOLD stance", "recommend BUY", "the rating is SELL").
+// Upper case only: "add capacity" or "hold inventory" are ordinary words.
+const STANCE_STATED = new RegExp(`\\b(?:recommend(?:ation|ed|s)?|rating|stance|call|signal|verdict|action)\\b[^.]{0,40}?\\b(${STANCE_WORDS})\\b|\\b(${STANCE_WORDS})\\b[^.]{0,25}?\\b(?:stance|rating|recommendation|call|signal)\\b`);
+const familyOfAction = (action) => {
+  const a = String(action || "").toUpperCase();
+  if (/REASSESS|TRIM|SELL|EXIT|REDUCE/.test(a)) return "REASSESS";
+  if (/BUY|ADD|ACCUMULATE|BUILD/.test(a)) return "BUY";
+  if (/HOLD|MONITOR/.test(a)) return "HOLD";
+  return null;
+};
+
+/**
+ * The model's summary can state a stance the gates then overrode (HBLENGINE 2026-11-07: final action REASSESS THESIS 4/10, summary
+ * "...a HOLD stance is warranted"). A sentence that states a stance of another family than the final action is dropped, so one
+ * message never carries two opposite calls. Unknown final action or no text: unchanged.
+ */
+export function dropContradictingStance(text, finalAction) {
+  const final = familyOfAction(finalAction);
+  const t = String(text || "");
+  if (!final || !t) return t;
+  const sentences = t.split(/(?<=[.!?])\s+/);
+  const kept = sentences.filter((s) => {
+    const m = STANCE_STATED.exec(s);
+    const word = m && (m[1] || m[2]);
+    return !word || STANCE_FAMILY[word] === final;
+  });
+  return kept.length === sentences.length ? t : kept.join(" ");
+}
+
 export function amountMatchesVerified(amount, candidates) {
   const decimals = (String(amount).split(".")[1] || "").length;
   const scale = 10 ** Math.min(decimals, 6);

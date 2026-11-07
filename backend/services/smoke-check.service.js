@@ -24,6 +24,7 @@ export function evaluateSmoke(f = {}) {
   add("No source file has a control character", !(f.sourceProblems || []).length, `a regex escape was corrupted by an editing accident: ${(f.sourceProblems || []).slice(0, 3).join(", ")} (control character)`, "fail");
 
   add("Allocation gate is ON", String(env.ALLOCATION_GATE || "on").toLowerCase() !== "off", "gate off: every alert is pushed (no board)", "warn");
+  add("yt-dlp on PATH", f.ytDlp === true, "yt-dlp missing: YouTube concall recordings cannot be downloaded and fall back to waiting for the written transcript", "warn");
   const age = f.modelRegistryAgeHours;
   add("AI model registry is fresh (under 48 h)", age === null || age === undefined ? true : age < 48, `model registry is ${Math.round(age)} h old: model discovery may not be refreshing (registry)`, "warn");
 

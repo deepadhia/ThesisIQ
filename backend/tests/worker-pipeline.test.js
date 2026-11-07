@@ -147,7 +147,12 @@ vi.mock('../services/audio-transcript-analyzer.service.js', async () => {
   const actual = await vi.importActual('../services/audio-transcript-analyzer.service.js');
   return {
     ...actual,
-    resolveAudioMediaUrl: vi.fn(async (url) => ({ type: 'DIRECT_AUDIO', url })),
+    resolveAudioMediaUrl: vi.fn(async (url) => {
+      if (/(?:youtube\.com|youtu\.be)/i.test(url)) return { type: 'YOUTUBE', url };
+      return { type: 'DIRECT_AUDIO', url };
+    }),
+    isYtDlpAvailable: vi.fn(async () => true),
+    downloadYouTubeAudio: vi.fn(async (_url, out) => out),
     downloadAndExtractMp3: vi.fn(async (_url, out) => out),
     transcribeAudioWithGroqWhisper: vi.fn(async () => state.whisperText),
     analyzeAudioWithGemini: vi.fn(async () => ({ executive_summary: 'Gemini audio summary', catalysts: [], commitments: [] }))
@@ -258,6 +263,19 @@ describe('quarterly deep-dive worker', () => {
     stubFetch('ok');
   });
 
+  it('the alert never carries two opposite calls: a model sentence stating HOLD is dropped when the gates made the final action REASSESS (HBLENGINE 2026-11-07)', async () => {
+    state.llmVerdict = llmVerdictJson({ verdict_summary: 'Profit contracted sharply on a high base while revenue still grew. Given the contraction, a HOLD stance is warranted.' });
+    const res = await processPendingDeepDives({ announcementIds: ['aaaaaaaa-0000-0000-0000-000000000001'], deadlineAt: Date.now() + 20000 });
+    expect(res.processed).toBe(1);
+    expect(state.sends).toHaveLength(1);
+    expect(state.sends[0]).toMatch(/REASSESS/);
+    expect(state.sends[0]).not.toMatch(/HOLD stance/);
+    // the stored verdict (it feeds the board line and the digests later) no longer states the overridden stance either
+    const stored = state.calls.filter((c) => c.sql.includes('UPDATE corporate_announcements') && Array.isArray(c.params)).map((c) => JSON.stringify(c.params)).join(' ');
+    expect(stored).not.toMatch(/HOLD stance is warranted/);
+    expect(stored).toMatch(/Profit contracted sharply on a high base/);
+  });
+
   it('sends the results alert (no ReferenceError), with verified numbers, gate and thesis driver check, BEFORE marking completed', async () => {
     const res = await processPendingDeepDives({ announcementIds: ['aaaaaaaa-0000-0000-0000-000000000001'], deadlineAt: Date.now() + 20000 });
     expect(res.processed).toBe(1);
@@ -279,7 +297,8 @@ describe('quarterly deep-dive worker', () => {
     expect(msg).not.toMatch(/-3642|-65\.6/);             // the old garbage numbers
 
     const sendIdx = state.calls.findIndex(c => c.sql === '__SEND__');
-    const completedIdx = state.calls.findIndex(c => c.sql.includes("deep_dive_status = 'completed'"));
+    // the UPDATE that marks the row completed (a SELECT that merely filters on that status, such as the previous-view lookup, is not it)
+    const completedIdx = state.calls.findIndex(c => c.sql.includes("SET deep_dive_status = 'completed'"));
     expect(sendIdx).toBeGreaterThan(-1);
     expect(completedIdx).toBeGreaterThan(sendIdx);       // alert first, completion after
     expect(state.calls.some(c => c.sql.includes("'needs_review'"))).toBe(false);
@@ -1263,6 +1282,97 @@ describe('quarterly deep-dive worker', () => {
     expect(msg).toContain('-57.55% YoY');
   });
 
+  it('an OCR-read statement with no unit line takes the unit the filing declares: ₹2,827.28 million is ₹282.73 Cr, never ₹2,827.28 Cr (SJS 2026-11-04, a 10x error that was sent)', async () => {
+    state.docText = [
+      'Outcome of the meeting of the Board of Directors',
+      'The Board has considered and approved the un-audited consolidated financial results of the company for the quarter and half year ended September 30, 2026.',
+      '(Rs. in million)', '(Rs. in million)', '(Rs. in million)',
+      'The statement pages of this scanned filing have no readable text layer.'
+    ].join('\n');
+    state.ocrText = [
+      'Particulars', 'September 30, 2026', 'June 30, 2026', 'September 30, 2025', 'September 30, 2026', 'September 30, 2025',
+      'Unaudited Unaudited Unaudited Unaudited Unaudited',
+      'I Revenue from operations 2,827.28 2,500.00 2,418.00 5,327.28 4,700.00',
+      'II Other income 30.00 25.00 20.00 55.00 40.00',
+      'III Total Income (I+II) 2,857.28 2,525.00 2,438.00 5,382.28 4,740.00',
+      'IV Expenses', 'Finance costs 20.00 18.00 15.00 38.00 30.00',
+      'Depreciation and amortisation expense 100.00 90.00 80.00 190.00 160.00',
+      'Total Expenses (IV) 2,200.00 2,000.00 1,900.00 4,200.00 3,700.00',
+      'V Profit before tax (III-IV) 657.28 525.00 538.00 1,182.28 1,040.00',
+      'VI Tax Expense 165.00 130.00 135.00 295.00 260.00',
+      'VII Profit for the period/year (V-VI) 492.28 395.00 403.00 887.28 780.00'
+    ].join('\n');
+    const res = await processPendingDeepDives({ announcementIds: ['aaaaaaaa-0000-0000-0000-000000000001'], deadlineAt: Date.now() + 20000 });
+    expect(res.processed).toBe(1);
+    const msg = state.sends[0];
+    expect(msg).toMatch(/Revenue:\* ₹282\.7/);
+    expect(msg).not.toMatch(/2,?827\.28 Cr/);
+  });
+
+  it('figures whose scale does not fit the market data are NOT alerted as verified: a quarter bigger than the whole trailing year is withheld and retried, with no AI-located fallback on the same numbers', async () => {
+    state.marketSnapshot = { share_price: 100, pe_ratio: 10, market_cap: 100, market_data_as_of: new Date().toISOString() };   // trailing profit 10 Cr; the Shakti quarter is 38.51 Cr
+    const res = await processPendingDeepDives({ announcementIds: ['aaaaaaaa-0000-0000-0000-000000000001'], deadlineAt: Date.now() + 20000 });
+    expect(res.processed).toBe(0);
+    expect(state.sends).toHaveLength(0);
+    expect(state.calls.some(c => c.sql.includes("deep_dive_status = 'completed'"))).toBe(false);
+    expect(attemptKeys()).toContain('unreadable_attempts');              // retried through the existing "cannot trust the statement" path
+  });
+
+  it('figures that fit the market data are alerted as before (the scale check never blocks a normal result)', async () => {
+    state.marketSnapshot = { share_price: 500, pe_ratio: 26.7, market_cap: 4265, market_data_as_of: new Date().toISOString() };
+    const res = await processPendingDeepDives({ announcementIds: ['aaaaaaaa-0000-0000-0000-000000000001'], deadlineAt: Date.now() + 20000 });
+    expect(res.processed).toBe(1);
+    expect(state.sends[0]).toContain('VERIFIED FINANCIALS');
+  });
+
+  describe('a guidance cut stated in the last 21 days vetoes a buy on the results that follow (SJS 2026-11-05: guide cut on the call, results alert STRONG BUY 9/10)', () => {
+    const daysAgo = (d) => new Date(Date.now() - d * 86400000).toISOString();
+    const CUT = 'Revenue growth outlook: 1.5 to 2 times industry growth -> 1.2 to 1.5 times (cut), due to the global macro environment';
+    // a clean, strong quarter for the Shakti contract: EBITDA margin about 26% against a 15% hurdle, revenue +17%, profit +22%
+    const strong = () => [
+      '(Rs. in Crores)', 'Particulars', 'September 30, 2026', 'June 30, 2026', 'September 30, 2025', 'September 30, 2026', 'September 30, 2025',
+      'Unaudited Unaudited Unaudited Unaudited Unaudited',
+      'I Revenue from operations 2,827.28 2,500.00 2,418.00 5,327.28 4,700.00',
+      'II Other income 30.00 25.00 20.00 55.00 40.00',
+      'III Total Income (I+II) 2,857.28 2,525.00 2,438.00 5,382.28 4,740.00',
+      'IV Expenses', 'Finance costs 20.00 18.00 15.00 38.00 30.00',
+      'Depreciation and amortisation expense 100.00 90.00 80.00 190.00 160.00',
+      'Total Expenses (IV) 2,200.00 2,000.00 1,900.00 4,200.00 3,700.00',
+      'V Profit before tax (III-IV) 657.28 525.00 538.00 1,182.28 1,040.00',
+      'VI Tax Expense 165.00 130.00 135.00 295.00 260.00',
+      'VII Profit for the period/year (V-VI) 492.28 395.00 403.00 887.28 780.00'
+    ].join('\n');
+    const run = () => processPendingDeepDives({ announcementIds: ['aaaaaaaa-0000-0000-0000-000000000001'], deadlineAt: Date.now() + 20000 });
+    const prior = (o = {}) => ({ action: 'HOLD / MONITOR', conviction: '5', hurdle: null, assessment: [], guidance: null, judged_at: daysAgo(2), ...o });
+
+    it('baseline: with no earlier guidance change this strong quarter is a buy', async () => {
+      state.docText = `Financial results for the quarter ended September 30, 2026\n${strong()}`;
+      state.llmVerdict = llmVerdictJson({ action_signal: 'ADD', conviction_score: 9 });
+      await run();
+      expect(state.sends[0]).toMatch(/ACTION SIGNAL:[^\n]*(BUY|ADD|ACCUMULATE)/i);
+    });
+
+    it('with a revenue-guide cut stated two days earlier the same quarter is HOLD / MONITOR and says why', async () => {
+      state.docText = `Financial results for the quarter ended September 30, 2026\n${strong()}`;
+      state.llmVerdict = llmVerdictJson({ action_signal: 'ADD', conviction_score: 9 });
+      state.previousRows = [prior({ guidance: [CUT] })];
+      await run();
+      const msg = state.sends[0];
+      expect(msg).toMatch(/ACTION SIGNAL:[^\n]*HOLD/i);
+      expect(msg).not.toMatch(/ACTION SIGNAL:[^\n]*(BUY|ADD|ACCUMULATE)/i);
+      expect(msg).toMatch(/cut guidance/i);
+      expect(msg).toContain('1.2 to 1.5 times');
+    });
+
+    it('a cut older than 21 days, or one a newer raise has cancelled, does not veto', async () => {
+      state.docText = `Financial results for the quarter ended September 30, 2026\n${strong()}`;
+      state.llmVerdict = llmVerdictJson({ action_signal: 'ADD', conviction_score: 9 });
+      state.previousRows = [prior({ judged_at: daysAgo(40), guidance: [CUT] })];
+      await run();
+      expect(state.sends[0]).toMatch(/ACTION SIGNAL:[^\n]*(BUY|ADD|ACCUMULATE)/i);
+    });
+  });
+
   describe('standalone-only parse of a filing that prints consolidated results', () => {
     const consolidated = fs.readFileSync(path.resolve(here, 'fixtures/anantraj-q2fy27-consolidated.txt'), 'utf8');
     const standaloneOnly = `Statement of Unaudited Standalone Financial Results for the Quarter and Half Year ended September 30, 2026
@@ -1486,6 +1596,18 @@ Profit for the period 80.96 78.00 74.20 158.96 140.00 300.00
       expect(res.processed).toBe(1);
       expect(state.sends).toHaveLength(0);
       expect(vi.mocked(sendPipelineFailureAlert)).not.toHaveBeenCalled();
+      expect(state.calls.some(c => c.sql.includes("deep_dive_status = 'completed'"))).toBe(true);
+    });
+
+    it('a YouTube recording downloads via yt-dlp and enters the concall transcript pipeline', async () => {
+      state.item = audioItem();
+      state.docText = 'Subject: Earnings Call. Audio recording link: https://www.youtube.com/watch?v=dQw4w9WgXcQ';
+      state.whisperText = 'Managing Director: We delivered 25% revenue growth and maintain 22% margin guidance.';
+      const { downloadYouTubeAudio } = await import('../services/audio-transcript-analyzer.service.js');
+      vi.mocked(downloadYouTubeAudio).mockClear();
+      const res = await processPendingDeepDives({ announcementIds: ['aaaaaaaa-0000-0000-0000-000000000001'], deadlineAt: Date.now() + 20000 });
+      expect(res.processed).toBe(1);
+      expect(vi.mocked(downloadYouTubeAudio)).toHaveBeenCalled();
       expect(state.calls.some(c => c.sql.includes("deep_dive_status = 'completed'"))).toBe(true);
     });
   });

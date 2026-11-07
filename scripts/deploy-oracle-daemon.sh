@@ -11,9 +11,15 @@ echo "================================================================"
 echo "🚀 Setting up Multibagger Live Daemon on Oracle Cloud Server..."
 echo "================================================================"
 
-# 1. Update system & install Node.js 20 LTS
+# 1. Update system & install Node.js 20 LTS, ffmpeg, and yt-dlp
 sudo apt-get update -y
-sudo apt-get install -y curl git build-essential ffmpeg
+sudo apt-get install -y curl git build-essential ffmpeg python3-pip
+
+if ! command -v yt-dlp &> /dev/null; then
+  echo "Installing yt-dlp standalone binary..."
+  sudo curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp || true
+  sudo chmod a+rx /usr/local/bin/yt-dlp || true
+fi
 
 if ! command -v node &> /dev/null; then
   echo "Installing Node.js 20 LTS..."

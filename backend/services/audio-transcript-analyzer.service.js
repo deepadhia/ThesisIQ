@@ -23,6 +23,35 @@ export function getFfmpegPath() {
   return "ffmpeg"; // fallback to PATH
 }
 
+// Helper to find yt-dlp on system (YT_DLP_PATH, known installs, then PATH).
+export function getYtDlpPath() {
+  if (process.env.YT_DLP_PATH && fs.existsSync(process.env.YT_DLP_PATH)) {
+    return process.env.YT_DLP_PATH;
+  }
+  const knownPaths = [
+    "C:\\Program Files\\yt-dlp\\yt-dlp.exe",
+    "C:\\yt-dlp\\yt-dlp.exe",
+    path.join(process.env.LOCALAPPDATA || "", "Programs", "yt-dlp", "yt-dlp.exe"),
+    "/usr/local/bin/yt-dlp",
+    "/usr/bin/yt-dlp",
+    "/home/ubuntu/.local/bin/yt-dlp"
+  ];
+  for (const p of knownPaths) {
+    if (fs.existsSync(p)) return p;
+  }
+  return "yt-dlp"; // fallback to PATH
+}
+
+export async function isYtDlpAvailable() {
+  const binary = getYtDlpPath();
+  try {
+    const { stdout } = await execFileAsync(binary, ["--version"], { timeout: 3000 });
+    return Boolean(stdout && stdout.trim().length > 0);
+  } catch {
+    return false;
+  }
+}
+
 /** A link that joins or registers for a LIVE call (Zoom webinar / meeting, Teams, Google Meet): never a recording. */
 function isJoiningLink(url) {
   return /zoom\.us\/(?:webinar\/register|meeting\/register|j\/|my\/|s\/)|teams\.microsoft\.com\/l\/meetup-join|teams\.live\.com\/meet|meet\.google\.com\/[a-z]|webex\.com\/(?:meet|join|webappng)/i.test(String(url || ""));
@@ -93,8 +122,8 @@ export async function resolveAudioMediaUrl(url, { fetchFn = fetch, timeoutMs = 6
     return { type: "DIRECT_AUDIO", url };
   }
 
-  // Direct YouTube links
-  if (/(?:youtube\.com\/watch\?v=|youtu\.be\/)/i.test(url)) {
+  // Direct YouTube links (watch, embed, live, shorts, youtu.be)
+  if (/(?:youtube\.com\/(?:watch\?v=|embed\/|live\/|shorts\/)|youtu\.be\/)/i.test(url)) {
     return { type: "YOUTUBE", url };
   }
 
@@ -117,8 +146,8 @@ export async function resolveAudioMediaUrl(url, { fetchFn = fetch, timeoutMs = 6
 
     const html = await res.text();
 
-    // 1. Check for YouTube links in HTML
-    const ytMatch = html.match(/(?:href|src)=["'](https?:\/\/(?:www\.)?(?:youtube\.com\/watch\?v=[a-zA-Z0-9_\-]+|youtu\.be\/[a-zA-Z0-9_\-]+)[^"']*)["']/i);
+    // 1. Check for YouTube links in HTML (including embed/iframe/live/watch)
+    const ytMatch = html.match(/(?:href|src)=["'](https?:\/\/(?:www\.)?(?:youtube\.com\/(?:watch\?v=|embed\/|live\/|shorts\/)[a-zA-Z0-9_\-]+|youtu\.be\/[a-zA-Z0-9_\-]+)[^"']*)["']/i);
     if (ytMatch) {
       return { type: "YOUTUBE", url: ytMatch[1], originalUrl: url };
     }
@@ -183,9 +212,63 @@ async function fetchMedia(url) {
 }
 
 /**
+ * Downloads audio stream from a YouTube URL and converts/extracts lightweight MP3 audio using yt-dlp.
+ * Limits duration to prevent downloading 3-4 hour AGMs, preserving Invariant I10.
+ */
+export async function downloadYouTubeAudio(youtubeUrl, outputMp3Path, { timeoutMs = 60000, maxDurationSec = 6000 } = {}) {
+  const ytDlp = getYtDlpPath();
+  const ffmpeg = getFfmpegPath();
+  const tempDir = path.dirname(outputMp3Path);
+  const baseName = path.basename(outputMp3Path, path.extname(outputMp3Path));
+  const template = path.join(tempDir, `${baseName}.%(ext)s`);
+
+  const args = [
+    "--no-playlist",
+    "--extract-audio",
+    "--audio-format", "mp3",
+    "--audio-quality", "32k",
+    "--max-filesize", "60M",
+    "--socket-timeout", "15",
+    "--match-filter", `duration <= ${maxDurationSec}`,
+    "--no-check-certificates",
+    "--postprocessor-args", "ExtractAudio:-ar 16000 -ac 1 -b:a 32k",
+    "-o", template
+  ];
+
+  if (ffmpeg && ffmpeg !== "ffmpeg") {
+    args.push("--ffmpeg-location", path.dirname(ffmpeg));
+  }
+
+  args.push(youtubeUrl);
+
+  console.log(`[AUDIO ANALYZER] Downloading YouTube audio via yt-dlp (${ytDlp}): ${youtubeUrl}`);
+  try {
+    await execFileAsync(ytDlp, args, { timeout: timeoutMs });
+  } catch (err) {
+    if (err.stdout?.includes("does not meet filter criteria") || err.stderr?.includes("does not meet filter criteria")) {
+      throw new Error(`Video exceeds maximum concall duration limit (${maxDurationSec}s): ${youtubeUrl}`);
+    }
+    throw new Error(`yt-dlp execution failed: ${err.message}`);
+  }
+
+  if (!fs.existsSync(outputMp3Path) || fs.statSync(outputMp3Path).size === 0) {
+    throw new Error(`yt-dlp did not produce valid audio file at ${outputMp3Path}`);
+  }
+
+  const stats = fs.statSync(outputMp3Path);
+  console.log(`[AUDIO ANALYZER] YouTube MP3 ready at ${outputMp3Path} (${(stats.size / (1024 * 1024)).toFixed(2)} MB)`);
+  return outputMp3Path;
+}
+
+/**
  * Downloads media from URL and converts/extracts lightweight MP3 audio using ffmpeg.
  */
 export async function downloadAndExtractMp3(url, outputMp3Path) {
+  // If directly given a YouTube link, delegate to downloadYouTubeAudio
+  if (/(?:youtube\.com\/(?:watch\?v=|embed\/|live\/|shorts\/)|youtu\.be\/)/i.test(url)) {
+    return downloadYouTubeAudio(url, outputMp3Path);
+  }
+
   const tempDownloadPath = outputMp3Path.replace(/\.mp3$/i, "_raw.tmp");
   
   console.log(`[AUDIO ANALYZER] Downloading media stream from: ${url}`);
@@ -205,9 +288,10 @@ export async function downloadAndExtractMp3(url, outputMp3Path) {
       return downloadAndExtractMp3(resolved.url, outputMp3Path);
     }
     if (resolved?.type === "YOUTUBE") {
-      throw new Error(`YOUTUBE_MEDIA_LINK:${resolved.url}`);
+      console.log(`[AUDIO ANALYZER] Landing page contains YouTube recording. Delegating to yt-dlp: ${resolved.url}`);
+      return downloadYouTubeAudio(resolved.url, outputMp3Path);
     }
-    throw new Error(`Landing page did not contain direct audio link (.mp3/.m4a): ${url}`);
+    throw new Error(`Landing page did not contain direct audio link (.mp3/.m4a) or YouTube recording: ${url}`);
   }
 
   const arrayBuffer = await response.arrayBuffer();
