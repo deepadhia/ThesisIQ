@@ -44,7 +44,9 @@ import {
   buildPriceContextLine,
   formatThesisDigestMessage,
   dedupeNearDuplicates,
-  dropRestatedFigures
+  dropRestatedFigures,
+  tokenSet,
+  nearDuplicate
 } from "../services/thesis-digest.service.js";
 import { computeGuidancePacing, formatPacingSection, compactPacing, formatTrackRecord } from "../services/guidance-pacing.service.js";
 import {
@@ -149,7 +151,9 @@ export function isProceduralNoise(statement = "", metric = "") {
     metricLower === "meeting schedule" ||
     metricLower === "general" ||
     metricLower === "disclosure transparency" ||
-    metricLower.includes("dividend")
+    metricLower.includes("dividend") ||
+    metricLower.includes("compliance") ||
+    metricLower.includes("accounting")
   ) {
     return true;
   }
@@ -172,6 +176,18 @@ export function isProceduralNoise(statement = "", metric = "") {
     stmtLower.includes("dividend payout") ||
     stmtLower.includes("declaration of dividend")
   ) {
+    return true;
+  }
+
+  // Investee / associate / third-party company equity listings or external corporate actions
+  const INVESTEE_OR_THIRD_PARTY_LISTING = /\b(?:shares\b.*?\blist(?:ed|ing)|equity\s+shares\b.*?\blist(?:ed|ing)|list(?:ed|ing)\s+on\s+(?:the\s+)?main\s+board|list(?:ed|ing)\s+on\s+(?:both\s+(?:the\s+)?)?exchanges|impact\s+on\s+(?:the\s+)?investment|reflected\s+from\s+next\s+quarter|associate\s+company|investee\s+company)\b/i;
+  if (INVESTEE_OR_THIRD_PARTY_LISTING.test(stmtLower)) {
+    return true;
+  }
+
+  // Statutory accounting notes, compensation, and auditor/board review formalities
+  const STATUTORY_ACCOUNTING_NOTE = /\b(?:compulsory\s+acquisition|compensation\s+received\s+from|regrouped(?:,\s*wherever\s+necessary)?|exceptional\s+items\s+include|reviewed\s+by\s+(?:the\s+)?audit\s+committee|approved\s+by\s+(?:the\s+)?board\s+of\s+directors|unmodified\s*(?:auditor(?:'s)?|audit|limited)?\s*(?:review\s*)?report|clean\s+financial\s+disclosures|statutory\s+auditor|regulation\s+33|in\s+accordance\s+with\s+ind\s*as)\b/i;
+  if (STATUTORY_ACCOUNTING_NOTE.test(stmtLower)) {
     return true;
   }
 
@@ -406,9 +422,10 @@ ${chunkText}
 1. Evaluate Management Credibility (Tier 1: High Track Record / Promises Kept | Tier 2: Neutral / Unproven | Tier 3: High Risk / Overpromises).
 2. Determine Institutional Action Signal: ADD, HOLD, or TRIM.
 3. List 3 concrete reasons supporting this signal.
-4. Extract 1-2 core management commitments with target timelines.
+4. Extract 1-2 core management commitments with target timelines regarding THIS company's forward operational, financial, or capex guidance (see rule 13).
 5. EXPLICITLY DETECT GUIDANCE DELAYS: If a past commitment (e.g., plant commissioning, margin target, receivable reduction) was pushed back by 1-2 quarters in this concall/PPT, mark status as "Delayed", update the timeline, and extract the EXACT reason management gave into blockers_and_risks.
 6. VERIFY EACH THESIS DRIVER listed above against this filing (see thesis driver rules below).
+7. EXTRACT MANAGEMENT CLARIFICATIONS ON SHARE-PRICE OVERHANGS: If the company experienced any profit decline, margin drop, inventory/working capital drain, project delay, or high-base effect, extract management's explicit explanation, defense, and forward guidance on how and when it resolves. Return [] if there were no overhangs or management provided no commentary.
 
 ── Institutional Financial & Thesis Rules ──
 1. MANDATORY YOY PRECEDENCE: YoY comparison (the current quarter vs the same quarter of the previous year) is MANDATORY and MUST take precedence over QoQ sequential comparisons. If PAT contracts YoY (> -10%) or EBITDA margin contracts YoY (> -200 bps), the summary MUST lead with this YoY contraction as the headline financial result. NEVER bury a YoY profit or margin decline behind a QoQ sequential recovery framing.
@@ -429,6 +446,10 @@ ${chunkText}
 10. NO PLACEHOLDERS: Never output template tokens such as X, Y, Z, "₹X Cr" or "details". If the filing does not state a figure, name the item without a number or omit the item; return an empty list when the filing has nothing for a field.
 11. UNIT SCALE INTEGRITY: Verified financials in ₹ Crores are provided above. NEVER confuse document units (${finData?.unit || 'Crores'}) with ₹ Crores.
 12. CASH FLOW & WORKING CAPITAL AUDIT: If Cash Conversion is poor (<40%) or substantial profit is absorbed by working capital / inventory buildup, you MUST highlight this as a primary drag in key_concerns_and_drags and factor it into the conviction score.
+13. STRICT DEFINITION OF A MANAGEMENT COMMITMENT:
+   - A commitment MUST be a forward-looking operational pledge, target, or guidance stated by THIS company's management regarding its own business operations, financials, capacity expansions, or capital structure (e.g. FY28 revenue guidance, EBITDA margin floor, plant commissioning date, debt reduction target, demerger of its own division).
+   - NEVER extract third-party or investee company events (e.g., an investee/associate company listing its shares or raising capital), statutory accounting disclosures, routine board meeting formalities, or historical retrospective notes as commitments.
+   - If no genuine management commitments exist in this filing, you MUST return commitments = [].
 ${DRIVER_ASSESSMENT_PROMPT_RULES}
 
 Return ONLY a valid JSON object:
@@ -442,18 +463,19 @@ Return ONLY a valid JSON object:
   "key_concerns_and_drags": ["<a margin compression, cost spike, segment decline or working-capital point that THIS filing states>"],
   "thesis_operational_kpis": ["<KPI name>: <figure and unit exactly as printed in THIS filing>"],
   "concall_verification_points": ["<specific open question to verify in the management Q&A>"],
+  "management_clarifications": ["<Specific explanation, defense or guidance management provided in THIS filing for any financial contraction, working capital drain, margin pressure, project delay, or high-base effect>"],
   "thesis_driver_assessment": [
     { "driver": "<exact driver name from the list>", "status": "CONFIRMED" | "ON_TRACK" | "AT_RISK" | "BROKEN" | "NO_EVIDENCE", "evidence": "<=200 chars with facts from THIS filing" }
   ],
   "commitments": [
     {
-      "statement": "Commitment text",
+      "statement": "Operational target or guidance stated by THIS company's management",
       "metric": "Metric name (e.g. Revenue, EBITDA Margin, Plant Commissioning, Receivables Days)",
       "target_value": "Target figure with unit, as stated in the filing",
       "guidance_scope": "QUARTERLY" | "ANNUAL" | "MULTI_YEAR" | "CAPEX_MILESTONE",
       "timeline": "Target quarter, fiscal year or year range exactly as stated in the filing",
       "status": "Pending" | "Achieved" | "Partially Achieved" | "Missed",
-      "status_rule": "CRITICAL: For multi-stage regulatory processes (e.g. Demergers, NCLT approvals, QIP allotments, Plant Commissioning), initial Board approval MUST be marked status 'Pending' (In Progress). Mark 'Achieved' ONLY when final operational completion or regulatory clearance is explicitly documented in the evidence.",
+      "status_rule": "CRITICAL: For multi-stage regulatory processes of THIS company (e.g. its own Demergers, NCLT approvals, QIP allotments, Plant Commissioning), initial Board approval MUST be marked status 'Pending' (In Progress). Mark 'Achieved' ONLY when final operational completion or regulatory clearance is explicitly documented in the evidence. NEVER extract third-party or investee company events as commitments.",
       "blockers_and_risks": "If Delayed or Missed, specify the exact reason given by management in concall (e.g. 'Equipment lead time & customs clearance delay by 2 quarters')",
       "credibility_impact": "positive" | "neutral" | "negative"
     }
@@ -1366,9 +1388,12 @@ export function buildVerifiedFinancialsBlock(fin, { carried = false, periodLabel
   const rev = [fmtPct(fin.revenueYoYGrowthPct) && `${fmtPct(fin.revenueYoYGrowthPct)} YoY`, fmtPct(fin.revenueQoQGrowthPct) && `${fmtPct(fin.revenueQoQGrowthPct)} QoQ`].filter(Boolean).join(" | ");
   lines.push(`• *Revenue:* ₹${fin.revenue} Cr${rev ? ` (${rev})` : ""}`);
   if (fin.ebitda !== null && fin.ebitda !== undefined) {
-    const bps = (fin.ebitdaMarginBpsDelta !== null && fin.ebitdaMarginBpsDelta !== undefined) ? `, ${fin.ebitdaMarginBpsDelta >= 0 ? "+" : ""}${fin.ebitdaMarginBpsDelta} bps YoY` : "";
+    const bps = (fin.ebitdaMarginBpsDelta !== null && fin.ebitdaMarginBpsDelta !== undefined) ? ` (${fin.ebitdaMarginBpsDelta >= 0 ? "+" : ""}${fin.ebitdaMarginBpsDelta} bps YoY)` : "";
     const eYoY = fmtPct(fin.ebitdaYoYGrowthPct);
-    lines.push(`• *EBITDA:* ₹${fin.ebitda} Cr${eYoY ? ` (${eYoY} YoY)` : ""} — margin ${fin.ebitdaMarginPct}%${bps}`);
+    lines.push(`• *EBITDA:* ₹${fin.ebitda} Cr${eYoY ? ` (${eYoY} YoY)` : ""}`);
+    if (fin.ebitdaMarginPct !== null && fin.ebitdaMarginPct !== undefined) {
+      lines.push(`• *Margin:* ${fin.ebitdaMarginPct}%${bps}`);
+    }
   }
   const patVal = fin.patAttributable ?? fin.patConsolidated;
   if (patVal !== null && patVal !== undefined) {
@@ -1376,13 +1401,17 @@ export function buildVerifiedFinancialsBlock(fin, { carried = false, periodLabel
     const turn = fin.patTurnaround === "LOSS_TO_PROFIT" ? " (turnaround from loss)" : fin.patTurnaround === "PROFIT_TO_LOSS" ? " (swing to loss)" : "";
     lines.push(`• *PAT (owners):* ₹${patVal} Cr${pat ? ` (${pat})` : ""}${turn}`);
   }
+  const flagLines = [];
   if (fin.exceptionalGain) {
-    lines.push(`• ⚠️ *Exceptional gain:* ₹${fin.exceptionalGain} Cr → Normalised PAT ₹${fin.normalisedPat} Cr${fmtPct(fin.normalisedPatYoYGrowthPct) ? ` (${fmtPct(fin.normalisedPatYoYGrowthPct)} YoY)` : ""}`);
+    flagLines.push(`• ⚠️ *Exceptional gain:* ₹${fin.exceptionalGain} Cr → Normalised PAT ₹${fin.normalisedPat} Cr${fmtPct(fin.normalisedPatYoYGrowthPct) ? ` (${fmtPct(fin.normalisedPatYoYGrowthPct)} YoY)` : ""}`);
   }
   for (const flag of (fin.segmentRedFlags || []).slice(0, 2)) {
     const segmentName = String(flag.segment).toLowerCase().replace(/(^|[^a-z])([a-z])/g, (m, pre, c) => pre + c.toUpperCase());
     const measure = flag.metric === "result" ? "profit (segment result)" : "revenue";
-    lines.push(`• 🔴 *Segment red flag:* ${segmentName} ${measure} down ${Math.abs(flag.yoyDeclinePct)}% YoY (₹${flag.currentValue} Cr vs ₹${flag.prevValue} Cr)`);
+    flagLines.push(`• 🔴 *Segment red flag:* ${segmentName} ${measure} down ${Math.abs(flag.yoyDeclinePct)}% YoY (₹${flag.currentValue} Cr vs ₹${flag.prevValue} Cr)`);
+  }
+  if (flagLines.length > 0) {
+    lines.push("", ...flagLines);
   }
   const head = carried
     ? `📊 *LATEST VERIFIED RESULTS${periodLabel ? ` (${periodLabel})` : ""}:*`
@@ -1467,7 +1496,7 @@ function splitDriversSafely(str) {
   return parts.filter(Boolean);
 }
 
-function buildGateSection(gateInfo) {
+function buildGateSection(gateInfo, { includeDriverSummary = true } = {}) {
   if (!gateInfo || !gateInfo.decisionExplanation) return "";
   const badge = GATE_BADGES[gateInfo.statusClassification] || "⚪ *Gate result*";
   let rawExpl = String(gateInfo.decisionExplanation || "").trim();
@@ -1503,14 +1532,16 @@ function buildGateSection(gateInfo) {
     lines.push(`• *Trigger:* ${triggerText}`);
   }
 
-  if (brokenDrivers.length > 0) {
-    lines.push(`• *Drivers broken:*`);
-    brokenDrivers.forEach(d => lines.push(`   ❌ ${d}`));
-  }
+  if (includeDriverSummary) {
+    if (brokenDrivers.length > 0) {
+      lines.push(`• *Drivers broken:*`);
+      brokenDrivers.forEach(d => lines.push(`   ❌ ${d}`));
+    }
 
-  if (atRiskDrivers.length > 0) {
-    lines.push(`• *Drivers at risk:*`);
-    atRiskDrivers.forEach(d => lines.push(`   ⚠️ ${d}`));
+    if (atRiskDrivers.length > 0) {
+      lines.push(`• *Drivers at risk:*`);
+      atRiskDrivers.forEach(d => lines.push(`   ⚠️ ${d}`));
+    }
   }
 
   const hurdle = gateInfo.thesisGate;
@@ -1547,47 +1578,221 @@ function bulletList(list, max = 3) {
   return dedupeByLabel(dedupeNearDuplicates((list || []).filter(x => typeof x === "string" && x.length > 5))).slice(0, max).map(x => `• ${x.replace(/^•\s*/, "")}`).join("\n");
 }
 
+const COMPLIANCE_BOILERPLATE = /\b(?:unmodified\s*(?:auditor(?:'s)?|audit|limited)?\s*(?:review\s*)?report|clean\s+(?:financial\s+disclosures|audit\s+report|opinion)|in\s+accordance\s+with\s+ind\s*as|approved\s+by\s+(?:the\s+)?board|taken\s+on\s+record|submitted\s+to\s+(?:the\s+)?(?:stock\s+)?exchange|regulation\s+33|statutory\s+auditor(?:'s)?\s+(?:report|review)|without\s+any\s+(?:audit\s+)?qualification|no\s+(?:audit\s+)?qualification|audit\s+committee\s+(?:recommended|reviewed)|board\s+of\s+directors\s+(?:approved|recommended))\b/i;
+
+function isNearOrSubsumedStatement(textA, tokenSetA, textB, tokenSetB) {
+  if (nearDuplicate(tokenSetA, tokenSetB)) return true;
+  const aNorm = textA.toLowerCase().replace(/[^a-z0-9]/g, "");
+  const bNorm = textB.toLowerCase().replace(/[^a-z0-9]/g, "");
+  if (aNorm.length > 10 && (aNorm.includes(bNorm) || bNorm.includes(aNorm))) return true;
+  const small = tokenSetA.size <= tokenSetB.size ? tokenSetA : tokenSetB;
+  const large = small === tokenSetA ? tokenSetB : tokenSetA;
+  if (small.size >= 3) {
+    let shared = 0;
+    for (const t of small) if (large.has(t)) shared++;
+    if (shared / small.size >= 0.75) return true;
+  }
+  return false;
+}
+
+function formatQuarterDisplay(q) {
+  const p = parseFiscalQuarter(q);
+  if (p && p.quarter && p.fiscalYear) {
+    return `Q${p.quarter} FY${p.fiscalYear}`;
+  }
+  return String(q || "").replace(/_/g, " ").trim();
+}
+
+/**
+ * Loads up to 4 completed quarterly snapshots for this stock to track the multi-quarter thesis trend.
+ */
+export async function loadQuarterlyThesisTrend(stockId, ticker, currentQuarter = null) {
+  try {
+    const { rows } = await pool.query(
+      `SELECT quarter, thesis_status, final_action, conviction_score, confidence_score, thesis_status_reason, summary
+       FROM quarterly_snapshots
+       WHERE stock_id = $1 OR stock_id = (SELECT id FROM stocks WHERE ticker = $2 LIMIT 1)
+       ORDER BY quarter DESC
+       LIMIT 8`,
+      [stockId, ticker]
+    );
+    if (!rows || rows.length === 0) return [];
+    const curNorm = currentQuarter ? String(currentQuarter).replace(/[\s_]+/g, "").toUpperCase() : "";
+    const filtered = rows.filter(r => {
+      const qNorm = (r.quarter || "").replace(/[\s_]+/g, "").toUpperCase();
+      return !curNorm || qNorm !== curNorm;
+    });
+    // Take the last 3 historical quarters, then sort chronologically (oldest to newest)
+    const sorted = filtered.slice(0, 3).sort((a, b) => compareFiscalQuartersDesc(b.quarter, a.quarter));
+    return sorted;
+  } catch (err) {
+    console.warn(`[WORKER] Could not load quarterly thesis trend for ${ticker}:`, err.message);
+    return [];
+  }
+}
+
+/**
+ * Renders up to 4 quarters of thesis status & conviction trajectory.
+ */
+export function formatQuarterlyThesisTrend(historySnapshots = [], currentQuarter = null, currentVerdict = null) {
+  const lines = [];
+  const curNorm = currentQuarter ? String(currentQuarter).replace(/[\s_]+/g, "").toUpperCase() : "";
+
+  // Filter historical snapshots to exclude current quarter if already in DB
+  const past = (historySnapshots || []).filter(s => {
+    const qNorm = (s.quarter || "").replace(/[\s_]+/g, "").toUpperCase();
+    return !curNorm || qNorm !== curNorm;
+  });
+
+  // Take up to 3 past quarters sorted chronologically
+  const chronological = past.slice(0, 3).sort((a, b) => compareFiscalQuartersDesc(b.quarter, a.quarter));
+
+  for (const s of chronological) {
+    const qLabel = formatQuarterDisplay(s.quarter);
+    const act = s.final_action || "HOLD";
+    const status = String(s.thesis_status || "");
+    const emoji = /BUY|ADD|CONFIRMED|BEAT/i.test(act + status) ? "🟢" : (/REASSESS|TRIM|SELL|DEVIATION|BROKEN/i.test(act + status) ? "🔴" : "🟡");
+    const score = s.conviction_score || s.confidence_score;
+    const conv = score ? ` (${score}/10)` : "";
+    let reason = (s.thesis_status_reason || s.summary || "").trim();
+    if (reason) {
+      reason = reason.split(/(?<=[.!?])\s+/)[0].slice(0, 75).trim();
+    }
+    lines.push(`• ${qLabel}: ${emoji} ${act}${conv}${reason ? ` — ${reason}` : ""}`);
+  }
+
+  if (currentVerdict && currentQuarter) {
+    const qLabel = formatQuarterDisplay(currentQuarter);
+    const act = currentVerdict.final_action || currentVerdict.action_signal || "HOLD";
+    const gateStatus = currentVerdict.thesis_gate_result?.statusClassification || currentVerdict.thesis_status || "";
+    const emoji = /BUY|ADD|CONFIRMED|BEAT/i.test(act + gateStatus) ? "🟢" : (/REASSESS|TRIM|SELL|DEVIATION|BROKEN/i.test(act + gateStatus) ? "🔴" : "🟡");
+    const conv = currentVerdict.conviction_score ? ` (${currentVerdict.conviction_score}/10)` : "";
+    const gate = currentVerdict.thesis_gate_result;
+    let reason = (gate?.decisionExplanation || currentVerdict.verdict_summary || "").split(/(?<=[.!?])\s+/)[0].slice(0, 75).trim();
+    lines.push(`• ${qLabel} (Current): ${emoji} ${act}${conv}${reason ? ` — ${reason}` : ""}`);
+  }
+
+  if (lines.length === 0) return "";
+  return `\n📈 *MULTI-QUARTER THESIS TREND:*\n${lines.join("\n")}\n`;
+}
+
+/**
+ * Renders management's explanation on key operational overhangs / drags affecting the stock price.
+ * Follows institutional-grade standard: triggers ONLY on operational drags, contractions, or non-buy signals.
+ */
+export function formatManagementClarifications(verdict, fin = null, cashFlow = null) {
+  if (!verdict) return "";
+
+  const hasRevDecline = typeof fin?.revenueYoYGrowthPct === "number" && fin.revenueYoYGrowthPct < -5;
+  const hasPatDecline = typeof fin?.patYoYGrowthPct === "number" && fin.patYoYGrowthPct < -10;
+  const hasMarginDecline = typeof fin?.ebitdaMarginBpsDelta === "number" && fin.ebitdaMarginBpsDelta < -150;
+  const hasSegmentRedFlags = Array.isArray(fin?.segmentRedFlags) && fin.segmentRedFlags.length > 0;
+  const hasWorkingCapitalDrain = cashFlow?.inventoryChangeCr !== null && cashFlow?.inventoryChangeCr !== undefined && cashFlow.inventoryChangeCr < -50;
+  const isNonBuy = verdict.final_action && !/BUY|ADD/i.test(verdict.final_action);
+  const hasGuidanceCuts = (verdict.concall_highlights?.guidance_changes || []).some(t => /cut|reduc|lower|trimm|downgrad/i.test(t));
+  const hasCommitmentDelays = (verdict.commitments || []).some(c => /delay|missed/i.test(String(c.status || "")));
+
+  const isOverhangTriggered = hasRevDecline || hasPatDecline || hasMarginDecline || hasSegmentRedFlags || hasWorkingCapitalDrain || isNonBuy || hasGuidanceCuts || hasCommitmentDelays;
+
+  if (!isOverhangTriggered && (!verdict.management_clarifications || verdict.management_clarifications.length === 0)) {
+    return "";
+  }
+
+  const items = [];
+  if (Array.isArray(verdict.management_clarifications) && verdict.management_clarifications.length > 0) {
+    for (const c of verdict.management_clarifications.slice(0, 3)) {
+      if (typeof c === "string" && c.trim().length > 10) {
+        items.push(`• ${c.trim()}`);
+      }
+    }
+  }
+
+  if (items.length === 0) {
+    for (const comm of (verdict.commitments || [])) {
+      if (comm.blockers_and_risks && comm.blockers_and_risks.length > 15) {
+        items.push(`• Project / Delay Explanation: ${comm.blockers_and_risks.trim()}`);
+        if (items.length >= 2) break;
+      }
+    }
+  }
+
+  if (items.length === 0 && (hasPatDecline || hasWorkingCapitalDrain)) {
+    items.push("• Overhang Unaddressed: Management provided no explicit operational defense or recovery timeline for the contraction in this filing.");
+  }
+
+  if (items.length === 0) return "";
+  return `\n🗣️ *MANAGEMENT CLARIFICATIONS & OVERHANGS:*\n${items.join("\n")}\n`;
+}
+
 /**
  * Stage-1 flash note: financial results / investor presentation / press release.
  */
-export function buildStage1Message({ item, verdict, activeFin, finSource, carried, stageName, periodLabel, guidanceSection, commText, degradedNote, allocationLine = "" }) {
+export function buildStage1Message({ item, verdict, activeFin, finSource, carried, stageName, periodLabel, guidanceSection, commText, degradedNote, allocationLine = "", trendSec = "", clarificationsSec = "" }) {
   const finBlock = buildVerifiedFinancialsBlock(activeFin, { carried: finSource === "CARRIED_FORWARD", periodLabel: carried?.periodLabel || periodLabel });
-  const gateSec = buildGateSection(verdict.thesis_gate_result);
+  const clarifications = (clarificationsSec !== undefined && clarificationsSec !== "")
+    ? clarificationsSec
+    : formatManagementClarifications(verdict, activeFin, verdict.cash_flow);
   const driverSec = formatDriverAssessmentSection(verdict.thesis_driver_assessment);
+  const gateSec = buildGateSection(verdict.thesis_gate_result, { includeDriverSummary: !driverSec });
   const cashFlowSec = formatCashFlowAndQualitySection(verdict.cash_flow, verdict.earnings_quality, activeFin?.patConsolidated || activeFin?.patAttributable);
-  // One price line (CMP, P/E, market cap, with its date) instead of the multi-line valuation block: the flash is a quick read.
+  // One price line (CMP, P/E, market cap, with its date) shown directly in the header card for instant mobile context.
   const valSec = buildPriceContextLine(verdict.market_data ? { ...verdict.market_data, market_data_as_of: verdict.market_data.market_data_as_of } : null);
+  const commStatements = [
+    ...(verdict.commitments || []).map(c => String(c.statement || "")),
+    ...(commText ? commText.split("\n").filter(l => l.trim().startsWith("•")).map(l => l.replace(/^[•\s*]+/, "").replace(/\s*\([^)]*\)\s*$/, "")) : [])
+  ].filter(s => s && s.length > 5);
+  const commEntries = commStatements.map(s => ({ text: s, tokens: tokenSet(s) }));
+
   // Consolidate KPIs and positive execution proof under MANAGEMENT EXECUTION & CAPACITY PROOF.
   // Prioritize concrete operational execution positives over generic KPI quotes.
   const rawExec = [...(verdict.key_positives || []), ...(verdict.thesis_operational_kpis || [])];
-  // Deduplicate case-insensitively
-  const seenExec = new Set();
+  // Deduplicate and filter out compliance formalities and duplicate commitments
+  const seenExec = [];
   const dedupedExec = [];
   for (const itemText of rawExec) {
     if (typeof itemText !== "string" || itemText.length < 5) continue;
-    const cleanNorm = itemText.toLowerCase().replace(/[^a-z0-9]/g, "");
-    if (!seenExec.has(cleanNorm)) {
-      seenExec.add(cleanNorm);
-      dedupedExec.push(itemText);
-    }
+    if (COMPLIANCE_BOILERPLATE.test(itemText)) continue;
+    const itemTs = tokenSet(itemText);
+    if (seenExec.some(se => isNearOrSubsumedStatement(itemText, itemTs, se.text, se.tokens))) continue;
+    // Check if this execution point duplicates an explicit commitment
+    const isDupCommitment = commEntries.some(ce => isNearOrSubsumedStatement(itemText, itemTs, ce.text, ce.tokens));
+    if (isDupCommitment) continue;
+
+    seenExec.push({ text: itemText, tokens: itemTs });
+    dedupedExec.push(itemText);
   }
   // The verified revenue / PAT / EBITDA are already printed once in the financials block: do not list them again as "proof".
-  // A flash is a quick read: the three strongest proof points, two drags and two concall questions. The rest stays in the stored verdict.
-  const executionItems = bulletList(dropRestatedFigures(dedupedExec, activeFin), 3);
+  // A flash is a quick read: the two strongest proof points, two drags and two concall questions.
+  const executionItems = bulletList(dropRestatedFigures(dedupedExec, activeFin), 2);
   const executionSec = executionItems ? `\n🛡️ *MANAGEMENT EXECUTION & CAPACITY PROOF:*\n${executionItems}\n` : "";
-  const drags = bulletList(dropRestatedFigures(verdict.key_concerns_and_drags, activeFin), 2);
+  const rawDrags = (verdict.key_concerns_and_drags || []).filter(d => {
+    const s = String(d || "").toLowerCase();
+    // Drop drags that merely restate inventory / working capital absorption or PAT % if cash flow / financials already cover them
+    if (cashFlowSec && (s.includes("inventory") || s.includes("working capital"))) return false;
+    if (finBlock && s.includes("pat contraction")) return false;
+    return true;
+  });
+  const drags = bulletList(dropRestatedFigures(rawDrags, activeFin), 2);
   const dragSec = drags ? `\n⚠️ *KEY DRAGS & FRICTION POINTS:*\n${drags}\n` : "";
   const points = bulletList(verdict.concall_verification_points || verdict.dodged_questions || verdict.concall_checklist, 2);
   const concallSec = points ? `\n🎙️ *OPEN QUERIES FOR CONCALL:*\n${points}\n` : "";
   const docLink = item.attachment_url ? `\n📄 [View Official Filing →](${item.attachment_url})` : "";
-  // At most the first two sentences of the model's summary (the numbers, drivers and signal are printed below it anyway).
-  // Strip guard-injected bullet tags and repetitive YoY decline headers from the prose summary: they are printed in the dedicated blocks below.
-  const cleanSummary = String(verdict.verdict_summary || "")
+  // At most the first sentence of the model's summary (the numbers, drivers and signal are printed below it anyway).
+  let cleanSummary = String(verdict.verdict_summary || "")
     .replace(/🔴\s*YoY Earnings Contraction:[\s\S]*?%\.\s*/gi, "")
     .replace(/🔴\s*SEGMENT RED FLAG:[^🔴⚠️]+(?:\.\s*|$)/gi, "")
     .replace(/⚠️\s*EXCEPTIONAL ITEM DISCLOSURE:[^🔴⚠️]+(?:\.\s*|$)/gi, "")
     .trim();
-  const shortSummary = cleanSummary.split(/(?<=[.!?])\s+/).slice(0, 2).join(" ").slice(0, 360).trim();
+
+  // If verified numbers follow right below, strip clauses that merely repeat the headline revenue / PAT figures
+  if (finBlock) {
+    cleanSummary = cleanSummary
+      .replace(/(?:with\s+)?revenue\s+(?:at|of)\s+₹?[\d,.]+\s*(?:Cr)?\s*(?:\([^)]*\))?\s*(?:and|,)\s*(?:attributable\s+)?(?:pat|net\s+profit)\s+(?:at|of)\s+₹?[\d,.]+\s*(?:Cr)?\s*(?:\([^)]*\))?[,;]?\s*/gi, "")
+      .replace(/reported\s+(?:consolidated\s+)?revenue\s+of\s+₹?[\d,.]+\s*Cr\s*(?:\([^)]*\))?[,;]?\s*/gi, "")
+      .replace(/(?:consolidated\s+)?revenue\s+(?:grew|fell|contracted)\s+[\d.]+%?\s*YoY\s*to\s*₹?[\d,.]+\s*Cr\.\s*/gi, "")
+      .trim();
+  }
+  const shortSummary = cleanSummary.split(/(?<=[.!?])\s+/).slice(0, 2).join(" ").slice(0, 260).trim();
   const summary = verdict._llm_failed || !shortSummary ? "" : `\n📋 *Summary:*\n${shortSummary}\n`;
   // One line that says WHY the signal is what it is, right under the signal, taken from the gate (never from model text).
   const gate = verdict.thesis_gate_result;
@@ -1597,23 +1802,30 @@ export function buildStage1Message({ item, verdict, activeFin, finSource, carrie
   const whyLine = whyParts.length ? `➡️ *Why:* ${whyParts.join(" ")}` : "";
   const eventLine = /presentation|investor deck/i.test(item.title) && !activeFin
     ? "📑 *Event:* Investor Presentation"
-    : `📊 *Event:* Quarterly Results Flash Note • ${stageName}`;
+    : `📊 *Event:* Results Flash • ${periodLabel || 'Financial Results'}`;
 
-  const header = `🏢 *${item.ticker.toUpperCase()}* | ${cleanCompanyForAlert(item)}\n${eventLine}`;
+  const priceContext = valSec ? `\n${valSec.trim()}` : "";
+  const header = `🏢 *${item.ticker.toUpperCase()}* | ${cleanCompanyForAlert(item)}\n${eventLine}${priceContext}`;
   const actionLine = actionSignalLine(verdict);
-  const divider = "──────────────────────────────";
+  const divider = "───────────────────────";
+
+  const signalBlock = [
+    allocationLine?.trim(),
+    [actionLine?.trim(), whyLine ? `   ${whyLine.trim()}` : null].filter(Boolean).join("\n")
+  ].filter(Boolean).join("\n\n");
 
   // Reading order: what the note concludes (summary), what the numbers are, how they score against the thesis, what is
-  // pending (pacing, cash quality, valuation), then supporting detail and what the concall must answer.
+  // pending (pacing, cash quality), then supporting detail and what the concall must answer.
   const bodyBlocks = [
     degradedNote?.trim(),
     summary?.trim(),
     finBlock?.trim(),
+    clarifications?.trim(),
     gateSec?.trim(),
+    trendSec?.trim(),
     driverSec?.trim(),
     guidanceSection?.trim(),
     cashFlowSec?.trim(),
-    valSec?.trim(),
     executionSec?.trim(),
     dragSec?.trim(),
     commText?.trim(),
@@ -1622,7 +1834,7 @@ export function buildStage1Message({ item, verdict, activeFin, finSource, carrie
 
   const footer = `${divider}${docLink}`;
 
-  return `${header}\n${divider}\n${allocationLine ? `${allocationLine}\n` : ""}${actionLine}${whyLine ? `\n${whyLine}` : ""}\n${divider}\n\n${bodyBlocks.join("\n\n")}\n\n${footer}`.trim();
+  return `${header}\n${divider}\n${signalBlock}\n${divider}\n\n${bodyBlocks.join("\n\n")}\n\n${footer}`.trim();
 }
 
 /**
@@ -1644,7 +1856,9 @@ function buildConcallMessage({ item, verdict, activeFin, finSource, carried, per
   const aG = section("ANNUAL (FY) GUIDANCE", "📅", ch.annual_guidance);
   const mY = section("MULTI-YEAR / LONG-TERM ROADMAP", "🎯", ch.multi_year_targets);
   const legacyG = (!qG && !aG && !mY) ? section("FORWARD GUIDANCE & TARGETS", "📈", ch.management_guidance) : "";
-  const pos = ch.key_positives && ch.key_positives.length ? section("KEY EXECUTION POSITIVES", "✅", ch.key_positives) : (bulletList(verdict.key_positives) ? `✅ *KEY EXECUTION POSITIVES:*\n${bulletList(verdict.key_positives)}` : "");
+  const cleanPositives = (ch.key_positives || verdict.key_positives || [])
+    .filter(p => typeof p === "string" && p.length > 5 && !COMPLIANCE_BOILERPLATE.test(p));
+  const pos = cleanPositives.length ? section("KEY EXECUTION POSITIVES", "✅", cleanPositives) : "";
   const chal = (ch.key_challenges || ch.key_risks) ? section("KEY DRAGS & FRICTION POINTS", "⚠️", ch.key_challenges || ch.key_risks) : (bulletList(verdict.key_concerns_and_drags) ? `⚠️ *KEY DRAGS & FRICTION POINTS:*\n${bulletList(verdict.key_concerns_and_drags)}` : "");
   const tone = ch.management_tone ? `🗣️ *Management Tone:* ${ch.management_tone}` : "";
   const takeaway = ch.key_takeaway ? `🔑 *DECISION BOTTOM LINE:*\n• ${ch.key_takeaway}` : (verdict._llm_failed ? "" : `🔑 *DECISION BOTTOM LINE:*\n• ${verdict.verdict_summary}`);
@@ -1682,8 +1896,10 @@ function buildConcallMessage({ item, verdict, activeFin, finSource, carried, per
   return `${header}\n${divider}\n${actionLine}\n${divider}\n\n${bodyBlocks.join("\n\n")}\n\n${footer}`.trim();
 }
 
-function buildCommitmentsSection(commitments) {
+export function buildCommitmentsSection(commitments) {
   if (!Array.isArray(commitments) || commitments.length === 0) return "";
+  const valid = commitments.filter(c => c && c.statement && !isProceduralNoise(c.statement, c.metric));
+  if (valid.length === 0) return "";
   const has = (c, word) => (c.status || "").toLowerCase().includes(word);
   // The same commitment is often extracted twice (NSE and BSE copies, "Rs. 2" vs "₹2"): list each once.
   const uniq = (list) => {
@@ -1691,20 +1907,20 @@ function buildCommitmentsSection(commitments) {
     return list.filter(c => keep.delete(String(c.statement || "")));
   };
   // At most three of each kind: a long list of fulfilled promises buries the one that was missed.
-  const achieved = uniq(commitments.filter(c => has(c, "achieved") && !has(c, "partially"))).slice(0, 3);
-  const delayed = uniq(commitments.filter(c => has(c, "delayed"))).slice(0, 3);
-  const missed = uniq(commitments.filter(c => has(c, "missed"))).slice(0, 3);
+  const achieved = uniq(valid.filter(c => has(c, "achieved") && !has(c, "partially"))).slice(0, 3);
+  const delayed = uniq(valid.filter(c => has(c, "delayed"))).slice(0, 3);
+  const missed = uniq(valid.filter(c => has(c, "missed"))).slice(0, 3);
   const parts = [];
   if (achieved.length > 0) {
-    parts.push(`*✅ Fulfilled Commitments:*`);
+    parts.push(`✅ *FULFILLED COMMITMENTS:*`);
     achieved.forEach(c => parts.push(`• ${c.statement} (${c.status === "Achieved Ahead of Schedule" ? "⭐ Achieved Ahead of Schedule" : "Achieved"})`));
   }
   if (delayed.length > 0) {
-    parts.push(`*⚠️ Delayed Commitments / Guidance Adjustments:*`);
+    parts.push(`⚠️ *DELAYED COMMITMENTS / GUIDANCE ADJUSTMENTS:*`);
     delayed.forEach(c => parts.push(`• ${c.statement} (Delayed: ${c.blockers_and_risks || c.timeline || "Timeline pushed back"})`));
   }
   if (missed.length > 0) {
-    parts.push(`*🔴 Missed Commitments:*`);
+    parts.push(`🔴 *MISSED COMMITMENTS:*`);
     missed.forEach(c => parts.push(`• ${c.statement} (Missed: ${c.blockers_and_risks || "Target not met"})`));
   }
   return parts.length > 0 ? `\n${parts.join("\n")}\n` : "";
@@ -2388,7 +2604,21 @@ async function processOneDeepDive(item, ctx) {
     allocation = { ...cls, line: cls.push ? buildAllocationLine({ reasons: cls.reasons, current, previous: previousView || null }) : "", current };
   }
 
-  const msgCtx = { item, verdict, activeFin: gateFin, finSource: gateSource, carried, stageName: stageInfo.stageName, periodLabel, guidanceSection, commText, degradedNote, allocationLine: allocation?.line || "" };
+  let trendSnapshots = [];
+  try {
+    trendSnapshots = await loadQuarterlyThesisTrend(item.stock_id, item.ticker, periodLabel);
+  } catch (err) {
+    console.warn(`[WORKER] Trend lookup failed for ${item.ticker}:`, err.message);
+  }
+  const trendSec = formatQuarterlyThesisTrend(trendSnapshots, periodLabel, verdict);
+  const clarificationsSec = formatManagementClarifications(verdict, gateFin, verdict.cash_flow);
+
+  const msgCtx = {
+    item, verdict, activeFin: gateFin, finSource: gateSource, carried,
+    stageName: stageInfo.stageName, periodLabel, guidanceSection, commText, degradedNote,
+    allocationLine: allocation?.line || "",
+    trendSec, clarificationsSec
+  };
   const alertText = isTranscriptDoc ? buildConcallMessage(msgCtx) : buildStage1Message(msgCtx);
 
   // Persist the full verdict first (without the bulky raw text), then send, then mark completed.
@@ -2459,30 +2689,41 @@ async function processOneDeepDive(item, ctx) {
   if (isTranscriptDoc) {
     try {
       const { rows: prevAudio } = await pool.query(
-        `SELECT id, event_analysis FROM corporate_announcements
-         WHERE ticker = $1 AND event_analysis->'audio_analysis' IS NOT NULL
+        `SELECT id, attachment_url, event_analysis FROM corporate_announcements
+         WHERE ticker = $1 
+           AND event_analysis->'audio_analysis' IS NOT NULL
+           AND (event_analysis->>'foreign_filing' IS NULL OR event_analysis->>'foreign_filing' != 'true')
+           AND created_at >= $2::timestamptz - INTERVAL '14 days'
          ORDER BY created_at DESC LIMIT 1`,
-        [item.ticker]
+        [item.ticker, item.created_at || new Date().toISOString()]
       );
       if (prevAudio.length > 0 && prevAudio[0].event_analysis?.audio_analysis && (!deadlineAt || Date.now() < deadlineAt - 45000)) {
-        console.log(`[WORKER AUDIT] Running Audio-vs-Transcript Discrepancy check for ${item.ticker}...`);
-        const transcriptAnalysis = await analyzeTranscriptWithGemini(docText, item.ticker, item.company_name, item.investment_thesis);
-        const discrepancyAudit = await auditDiscrepancies(prevAudio[0].event_analysis.audio_analysis, transcriptAnalysis, item.ticker);
-        if (discrepancyAudit) {
-          await pool.query(
-            `UPDATE corporate_announcements SET event_analysis = COALESCE(event_analysis, '{}'::jsonb) || $2::jsonb WHERE id = $1`,
-            [item.id, JSON.stringify({ discrepancy_audit: discrepancyAudit })]
-          );
-        }
-        if (discrepancyAudit?.has_material_discrepancy && !suppressTelegram) {
-          await sendConcallDiscrepancyAlert({
-            ticker: item.ticker,
-            companyName: item.company_name,
-            discrepancyScore: discrepancyAudit.discrepancy_score,
-            summaryVerdict: discrepancyAudit.summary_verdict,
-            discrepancies: discrepancyAudit.discrepancies,
-            docUrl: item.attachment_url
-          });
+        const audioUrl = prevAudio[0].attachment_url || "";
+        const audioPrefix = audioUrl.split("?")[0].split("/").pop().match(/^([A-Za-z&-]+?)\d*_/)?.[1]?.toUpperCase() || "";
+        const sym = String(item.ticker).toUpperCase();
+        const matchesSym = !audioPrefix || sym.startsWith(audioPrefix) || audioPrefix.startsWith(sym) || sym.includes(audioPrefix) || audioPrefix.includes(sym);
+        if (!matchesSym) {
+          console.warn(`[WORKER AUDIT SKIP] Audio filing ${prevAudio[0].id} prefix '${audioPrefix}' does not match ticker '${item.ticker}'. Skipping discrepancy check.`);
+        } else {
+          console.log(`[WORKER AUDIT] Running Audio-vs-Transcript Discrepancy check for ${item.ticker}...`);
+          const transcriptAnalysis = await analyzeTranscriptWithGemini(docText, item.ticker, item.company_name, item.investment_thesis);
+          const discrepancyAudit = await auditDiscrepancies(prevAudio[0].event_analysis.audio_analysis, transcriptAnalysis, item.ticker);
+          if (discrepancyAudit) {
+            await pool.query(
+              `UPDATE corporate_announcements SET event_analysis = COALESCE(event_analysis, '{}'::jsonb) || $2::jsonb WHERE id = $1`,
+              [item.id, JSON.stringify({ discrepancy_audit: discrepancyAudit })]
+            );
+          }
+          if (discrepancyAudit?.has_material_discrepancy && !suppressTelegram) {
+            await sendConcallDiscrepancyAlert({
+              ticker: item.ticker,
+              companyName: item.company_name,
+              discrepancyScore: discrepancyAudit.discrepancy_score,
+              summaryVerdict: discrepancyAudit.summary_verdict,
+              discrepancies: discrepancyAudit.discrepancies,
+              docUrl: item.attachment_url
+            });
+          }
         }
       }
     } catch (auditErr) {
@@ -2666,11 +2907,20 @@ async function flushThesisDigestsOnce({ now = Date.now() } = {}) {
         : "";
       const concall = { status: hasAnalysedConcallItem(items) || await hasAnalysedConcall(ticker) ? "ANALYSED" : "PENDING" };
 
+      let trendSnapshots = [];
+      try {
+        trendSnapshots = await loadQuarterlyThesisTrend(group[0].stock_id, ticker, carriedPeriod);
+      } catch (err) {
+        console.warn(`[WORKER DIGEST] Trend lookup failed for ${ticker}:`, err.message);
+      }
+      const trendSec = formatQuarterlyThesisTrend(trendSnapshots, carriedPeriod, null);
+
       const message = formatThesisDigestMessage({
         ticker, companyName: group[0].company_name, items, board, overall: overallThesisStatus(board), financialsBlock,
         fin: carried?.fin || null, periodLabel: carriedPeriod, concall,
         priceLine: buildPriceContextLine(await loadPriceSnapshot(ticker), now),
-        allocationLine
+        allocationLine,
+        trendSec
       });
       try {
         await sendTelegramMessage(message);

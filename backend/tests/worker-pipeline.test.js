@@ -1687,4 +1687,143 @@ Profit for the period 80.96 78.00 74.20 158.96 140.00 300.00
       expect(vi.mocked(sendPipelineFailureAlert)).toHaveBeenCalledTimes(1);
     });
   });
+
+  describe('multi-quarter thesis trend and management clarifications', () => {
+    it('formats a 4-quarter thesis trajectory in chronological order with current quarter last', async () => {
+      const { formatQuarterlyThesisTrend } = await import('../workers/quarterly-deepdive-worker.js');
+      const history = [
+        { quarter: 'Q1_FY27', final_action: 'HOLD', conviction_score: 6, thesis_status_reason: 'Input cost pressure' },
+        { quarter: 'Q4_FY26', final_action: 'BUY / ADD', conviction_score: 8, thesis_status_reason: 'Margin expansion' },
+        { quarter: 'Q3_FY26', final_action: 'BUY / ADD', conviction_score: 8, thesis_status_reason: 'Volume growth beat' }
+      ];
+      const curVerdict = {
+        final_action: 'REASSESS THESIS',
+        conviction_score: 4,
+        thesis_gate_result: { decisionExplanation: 'Universal financial health failure: PAT contraction (-50.29% YoY).' }
+      };
+      const text = formatQuarterlyThesisTrend(history, 'Q2_FY27', curVerdict);
+      expect(text).toContain('MULTI-QUARTER THESIS TREND:');
+      expect(text).toContain('• Q3 FY26: 🟢 BUY / ADD (8/10) — Volume growth beat');
+      expect(text).toContain('• Q4 FY26: 🟢 BUY / ADD (8/10) — Margin expansion');
+      expect(text).toContain('• Q1 FY27: 🟡 HOLD (6/10) — Input cost pressure');
+      expect(text).toContain('• Q2 FY27 (Current): 🔴 REASSESS THESIS (4/10) — Universal financial health failure: PAT contraction (-50.29% YoY).');
+      expect(text.indexOf('Q3 FY26')).toBeLessThan(text.indexOf('Q4 FY26'));
+      expect(text.indexOf('Q4 FY26')).toBeLessThan(text.indexOf('Q1 FY27'));
+      expect(text.indexOf('Q1 FY27')).toBeLessThan(text.indexOf('Q2 FY27'));
+    });
+
+    it('omits management clarifications for clean beat quarters with no operational drags', async () => {
+      const { formatManagementClarifications } = await import('../workers/quarterly-deepdive-worker.js');
+      const cleanVerdict = { final_action: 'BUY / ADD', verdict_summary: 'Clean double-digit revenue and PAT beat.' };
+      const fin = { revenueYoYGrowthPct: 25.5, patYoYGrowthPct: 30.2, ebitdaMarginBpsDelta: 150 };
+      expect(formatManagementClarifications(cleanVerdict, fin, null)).toBe('');
+    });
+
+    it('renders management clarifications when an operational drag or contraction occurs', async () => {
+      const { formatManagementClarifications } = await import('../workers/quarterly-deepdive-worker.js');
+      const verdict = {
+        final_action: 'REASSESS THESIS',
+        management_clarifications: [
+          'High-Base Comp: Management clarified YoY PAT decline is due to anomalous Q2 FY26 electronics peak.',
+          'Inventory Drain: Working capital absorption of ₹343 Cr is advance component stocking for Kavach 4.0.'
+        ]
+      };
+      const fin = { revenueYoYGrowthPct: -28.7, patYoYGrowthPct: -50.3 };
+      const text = formatManagementClarifications(verdict, fin, { inventoryChangeCr: -343 });
+      expect(text).toContain('MANAGEMENT CLARIFICATIONS & OVERHANGS:');
+      expect(text).toContain('High-Base Comp:');
+      expect(text).toContain('Inventory Drain:');
+    });
+
+    it('reports Overhang Unaddressed when severe profit drop occurred without management explanation', async () => {
+      const { formatManagementClarifications } = await import('../workers/quarterly-deepdive-worker.js');
+      const verdict = { final_action: 'HOLD', management_clarifications: [] };
+      const fin = { patYoYGrowthPct: -45.0 };
+      const text = formatManagementClarifications(verdict, fin, null);
+      expect(text).toContain('Overhang Unaddressed:');
+    });
+
+    it('filters out compliance boilerplate and deduplicates execution items against fulfilled commitments', async () => {
+      const { buildStage1Message } = await import('../workers/quarterly-deepdive-worker.js');
+      const item = { ticker: 'TESTCO', company_name: 'Test Co Ltd', title: 'Q2 Results' };
+      const verdict = {
+        action_signal: 'HOLD',
+        final_action: 'HOLD',
+        conviction_score: 6,
+        verdict_summary: 'Operating performance steady.',
+        key_positives: [
+          "Unmodified auditor's review report with clean financial disclosures.",
+          "Morai automated CNG plant (65k cylinders) commissioned."
+        ],
+        commitments: [
+          {
+            statement: "Morai automated CNG cascade manufacturing facility (65k cylinders) commissioned.",
+            status: "Achieved"
+          }
+        ],
+        thesis_driver_assessment: []
+      };
+      const msg = buildStage1Message({
+        item,
+        verdict,
+        activeFin: { revenue: 100, patAttributable: 10 },
+        finSource: 'THIS_FILING',
+        stageName: 'Stage 1: Financial Results',
+        periodLabel: 'Q2 FY27',
+        commText: '✅ *FULFILLED COMMITMENTS:*\n• Morai automated CNG cascade manufacturing facility (65k cylinders) commissioned. (Achieved)'
+      });
+
+      // Statutory boilerplate must be omitted
+      expect(msg).not.toContain("Unmodified auditor's review report");
+      // Duplicate execution proof must be suppressed (the section itself is omitted when empty)
+      expect(msg).not.toContain("MANAGEMENT EXECUTION & CAPACITY PROOF");
+      // The commitment must be retained exactly once
+      expect(msg).toContain("FULFILLED COMMITMENTS:");
+      expect(msg).toContain("Morai automated CNG cascade manufacturing facility");
+    });
+
+    it('rejects third-party investee company listings and accounting footnotes from commitments', async () => {
+      const { isProceduralNoise, buildCommitmentsSection } = await import('../workers/quarterly-deepdive-worker.js');
+      
+      // Third-party investee company events must be flagged as procedural noise
+      expect(isProceduralNoise("Tonbo Imaging India Limited equity shares listed on main board effective October 23, 2026.", "Corporate Milestone")).toBe(true);
+      expect(isProceduralNoise("The equity shares of Tonbo Imaging India Limited have been listed on main board of both the exchanges.", "Corporate Action")).toBe(true);
+      expect(isProceduralNoise("The impact on the investment on account of such listing will be reflected from next quarter's financial results onwards.", "Accounting Note")).toBe(true);
+      
+      // Statutory and compliance boilerplate
+      expect(isProceduralNoise("Unmodified auditor's review report with clean financial disclosures.", "Compliance")).toBe(true);
+      expect(isProceduralNoise("Exceptional items include compensation of ₹ 13.66 cr received towards compulsory acquisition of land.", "Financial Note")).toBe(true);
+      
+      // Genuine operational commitments must be accepted
+      expect(isProceduralNoise("Commissioning of 65,000 automated CNG cascade facility by Q4", "Plant Commissioning")).toBe(false);
+      expect(isProceduralNoise("Achieve >20% EBITDA growth for FY27", "EBITDA Growth")).toBe(false);
+
+      // buildCommitmentsSection must completely drop non-commitments
+      const noiseComms = [
+        {
+          statement: "Tonbo Imaging India Limited equity shares listed on main board effective October 23, 2026.",
+          metric: "Corporate Milestone",
+          status: "Achieved"
+        },
+        {
+          statement: "Unmodified auditor's review report with clean financial disclosures.",
+          metric: "Compliance",
+          status: "Achieved"
+        }
+      ];
+      expect(buildCommitmentsSection(noiseComms)).toBe('');
+
+      // And retain genuine operational commitments
+      const realComms = [
+        {
+          statement: "Commissioning of 65,000 automated CNG cascade facility by Q4",
+          metric: "Plant Commissioning",
+          status: "Achieved"
+        }
+      ];
+      const sec = buildCommitmentsSection(realComms);
+      expect(sec).toContain('FULFILLED COMMITMENTS:');
+      expect(sec).toContain('Commissioning of 65,000 automated CNG cascade facility');
+    });
+  });
 });

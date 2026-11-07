@@ -341,10 +341,10 @@ const SIGNAL_EMOJI = { "BUY / ACCUMULATE": "🟢", "REASSESS THESIS": "🔴", "H
 const pctText = (v) => (v === null || v === undefined || Number.isNaN(Number(v)) ? null : `${v >= 0 ? "+" : ""}${Number(v).toFixed(1)}%`);
 
 // Words that carry no meaning when deciding whether two bullets say the same thing ("Rs. 73 Cr" / "₹73 Cr").
-const STOP_WORDS = new Set(["the", "a", "an", "of", "to", "in", "for", "and", "by", "at", "on", "rs", "inr", "cr", "crore", "crores", "was", "were", "is", "are", "its", "from", "with"]);
-const tokenSet = (s) => new Set(norm(s).split(" ").filter((t) => t && !STOP_WORDS.has(t)));
+export const STOP_WORDS = new Set(["the", "a", "an", "of", "to", "in", "for", "and", "by", "at", "on", "rs", "inr", "cr", "crore", "crores", "was", "were", "is", "are", "its", "from", "with"]);
+export const tokenSet = (s) => new Set(norm(s).split(" ").filter((t) => t && !STOP_WORDS.has(t)));
 /** Two bullets are the same statement when one's meaningful words are (almost) all in the other. Short bullets are never merged. */
-function nearDuplicate(a, b) {
+export function nearDuplicate(a, b) {
   const small = a.size <= b.size ? a : b;
   const large = small === a ? b : a;
   if (small.size < 4) return false;
@@ -462,6 +462,7 @@ export function buildSignalRationale({ lead = null, board = [], fin = null, peri
     s.broken.length ? `${s.broken.length} broken` : null,
     s.noEvidence.length ? `${s.noEvidence.length} no evidence yet` : null
   ].filter(Boolean).join(" · ");
+
   if (board.length) {
     const verdictWord = s.broken.length ? "🔴 thesis under threat" : s.atRisk.length ? "🟠 at risk" : (s.confirmed.length + s.onTrack.length) ? "🟢 drivers intact" : "⚪ no evidence yet";
     lines.push(`2️⃣ *Thesis drivers:* ${tally} — ${verdictWord}`);
@@ -516,17 +517,17 @@ export function formatConcallHighlightsBlock(item = {}, link = "", fresh = (l) =
   const sections = [];
   const add = (title, lines) => { if (lines.length) sections.push(`${title}\n${lines.join("\n")}`); };
 
-  const changes = take(h.guidance_changes, 4).map((t) => `${changeMarker(t)} ${clip(t)}`);
-  const rest = take([...(h.annual_guidance || []), ...(h.quarterly_guidance || []), ...(h.multi_year_targets || [])], 5 - Math.min(changes.length, 2)).map((t) => `• ${clip(t)}`);
+  const changes = take(h.guidance_changes, 2).map((t) => `${changeMarker(t)} ${clip(t)}`);
+  const rest = take([...(h.annual_guidance || []), ...(h.quarterly_guidance || []), ...(h.multi_year_targets || [])], 3 - Math.min(changes.length, 2)).map((t) => `• ${clip(t)}`);
   add("1️⃣ *GUIDANCE & OUTLOOK*", [...changes, ...rest]);
-  if (!hideOwnNumbers) add("2️⃣ *QUARTERLY NUMBERS*", take(h.financial_performance, 6).map((t) => `• ${clip(t)}`));
-  add("3️⃣ *BUSINESS & SEGMENTS*", take(h.business_performance, 5).map((t) => `• ${clip(t)}`));
-  add("4️⃣ *CAPACITY & CAPEX*", take(h.operational_highlights, 5).map((t) => `• ${clip(t)}`));
-  add("5️⃣ *NEW INITIATIVES*", take(h.growth_initiatives, 4).map((t) => `• ${clip(t)}`));
-  add("6️⃣ *RISKS & CONCERNS*", take(h.key_challenges, 5).map((t) => `• ${clip(t)}`));
+  if (!hideOwnNumbers) add("2️⃣ *QUARTERLY NUMBERS*", take(h.financial_performance, 3).map((t) => `• ${clip(t)}`));
+  add("3️⃣ *BUSINESS & SEGMENTS*", take(h.business_performance, 3).map((t) => `• ${clip(t)}`));
+  add("4️⃣ *CAPACITY & CAPEX*", take(h.operational_highlights, 3).map((t) => `• ${clip(t)}`));
+  add("5️⃣ *NEW INITIATIVES*", take(h.growth_initiatives, 2).map((t) => `• ${clip(t)}`));
+  add("6️⃣ *RISKS & CONCERNS*", take(h.key_challenges, 3).map((t) => `• ${clip(t)}`));
   const takeLines = [
-    ...take(h.key_positives, 3).map((t) => `✅ ${clip(t)}`),
-    ...take(h.key_monitorables, 3).map((t) => `👀 Monitor: ${clip(t)}`)
+    ...take(h.key_positives, 2).map((t) => `✅ ${clip(t)}`),
+    ...take(h.key_monitorables, 2).map((t) => `👀 Monitor: ${clip(t)}`)
   ];
   if (h.key_takeaway) takeLines.push(`🔑 ${clip(h.key_takeaway, 220)}`);
   if (h.management_tone) takeLines.push(`🗣️ Tone: ${clip(h.management_tone, 40)}`);
@@ -541,7 +542,7 @@ export function formatConcallHighlightsBlock(item = {}, link = "", fresh = (l) =
  * @param {object} p
  * @param {string} p.financialsBlock pre-built "LATEST VERIFIED RESULTS" block (verified numbers only) or ""
  */
-export function formatThesisDigestMessage({ ticker, companyName, items = [], board = [], overall, financialsBlock = "", fin, periodLabel = null, concall, priceLine = "", allocationLine = "" }) {
+export function formatThesisDigestMessage({ ticker, companyName, items = [], board = [], overall, financialsBlock = "", fin, periodLabel = null, concall, priceLine = "", allocationLine = "", trendSec = "" }) {
   // The rationale is shown when the caller supplies the evidence it is built from (`fin`, even null, and/or `concall`).
   const wantRationale = fin !== undefined || concall !== undefined;
   const lead = [...items].filter((i) => i.action).sort((x, y) => (Date.parse(y.filedAt) || 0) - (Date.parse(x.filedAt) || 0))[0];
@@ -570,31 +571,43 @@ export function formatThesisDigestMessage({ ticker, companyName, items = [], boa
     return true;
   });
   const ordered = [...items].sort((x, y) => KIND_ORDER.indexOf(x.kind) - KIND_ORDER.indexOf(y.kind));
+  const hasCallBlock = [...ordered].some((it) => it.kind === "CONCALL" || it.source === "audio");
   // A call with highlights is rendered as the analyst write-up (it replaces the generic per-filing bullets) and leads the message.
   const callBlocks = new Map();
   for (const it of ordered) {
     const link = it.url ? `[${filingLinkText(it)}](${it.url})` : filingLinkText(it);
+    // If a call is present, it leads as the primary analyst write-up; the deck provides only distinct forward items below.
+    if (it.kind === "DECK" && hasCallBlock) continue;
     const cb = formatConcallHighlightsBlock(it, link, fresh, fin || null);
     if (cb) callBlocks.set(it, cb);
   }
 
-  let msg = `🏢 ${head}${priceLine ? `\n${priceLine}` : ""}${allocationLine ? `\n${allocationLine}` : ""}\n🧭 *THESIS STATUS:* ${status.emoji} ${status.label}${tally ? `\n_${tally}_` : ""}`;
-  // The signal sits next to the status (with its conviction), so "drivers intact" and "HOLD" are never left to contradict each other unexplained.
+  const divider = "───────────────────────";
+  const headerLines = [`🏢 ${head}`];
+  if (priceLine) headerLines.push(priceLine.trim());
+
+  const signalLines = [];
+  if (allocationLine) signalLines.push(allocationLine.trim());
   if (wantRationale && lead) {
     const sig = signalLabel(lead.action);
-    msg += `\n🎯 *SIGNAL:* ${SIGNAL_EMOJI[sig] || "🟡"} ${sig}${lead.conviction ? ` (conviction ${lead.conviction}/10)` : ""}`;
+    signalLines.push(`🎯 *ACTION SIGNAL:* ${SIGNAL_EMOJI[sig] || "🟡"} *${sig}*${lead.conviction ? ` (Conviction: ${lead.conviction}/10)` : ""}`);
   }
-  msg += "\n──────────────────────────────";
-  if (financialsBlock) msg += financialsBlock.replace(/\n$/, "");
+  signalLines.push(`🧭 *THESIS STATUS:* ${status.emoji} ${status.label}${tally ? `\n   _(${tally})_` : ""}`);
+
+  let msg = `${headerLines.join("\n")}\n${divider}\n${signalLines.join("\n\n")}\n${divider}`;
+
+  if (financialsBlock) msg += `\n\n${financialsBlock.trim()}`;
   // Guidance pacing from the newest item that carries it: the year to date against the full-year guide, and what the rest must deliver.
   const pacingItems = [...items].sort((x, y) => (Date.parse(y.filedAt) || 0) - (Date.parse(x.filedAt) || 0)).map((i) => i.pacing).find((p) => Array.isArray(p) && p.length) || [];
-  if (pacingItems.length) msg += `\n${formatPacingSection(pacingItems).trim()}`;
+  if (pacingItems.length) msg += `\n\n${formatPacingSection(pacingItems).trim()}`;
   const trackRecord = [...items].sort((x, y) => (Date.parse(y.filedAt) || 0) - (Date.parse(x.filedAt) || 0)).map((i) => i.trackRecord).find((t) => typeof t === "string" && t.trim());
-  if (trackRecord) msg += `\n${trackRecord.trim()}`;
+  if (trackRecord) msg += `\n\n${trackRecord.trim()}`;
   if (callBlocks.size) msg += `\n\n${[...callBlocks.values()].join("\n\n")}`;
   if (wantRationale) {
     msg += `\n\n${buildSignalRationale({ lead, board, fin: fin || null, periodLabel, concall: concall || null, itemKinds: items.map((i) => i.kind), cuts: items.flatMap((i) => i.guidanceCuts || []) })}`;
   }
+
+  if (trendSec) msg += `\n\n${trendSec.trim()}`;
 
   if (board.length) {
     const rows = [];
@@ -607,7 +620,7 @@ export function formatThesisDigestMessage({ ticker, companyName, items = [], boa
     }
     const silent = board.filter((x) => x.status === "NO_EVIDENCE").length;
     if (silent) rows.push(`⚪ _${silent} driver(s) with no evidence yet_`);
-    msg += `\n\n🎯 *DRIVER BOARD*\n${rows.join("\n")}`;
+    msg += `\n\n🎯 *DRIVER BOARD*\n${rows.join("\n\n")}`;
   }
 
   // Per-filing detail: bullets already stated by an earlier filing are dropped; filings left with nothing are collapsed.
@@ -680,6 +693,6 @@ export function formatThesisDigestMessage({ ticker, companyName, items = [], boa
   if (blocks.length) msg += `\n\n🆕 *NEW SINCE LAST UPDATE*\n${blocks.join("\n\n")}`;
   if (collapsed.length) msg += `\n\n📎 _Also filed:_ ${collapsed.join(" • ")}`;
 
-  msg += `\n──────────────────────────────\n_${lead ? `System signal: ${signalLabel(lead.action)}${lead.conviction ? ` (conviction ${lead.conviction}/10)` : ""} • ` : ""}Thesis-tracking data, not investment advice._`;
+  msg += `\n───────────────────────\n_${lead ? `System signal: ${signalLabel(lead.action)}${lead.conviction ? ` (conviction ${lead.conviction}/10)` : ""} • ` : ""}Thesis-tracking data, not investment advice._`;
   return msg;
 }

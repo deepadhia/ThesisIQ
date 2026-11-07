@@ -787,7 +787,7 @@ function sanitizeLlmOutput(guarded, title = "", ticker = "", financialData = nul
   }
   // Model-written narrative lists and sentences get the same grounding; lines the guard injected from verified
   // parser numbers are kept as they are.
-  for (const f of ["key_positives", "key_concerns_and_drags", "concall_verification_points"]) {
+  for (const f of ["key_positives", "key_concerns_and_drags", "concall_verification_points", "management_clarifications"]) {
     if (Array.isArray(guarded[f])) guarded[f] = sanitizeArray(guarded[f]);
   }
   if (Array.isArray(guarded.key_drivers)) {
@@ -829,6 +829,12 @@ function sanitizeLlmOutput(guarded, title = "", ticker = "", financialData = nul
         return false;
       }
       if (stmtLower.includes("covid-19") || summaryLower.includes("covid-19") || stmtLower.includes("pandemic")) {
+        return false;
+      }
+
+      // Filter out third-party investee company events, accounting footnotes and procedural boilerplate
+      const INVALID_COMMITMENT_PATTERN = /\b(?:shares\b.*?\blist(?:ed|ing)|equity\s+shares\b.*?\blist(?:ed|ing)|list(?:ed|ing)\s+on\s+(?:the\s+)?main\s+board|list(?:ed|ing)\s+on\s+(?:both\s+(?:the\s+)?)?exchanges|impact\s+on\s+(?:the\s+)?investment|reflected\s+from\s+next\s+quarter|associate\s+company|investee\s+company|compulsory\s+acquisition|compensation\s+received\s+from|regrouped(?:,\s*wherever\s+necessary)?|exceptional\s+items\s+include|reviewed\s+by\s+(?:the\s+)?audit\s+committee|approved\s+by\s+(?:the\s+)?board\s+of\s+directors|unmodified\s*(?:auditor(?:'s)?|audit|limited)?\s*(?:review\s*)?report|clean\s+financial\s+disclosures|statutory\s+auditor|regulation\s+33|in\s+accordance\s+with\s+ind\s*as|trading\s+window|closure\s+of\s+trading|analyst\s+meeting|declaration\s+of\s+dividend|dividend\s+payout)\b/i;
+      if (INVALID_COMMITMENT_PATTERN.test(stmtLower) || INVALID_COMMITMENT_PATTERN.test(summaryLower)) {
         return false;
       }
 
