@@ -33,10 +33,10 @@ export function defaultSinceDate(now = new Date()) {
 }
 
 /** Which queue a filing belongs to, judged only from its own title and file name. */
-export function stageForFiling(title = "", attachmentUrl = "", previousError = "") {
+export function stageForFiling(title = "", attachmentUrl = "", previousError = "", processedStage = "") {
   const t = `${title} ${attachmentUrl}`.toLowerCase();
   if (/transcript/.test(t)) return "pending_stage2";
-  if (/audio|recording|callrecording/.test(t) || /^audio ingestion/i.test(String(previousError || ""))) return "pending_audio";
+  if (/audio|recording|callrecording/.test(t) || /^audio ingestion/i.test(String(previousError || "")) || processedStage === "audio") return "pending_audio";
   return "pending_stage1";
 }
 
@@ -70,7 +70,7 @@ async function main() {
   const { rows } = await pool.query(selection.sql, selection.params);
 
   console.log(`Filings to re-queue (since ${since}${extraIds.length ? `, plus ${extraIds.length} explicit id(s)` : ""}): ${rows.length}`);
-  const plan = rows.map(r => ({ ...r, newStatus: stageForFiling(r.title, r.attachment_url, r.event_analysis?.pipeline_error) }));
+  const plan = rows.map(r => ({ ...r, newStatus: stageForFiling(r.title, r.attachment_url, r.event_analysis?.pipeline_error, r.event_analysis?.processed_stage) }));
   for (const p of plan) {
     console.log(` - ${p.ticker.padEnd(11)} ${String(p.filing_date).slice(0, 10)}  ${p.deep_dive_status} -> ${p.newStatus}  | ${p.title.slice(0, 60)}${p.event_analysis?.pipeline_error ? `\n     was: ${String(p.event_analysis.pipeline_error).slice(0, 100)}` : ""}`);
   }
