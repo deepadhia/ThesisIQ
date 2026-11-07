@@ -397,6 +397,7 @@ ${periodLine}
 Document Part: ${idx + 1} of ${textChunks.length}
 Investment Thesis Context:
 ${thesisCtx.text}
+${opts.historicalContext || ""}
 ${verifiedFinCtx}${cfQualityCtx}
 Filing Content (Part ${idx + 1}):
 ${chunkText}
@@ -1097,6 +1098,90 @@ async function loadGuidanceTrackRecord(ticker) {
 }
 
 /**
+ * Dynamically loads up to 2 years of past quarterly snapshot commentary, anomalous baseline warnings,
+ * and management commitments for ANY stock from the database. Injected into the LLM evaluation prompt so
+ * the analysis evaluates quarters in historical context rather than falsely flagging high-base
+ * normalization as delivery failure.
+ */
+async function loadHistoricalManagementContext(ticker, currentPeriodLabel = null) {
+  try {
+    const { rows: snapshots } = await pool.query(
+      `SELECT qs.quarter, qs.thesis_status_reason, qs.summary, qs.metrics
+       FROM quarterly_snapshots qs
+       JOIN stocks s ON s.id = qs.stock_id
+       WHERE s.ticker = $1
+       ORDER BY qs.quarter DESC
+       LIMIT 8`,
+      [ticker]
+    );
+
+    const { rows: commitments } = await pool.query(
+      `SELECT quarter, statement, metric, target_value, timeline, status, management_quote
+       FROM management_commitments
+       WHERE ticker = $1 OR stock_id = (SELECT id FROM stocks WHERE ticker = $1)
+       ORDER BY created_at DESC
+       LIMIT 6`,
+      [ticker]
+    );
+
+    const lines = [];
+
+    if (snapshots.length > 0) {
+      const snapLines = [];
+      const cur = currentPeriodLabel ? currentPeriodLabel.replace(/[\s_]+/g, "").toUpperCase() : "";
+      for (const snap of snapshots) {
+        const qNorm = (snap.quarter || "").replace(/[\s_]+/g, "").toUpperCase();
+        if (cur && qNorm === cur) continue;
+
+        let primaryEvidence = snap.metrics?.primary_thesis_metric?.evidence || "";
+        let reason = (snap.thesis_status_reason || "").trim();
+        let summary = (snap.summary || "").trim();
+
+        let commentary = "";
+        if (primaryEvidence && primaryEvidence.length > 20 && !primaryEvidence.includes("NOT DISCLOSED")) {
+          commentary = primaryEvidence;
+        } else if (reason && reason.length > 20 && !reason.includes("Operational execution and financial results confirm")) {
+          commentary = reason;
+        } else if (summary && summary.length > 20 && !summary.includes("Reported quarterly revenue of ₹N/A Cr")) {
+          commentary = summary.slice(0, 180);
+        }
+
+        if (commentary) {
+          if (commentary.length > 180) commentary = commentary.slice(0, 177) + "...";
+          snapLines.push(`• [${snap.quarter.replace(/_/g, " ")}]: ${commentary}`);
+        }
+      }
+      if (snapLines.length > 0) {
+        lines.push("Prior Quarter Baselines & Historical Commentary:");
+        lines.push(...snapLines.slice(0, 4));
+      }
+    }
+
+    if (commitments.length > 0) {
+      const commLines = [];
+      for (const c of commitments) {
+        const q = c.quarter ? `[${c.quarter}] ` : "";
+        if (c.management_quote) {
+          commLines.push(`• ${q}"${c.management_quote.slice(0, 140)}" (${c.metric || 'Guidance'})`);
+        } else if (c.statement) {
+          commLines.push(`• ${q}${c.statement.slice(0, 140)}`);
+        }
+      }
+      if (commLines.length > 0) {
+        lines.push("Past Stated Targets & Management Commitments:");
+        lines.push(...commLines.slice(0, 3));
+      }
+    }
+
+    if (lines.length === 0) return "";
+    return `\n── Historical Management Context & Prior 2-Year Commentary (Ground Truth) ──\n` + lines.join("\n") + "\n";
+  } catch (err) {
+    console.warn(`[WORKER] Could not load historical management context for ${ticker}:`, err.message);
+    return "";
+  }
+}
+
+/**
  * Sends an alert and records the outcome on the filing row.
  * A failed send is NEVER dropped: the message text is parked on the row and re-sent by flushPendingAlerts().
  */
@@ -1354,15 +1439,86 @@ const GATE_BADGES = {
   NEUTRAL_HOLD: "⚪ *Neutral*"
 };
 
+function splitDriversSafely(str) {
+  if (!str) return [];
+  const parts = [];
+  let current = "";
+  let parenDepth = 0;
+  for (let i = 0; i < str.length; i++) {
+    const ch = str[i];
+    if (ch === '(') parenDepth++;
+    else if (ch === ')') parenDepth = Math.max(0, parenDepth - 1);
+
+    if (ch === ',' && parenDepth === 0) {
+      const prev = str[i - 1];
+      const next = str[i + 1];
+      if (/\d/.test(prev) && /\d/.test(next)) {
+        current += ch;
+        continue;
+      }
+      if (current.trim()) parts.push(current.trim());
+      current = "";
+      while (str[i + 1] === ' ') i++;
+      continue;
+    }
+    current += ch;
+  }
+  if (current.trim()) parts.push(current.trim());
+  return parts.filter(Boolean);
+}
+
 function buildGateSection(gateInfo) {
   if (!gateInfo || !gateInfo.decisionExplanation) return "";
   const badge = GATE_BADGES[gateInfo.statusClassification] || "⚪ *Gate result*";
-  let section = `\n🎯 *THESIS GATE AUDIT:* ${badge}\n• ${gateInfo.decisionExplanation}\n`;
+  let rawExpl = String(gateInfo.decisionExplanation || "").trim();
+
+  let brokenDrivers = Array.isArray(gateInfo.driverSummary?.broken) ? [...gateInfo.driverSummary.broken] : [];
+  let atRiskDrivers = Array.isArray(gateInfo.driverSummary?.atRisk) ? [...gateInfo.driverSummary.atRisk] : [];
+
+  const driverIdx = rawExpl.search(/(?:\.|\s)\s*(?:Thesis driver\(s\) BROKEN:|At risk:)/i);
+  let triggerText = rawExpl;
+
+  if (driverIdx !== -1) {
+    triggerText = rawExpl.slice(0, driverIdx).trim();
+    const driverPart = rawExpl.slice(driverIdx).trim();
+
+    if (brokenDrivers.length === 0) {
+      const bMatch = driverPart.match(/Thesis driver\(s\) BROKEN:\s*([^|]+)/i);
+      if (bMatch) {
+        brokenDrivers = splitDriversSafely(bMatch[1].replace(/\.+$/, ""));
+      }
+    }
+    if (atRiskDrivers.length === 0) {
+      const rMatch = driverPart.match(/At risk:\s*([^|]+)/i);
+      if (rMatch) {
+        atRiskDrivers = splitDriversSafely(rMatch[1].replace(/\.+$/, ""));
+      }
+    }
+  }
+
+  triggerText = triggerText.replace(/^[.\s|]+|[.\s|]+$/g, "").trim();
+
+  const lines = [`\n🎯 *THESIS GATE AUDIT:* ${badge}`];
+  if (triggerText) {
+    lines.push(`• *Trigger:* ${triggerText}`);
+  }
+
+  if (brokenDrivers.length > 0) {
+    lines.push(`• *Drivers broken:*`);
+    brokenDrivers.forEach(d => lines.push(`   ❌ ${d}`));
+  }
+
+  if (atRiskDrivers.length > 0) {
+    lines.push(`• *Drivers at risk:*`);
+    atRiskDrivers.forEach(d => lines.push(`   ⚠️ ${d}`));
+  }
+
   const hurdle = gateInfo.thesisGate;
   if (hurdle && (hurdle.status === "FAIL" || hurdle.status === "PASS") && hurdle.hurdlesEvaluated && hurdle.hurdlesEvaluated !== "None") {
-    section += `• _Thesis hurdles:_ ${hurdle.status === "PASS" ? "✅ met" : `❌ ${hurdle.reason}`}\n`;
+    lines.push(`• _Thesis hurdles:_ ${hurdle.status === "PASS" ? "✅ met" : `❌ ${hurdle.reason}`}`);
   }
-  return section;
+
+  return lines.join("\n") + "\n";
 }
 
 function actionSignalLabel(action) {
@@ -1401,8 +1557,9 @@ export function buildStage1Message({ item, verdict, activeFin, finSource, carrie
   const cashFlowSec = formatCashFlowAndQualitySection(verdict.cash_flow, verdict.earnings_quality, activeFin?.patConsolidated || activeFin?.patAttributable);
   // One price line (CMP, P/E, market cap, with its date) instead of the multi-line valuation block: the flash is a quick read.
   const valSec = buildPriceContextLine(verdict.market_data ? { ...verdict.market_data, market_data_as_of: verdict.market_data.market_data_as_of } : null);
-  // Consolidate KPIs and positive execution proof under MANAGEMENT EXECUTION & CAPACITY PROOF
-  const rawExec = [...(verdict.thesis_operational_kpis || []), ...(verdict.key_positives || [])];
+  // Consolidate KPIs and positive execution proof under MANAGEMENT EXECUTION & CAPACITY PROOF.
+  // Prioritize concrete operational execution positives over generic KPI quotes.
+  const rawExec = [...(verdict.key_positives || []), ...(verdict.thesis_operational_kpis || [])];
   // Deduplicate case-insensitively
   const seenExec = new Set();
   const dedupedExec = [];
@@ -1418,22 +1575,25 @@ export function buildStage1Message({ item, verdict, activeFin, finSource, carrie
   // A flash is a quick read: the three strongest proof points, two drags and two concall questions. The rest stays in the stored verdict.
   const executionItems = bulletList(dropRestatedFigures(dedupedExec, activeFin), 3);
   const executionSec = executionItems ? `\n🛡️ *MANAGEMENT EXECUTION & CAPACITY PROOF:*\n${executionItems}\n` : "";
-  const drags = bulletList(verdict.key_concerns_and_drags, 2);
+  const drags = bulletList(dropRestatedFigures(verdict.key_concerns_and_drags, activeFin), 2);
   const dragSec = drags ? `\n⚠️ *KEY DRAGS & FRICTION POINTS:*\n${drags}\n` : "";
   const points = bulletList(verdict.concall_verification_points || verdict.dodged_questions || verdict.concall_checklist, 2);
   const concallSec = points ? `\n🎙️ *OPEN QUERIES FOR CONCALL:*\n${points}\n` : "";
   const docLink = item.attachment_url ? `\n📄 [View Official Filing →](${item.attachment_url})` : "";
   // At most the first two sentences of the model's summary (the numbers, drivers and signal are printed below it anyway).
-  // Strip guard-injected bullet tags from the prose summary: they are printed in the dedicated blocks below.
+  // Strip guard-injected bullet tags and repetitive YoY decline headers from the prose summary: they are printed in the dedicated blocks below.
   const cleanSummary = String(verdict.verdict_summary || "")
-    .replace(/(?:🔴\s*SEGMENT RED FLAG|⚠️\s*EXCEPTIONAL ITEM DISCLOSURE)[^.!?]+(?:[.!?]|$)/gi, "")
+    .replace(/🔴\s*YoY Earnings Contraction:[\s\S]*?%\.\s*/gi, "")
+    .replace(/🔴\s*SEGMENT RED FLAG:[^🔴⚠️]+(?:\.\s*|$)/gi, "")
+    .replace(/⚠️\s*EXCEPTIONAL ITEM DISCLOSURE:[^🔴⚠️]+(?:\.\s*|$)/gi, "")
     .trim();
   const shortSummary = cleanSummary.split(/(?<=[.!?])\s+/).slice(0, 2).join(" ").slice(0, 360).trim();
   const summary = verdict._llm_failed || !shortSummary ? "" : `\n📋 *Summary:*\n${shortSummary}\n`;
   // One line that says WHY the signal is what it is, right under the signal, taken from the gate (never from model text).
   const gate = verdict.thesis_gate_result;
   const hurdle = gate?.thesisGate;
-  const whyParts = [gate?.decisionExplanation, hurdle?.status === "FAIL" && hurdle.reason && !String(gate?.decisionExplanation || "").includes(hurdle.reason) ? `Hurdle missed: ${hurdle.reason}` : null].filter(Boolean);
+  const mainWhy = (gate?.decisionExplanation || "").split(/(?<=[.!?])\s+/)[0] || gate?.decisionExplanation;
+  const whyParts = [mainWhy, hurdle?.status === "FAIL" && hurdle.reason && !String(mainWhy || "").includes(hurdle.reason) ? `Hurdle missed: ${hurdle.reason}` : null].filter(Boolean);
   const whyLine = whyParts.length ? `➡️ *Why:* ${whyParts.join(" ")}` : "";
   const eventLine = /presentation|investor deck/i.test(item.title) && !activeFin
     ? "📑 *Event:* Investor Presentation"
@@ -1944,6 +2104,8 @@ async function processOneDeepDive(item, ctx) {
   const deterministicCashFlow = extractDeterministicCashFlow(docText);
   const earningsQuality = extractEarningsQualityMetrics(docText, deterministicFin);
 
+  const historicalContext = await loadHistoricalManagementContext(item.ticker, periodLabel);
+
   // ── 5. Thesis-aware institutional verdict (LLM) ──
   const rawVerdict = await evaluateInstitutionalVerdict(
     item.ticker,
@@ -1956,7 +2118,8 @@ async function processOneDeepDive(item, ctx) {
       verifiedFin: deterministicFin,
       cashFlow: deterministicCashFlow,
       earningsQuality,
-      marketData
+      marketData,
+      historicalContext
     }
   );
 
@@ -2205,7 +2368,7 @@ async function processOneDeepDive(item, ctx) {
   let allocation = null;
   if (routeForGate === "immediate" && allocationGateEnabled() && !suppressTelegram) {
     const previousView = await loadPreviousView(item.ticker, [item.id]);
-    const unverifiedResults = !gateFin || gateSource !== "THIS_FILING" || gateFin.verification === "LLM_LOCATED_TEXT_GROUNDED" || Boolean(degradedNote?.trim());
+    const unverifiedResults = !gateFin || gateSource !== "THIS_FILING" || gateFin.verification === "LLM_LOCATED_TEXT_GROUNDED" || finSource === "LLM_GROUNDED" || (onlyStandaloneParsed && activeFin?.statementScope === "STANDALONE") || gateFin.isVerified === false;
     const current = {
       action: verdict.final_action || verdict.action_signal,
       conviction: verdict.conviction_score,
@@ -2359,7 +2522,7 @@ async function queueDigestItem(item, digestItem) {
 }
 
 function digestKindFor(title) {
-  if (/presentation|investor deck|earnings deck/i.test(title)) return "DECK";
+  if (/presentation|\bdeck\b|investor update/i.test(title)) return "DECK";
   if (/press release/i.test(title)) return "PRESS";
   return "OTHER";
 }
@@ -2443,6 +2606,10 @@ async function flushThesisDigestsOnce({ now = Date.now() } = {}) {
           hurdleStatus: lead?.gate?.hurdleStatus || null,
           assessment: items.flatMap(i => i.assessment || []),
           guidanceChanges: items.flatMap(i => i.highlights?.guidance_changes || []),
+          guidance: items.flatMap(i => i.guidance || []),
+          growthInitiatives: items.flatMap(i => i.growthInitiatives || []),
+          operations: items.flatMap(i => i.operations || []),
+          commitmentFlags: items.flatMap(i => i.commitmentFlags || []),
           pacing: [...new Map(items.flatMap(i => i.pacing || []).map(p => [p.key, p])).values()],
           llmFailed: items.some(i => i.llmFailed),
           stanceAuthoritative: false,   // a deck / call carries forward the results' numbers: it cannot re-grade the stock by itself

@@ -88,6 +88,7 @@ export function buildThesisContext(ticker, rawThesis) {
   lines.push(primary ? `Primary thesis: ${primary}` : "Primary thesis: Growth investing, clean balance sheet, high ROCE.");
   if (contract) {
     if (contract.thesisTitle) lines.push(`Thesis contract: ${contract.thesisTitle}`);
+    if (contract.contextNotes) lines.push(`Baseline / High-base context: ${contract.contextNotes}`);
     const drivers = Array.isArray(contract.drivers) ? contract.drivers : [];
     if (drivers.length) {
       lines.push("Thesis drivers to verify against THIS filing (each has a 'must be true' condition and a falsification trigger):");
@@ -108,7 +109,8 @@ For EVERY listed thesis driver return one entry in "thesis_driver_assessment":
   • evidence = <=200 characters quoting concrete facts / numbers from THIS filing. For NO_EVIDENCE write "No new evidence in this filing".
   • NEVER mark BROKEN or CONFIRMED without quoting a figure or statement from the filing. Do NOT reuse the contract's old evidence.
   • A filing that merely does not detail a driver is NO_EVIDENCE, never ON_TRACK.
-  • If the filing reports a deterioration (a fall in profit, margin or order inflow, a legal or regulatory action) that falls inside what a driver covers, mark that driver AT_RISK even when other facts about it look positive, and quote the deterioration.`;
+  • If the filing reports a deterioration (a fall in profit, margin or order inflow, a legal or regulatory action) that falls inside what a driver covers, mark that driver AT_RISK even when other facts about it look positive, and quote the deterioration.
+  • EXCEPTION for High-Base Comparables: If historical management commentary notes an anomalous prior-year peak or unrepeatable cluster delivery, judge execution against the falsification run-rate triggers and sequential QoQ traction rather than marking drivers AT_RISK purely due to YoY contraction against the anomalous peak.`;
 
 const ABSENCE_OF_EVIDENCE = /\b(?:not|no|nor|without|neither)\b[^.]{0,50}\b(?:separately\s+)?(?:detail(?:ed|s)?|disclos(?:ed|ure)|provid(?:ed|e)|available|mention(?:ed)?|address(?:ed)?|specif(?:ied|ic)|stat(?:ed|e)|explicit(?:ly)?|quantif(?:ied|y)|break-?down)\b/i;
 
@@ -222,7 +224,7 @@ export function formatDriverAssessmentSection(assessment = []) {
   const rows = [];
   for (const st of order) {
     for (const a of assessment.filter(x => x.status === st)) {
-      let row = `${STATUS_EMOJI[st]} *${a.driver}* — ${a.evidence}`;
+      let row = `${STATUS_EMOJI[st]} *${a.driver}*\n   • ${a.evidence}`;
       if (st === "BROKEN" && a.falsificationTrigger) row += `\n   ↳ _Falsification trigger hit:_ ${a.falsificationTrigger}`;
       rows.push(row);
     }

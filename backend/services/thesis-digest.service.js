@@ -129,7 +129,8 @@ export function hasUrgentDigestItem(items = []) {
     i.llmFailed ||
     i.guidanceCuts?.length ||
     i.commitmentFlags?.length ||
-    (i.assessment || []).some((a) => a && /AT_RISK|BROKEN/i.test(String(a.status || "")))
+    (i.assessment || []).some((a) => a && /AT_RISK|BROKEN/i.test(String(a.status || ""))) ||
+    (i.kind === "DECK" && Boolean(i.guidance?.length || i.growthInitiatives?.length || i.operations?.length))
   ));
 }
 
@@ -235,9 +236,14 @@ export function buildDigestItem({ kind, title, url = null, filedAt, queuedAt = n
     summary: failed || LLM_FILLER.test(summaryRaw) ? "" : summaryRaw,
     positives: positives.slice(0, 4),
     concerns: concerns.slice(0, 4),
-    guidance: [...asList(ch.quarterly_guidance), ...asList(ch.annual_guidance), ...asList(ch.multi_year_targets)].slice(0, 4),
-    growthInitiatives: asList(ch.growth_initiatives).slice(0, 4),
-    operations: asList(ch.operational_highlights).slice(0, 4),
+    guidance: ([...asList(ch.quarterly_guidance), ...asList(ch.annual_guidance), ...asList(ch.multi_year_targets)].length
+      ? [...asList(ch.quarterly_guidance), ...asList(ch.annual_guidance), ...asList(ch.multi_year_targets)]
+      : (Array.isArray(verdict.commitments) ? verdict.commitments : [])
+          .filter((c) => c && c.statement && !/delayed|missed/i.test(String(c.status || "")))
+          .map((c) => c.target_value ? `${c.metric || 'Target'}: ${c.target_value}${c.timeline ? ` by ${c.timeline}` : ''} (${c.statement})` : c.statement)
+    ).slice(0, 4),
+    growthInitiatives: (asList(ch.growth_initiatives).length ? asList(ch.growth_initiatives) : asList(verdict.key_positives)).slice(0, 4),
+    operations: (asList(ch.operational_highlights).length ? asList(ch.operational_highlights) : asList(verdict.thesis_operational_kpis)).slice(0, 4),
     businessExecution: asList(ch.business_performance || ch.segment_highlights).slice(0, 4),
     // Facts the call itself stated (already grounded by sanitizeConcallHighlights); they back up the driver evidence.
     facts: ["financial_performance", "business_performance", "operational_highlights", "growth_initiatives", "multi_year_targets"]
@@ -354,9 +360,9 @@ function nearDuplicate(a, b) {
  */
 export function dropRestatedFigures(list = [], fin = null) {
   if (!fin) return list;
-  const verified = [fin.revenue, fin.patAttributable, fin.patConsolidated, fin.ebitda].filter((v) => typeof v === "number" && v > 0);
+  const verified = [fin.revenue, fin.patAttributable, fin.patConsolidated, fin.ebitda, fin.ebitdaMarginPct].filter((v) => typeof v === "number" && v > 0);
   if (!verified.length) return list;
-  const LABEL = /\b(?:revenue|sales|turnover|pat|net\s+profit|profit\s+after\s+tax|attributable\s+profit|ebitda)\b/i;
+  const LABEL = /\b(?:revenue|sales|turnover|pat|net\s+profit|profit\s+after\s+tax|attributable\s+profit|ebitda(?:\s+margin)?)\b/i;
   const HALF_OR_SEGMENT = /half[-\s]?year|h1|9m|nine\s+months|segment|branch|division|standalone|export|domestic|order|backlog|cash|asset/i;
   return list.filter((t) => {
     const s = String(t || "");
@@ -595,7 +601,7 @@ export function formatThesisDigestMessage({ ticker, companyName, items = [], boa
     for (const st of ["BROKEN", "AT_RISK", "CONFIRMED", "ON_TRACK"]) {
       for (const b of board.filter((x) => x.status === st)) {
         const when = fmtDate(b.asOf);
-        rows.push(`${STATUS_EMOJI[st]} *${plain(b.driver)}* — ${b.evidence}${when ? ` _(${when})_` : ""}`);
+        rows.push(`${STATUS_EMOJI[st]} *${plain(b.driver)}*${when ? ` _(${when})_` : ""}\n   • ${b.evidence}`);
         if (st === "BROKEN" && b.falsificationTrigger) rows.push(`   ↳ _Falsification trigger hit:_ ${plain(b.falsificationTrigger)}`);
       }
     }

@@ -463,6 +463,11 @@ describe('dropRestatedFigures: bullets that only repeat the verified headline nu
     const { dropRestatedFigures } = await import('../services/thesis-digest.service.js');
     expect(dropRestatedFigures(['Order book stands at 2030.22 Cr'], fin)).toEqual(['Order book stands at 2030.22 Cr']);
   });
+  it('drops EBITDA margin lines that only repeat the verified margin percentage', async () => {
+    const { dropRestatedFigures } = await import('../services/thesis-digest.service.js');
+    const finWithMargin = { ...fin, ebitdaMarginPct: 11.72 };
+    expect(dropRestatedFigures(['EBITDA Margin: 11.72%', 'New plant commissioned on schedule'], finWithMargin)).toEqual(['New plant commissioned on schedule']);
+  });
 });
 
 describe('results flash: the same labelled figure is never listed twice (JYOTICNC 2026-11-03 printed "Inventory: ₹1,245.90 Cr" and "Inventory: ₹1,440.52 Cr" under one heading; SBCL listed the same dividend as achieved twice)', async () => {

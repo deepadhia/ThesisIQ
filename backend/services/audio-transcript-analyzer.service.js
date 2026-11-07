@@ -114,7 +114,7 @@ export function extractAudioUrlFromFiling(pdfText = "", attachmentUrl = "") {
 /**
  * Resolves an audio URL or HTML landing page into its underlying media stream, YouTube link, or webcast URL.
  */
-export async function resolveAudioMediaUrl(url, { fetchFn = fetch, timeoutMs = 6000 } = {}) {
+export async function resolveAudioMediaUrl(url, { fetchFn = fetchMedia, timeoutMs = 6000 } = {}) {
   if (!url || typeof url !== "string") return null;
 
   // Direct media extensions
@@ -186,7 +186,7 @@ async function fetchMedia(url) {
     const body = await new Promise((resolve, reject) => {
       const target = new URL(url);
       const lib = target.protocol === "http:" ? http : https;
-      const req = lib.get(target, { headers: { "User-Agent": MEDIA_UA }, insecureHTTPParser: true, timeout: 60000 }, (res) => {
+      const req = lib.get(target, { headers: { "User-Agent": MEDIA_UA }, insecureHTTPParser: true, rejectUnauthorized: false, timeout: 60000 }, (res) => {
         if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
           res.resume();
           resolve({ redirect: new URL(res.headers.location, target).href });
@@ -206,6 +206,7 @@ async function fetchMedia(url) {
       status: body.status,
       statusText: body.statusText,
       headers: { get: (k) => body.headers[String(k).toLowerCase()] || null },
+      text: async () => body.buffer.toString("utf8"),
       arrayBuffer: async () => body.buffer.buffer.slice(body.buffer.byteOffset, body.buffer.byteOffset + body.buffer.byteLength)
     };
   }

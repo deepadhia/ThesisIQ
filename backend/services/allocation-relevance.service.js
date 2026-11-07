@@ -126,6 +126,27 @@ export function classifyAllocationRelevance({ current = {}, previous = null, fin
     }
   }
 
+  // Presentation / concall disclosures: forward guidance, expansion milestones, or delayed commitments
+  const flags = (current.commitmentFlags || []).filter((f) => f && f.statement && /delayed|missed/i.test(String(f.status || "")));
+  for (const f of flags) {
+    reasons.push(`commitment ${f.status || "delayed"}: ${clip(f.statement, 60)}`);
+  }
+
+  const hasGuidance = (current.guidance || []).some((g) => typeof g === "string" && g.trim());
+  if (hasGuidance && !reasons.some((r) => r.startsWith("guidance"))) {
+    reasons.push(`forward guidance: ${clip(current.guidance[0], 80)}`);
+  }
+
+  const hasGrowth = (current.growthInitiatives || []).some((g) => typeof g === "string" && g.trim());
+  if (hasGrowth && !reasons.some((r) => r.includes("growth") || r.includes("expansion"))) {
+    reasons.push(`growth initiative: ${clip(current.growthInitiatives[0], 80)}`);
+  }
+
+  const hasOps = (current.operations || []).some((o) => typeof o === "string" && o.trim());
+  if (hasOps && !reasons.some((r) => r.includes("capacity") || r.includes("operational"))) {
+    reasons.push(`capacity/operational milestone: ${clip(current.operations[0], 80)}`);
+  }
+
   if (fin) {
     const num = (v) => (v === null || v === undefined || Number.isNaN(Number(v)) ? null : Number(v));
     const pat = num(fin.patYoYGrowthPct), rev = num(fin.revenueYoYGrowthPct), bps = num(fin.ebitdaMarginBpsDelta);
@@ -143,8 +164,12 @@ export function buildAllocationLine({ reasons = [], current = {}, previous = nul
   const nowC = Number.isFinite(Number(current.conviction)) ? ` (${current.conviction}/10)` : "";
   const was = previous ? stanceOf(previous.action) : null;
   const wasC = previous && Number.isFinite(Number(previous.conviction)) ? ` (${previous.conviction}/10)` : "";
-  const move = was && (was !== now || wasC !== nowC) ? `${was}${wasC} → ${now}${nowC}` : `${now}${nowC}, stance unchanged`;
-  return `⚖️ *ALLOCATION:* ${move}${reasons.length ? ` — ${reasons.map((r) => plain(r)).join("; ")}` : ""}`.replace(/\n/g, " ");
+  const move = previous
+    ? (was !== now || wasC !== nowC ? `${was}${wasC} → ${now}${nowC}` : `${now}${nowC}, stance unchanged`)
+    : `${now}${nowC}`;
+  const meaningfulReasons = reasons.filter((r) => !/^first view/i.test(r) && !/^stance\b/i.test(r));
+  const pickedReasons = (meaningfulReasons.length ? meaningfulReasons : reasons).slice(0, 2);
+  return `⚖️ *ALLOCATION:* ${move}${pickedReasons.length ? ` — ${pickedReasons.map((r) => plain(r)).join("; ")}` : ""}`.replace(/\n/g, " ");
 }
 
 /** An order / capex / acquisition at or above this share of market cap (percent) is material to the stock. */
