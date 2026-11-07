@@ -6,6 +6,7 @@ import { sendTelegramMessage } from "./telegram.service.js";
 import { GEMINI_API_KEY } from "../config/env.js";
 import { backoffDelayMs } from "./retry-policy.service.js";
 import { getGeminiModelNames } from "./llm.service.js";
+import { findStatementPages, looksGarbled, capDocumentText } from "./statement-pages.service.js";
 
 const HIGH_KEYWORDS = [
   "order", "contract", "work order", "order win", "loa", "letter of award",
@@ -338,6 +339,46 @@ export function isEarningsConcallInvite(title = "", text = "") {
 }
 
 /**
+ * The largest rupee amount named in a filing, in ₹ crore (null when none). Reads "Rs. 3.00 Lakhs", "₹25 Cr", "Rs. 1,250 million"
+ * and full rupees ("Rs. 50,00,00,000"). Used to size an event, never as a reported figure.
+ */
+export function largestRupeeAmountCr(text = "") {
+  const src = String(text || "");
+  let best = null;
+  for (const m of src.matchAll(/(?:₹|Rs\.?|INR)\s*([\d,]+(?:\.\d+)?)\s*(crores?|cr\b|lakhs?|lacs?|million|mn\b)?/gi)) {
+    const n = parseFloat(m[1].replace(/,/g, ""));
+    if (!Number.isFinite(n)) continue;
+    const unit = (m[2] || "").toLowerCase();
+    let cr;
+    if (unit.startsWith("crore") || unit === "cr") cr = n;
+    else if (unit.startsWith("lakh") || unit.startsWith("lac")) cr = n / 100;
+    else if (unit === "million" || unit === "mn") cr = n / 10;
+    else cr = n / 10000000; // a bare figure is full rupees
+    if (best === null || cr > best) best = cr;
+  }
+  return best;
+}
+
+/** Incorporating or setting up a subsidiary below this size (₹ crore, largest amount named) is not a thesis event. */
+export const IMMATERIAL_SUBSIDIARY_CR = 50;
+
+/**
+ * True for the formation of a (wholly-owned) subsidiary / company whose filing names no amount, or only small ones (authorised
+ * capital, a subscription of a few lakh). Such filings carry no investment information; the AI used to dress them up as a
+ * "Strategic Catalyst" with an invented rationale. A large investment through the new entity is still material. Generic: no ticker.
+ */
+export function isImmaterialSubsidiaryFormation(title = "", text = "") {
+  const t = `${title} ${String(text || "").slice(0, 6000)}`;
+  const formation = /\b(?:incorporat\w*|formation|setting\s+up|set\s+up)\b[^.]{0,80}\b(?:subsidiar\w*|wos\b|wholly[\s-]owned|new\s+company)/i.test(t)
+    || /\b(?:subsidiar\w*|wholly[\s-]owned)\b[^.]{0,60}\b(?:incorporat\w*|formed|set\s+up)/i.test(t);
+  if (!formation) return false;
+  // An acquisition, a stake purchase or a capital raise in the same filing makes it a different event.
+  if (/\b(?:acqui\w+|stake\s+(?:purchase|sale)|slump\s+sale|merger|amalgamation|demerger|qip|preferential|rights\s+issue)\b/i.test(t)) return false;
+  const amount = largestRupeeAmountCr(t);
+  return amount === null || amount < IMMATERIAL_SUBSIDIARY_CR;
+}
+
+/**
  * Pulls the call date / time / joining link out of an intimation. Dates already in the past are ignored.
  * Returns { date: 'YYYY-MM-DD'|null, time: 'HH:MM'|null, link: string|null } (all IST wall-clock).
  */
@@ -347,7 +388,6 @@ export function extractConcallSchedule(text = "", hint = {}, now = new Date()) {
   const todayIst = new Date(now.getTime() + 5.5 * 3600000).toISOString().slice(0, 10);
 
   const candidates = [];
-  if (hint.date && /^\d{4}-\d{2}-\d{2}$/.test(hint.date)) candidates.push({ iso: hint.date, idx: -1 });
   const push = (y, m, d, idx) => {
     if (!(m >= 1 && m <= 12 && d >= 1 && d <= 31 && y >= 2024 && y <= 2035)) return;
     candidates.push({ iso: `${y}-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}`, idx });
@@ -356,15 +396,28 @@ export function extractConcallSchedule(text = "", hint = {}, now = new Date()) {
   for (const m of src.matchAll(/\b(jan|feb|mar|apr|may|jun|jul|aug|sept?|oct|nov|dec)[a-z]*\.?\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})\b/gi)) push(+m[3], months[m[1].toLowerCase().slice(0, 4) === "sept" ? "sept" : m[1].toLowerCase().slice(0, 3)], +m[2], m.index);
   for (const m of src.matchAll(/\b(\d{1,2})[\/.\-](\d{1,2})[\/.\-](\d{4})\b/g)) push(+m[3], +m[2], +m[1], m.index);
 
-  // Prefer a date mentioned close to the word "call" / "conference" and not in the past
+  // The call date is the date written next to the call itself. A letter also prints its OWN date ("Date: 5th November, 2026" in
+  // the header, "Date: 05.11.2026" at the foot), an earlier intimation's date and the board-meeting date; JSLL's alert announced
+  // the letter date as the call date although the call was on the 16th. The model's date hint is only a fallback for a document
+  // that prints no usable date, never a competitor of the printed one.
+  const callWord = /\b(?:conference\s+call|earnings\s+call|results?\s+call|concall|con\.\s?call|investor\s+call|analyst\s+call|call)\b/i;
+  const firstNewline = src.indexOf("\n");
+  const headerEnd = (firstNewline === -1 ? 0 : firstNewline) + 220; // the letter's own header: "Date: ..." right under the title
+  const before = (c, n) => src.slice(Math.max(0, c.idx - n), c.idx);
+  const future = candidates.filter(c => c.iso >= todayIst).map(c => {
+    const labelled = /\b(?:date|dated)\b[\s:.-]*$/i.test(before(c, 25));
+    const inHeader = labelled && c.idx <= headerEnd;
+    const sentence = before(c, 140).split(/\.\s|\n\s*\n/).pop();
+    const nearCall = callWord.test(sentence);
+    const aboutBoardOrResults = /\b(?:board|results?|intimation\s+dated|dated)\b/i.test(before(c, 110)) && !nearCall;
+    return { ...c, inHeader, nearCall, aboutBoardOrResults, labelled };
+  }).filter(c => !c.inHeader && !(c.labelled && !c.nearCall));
   const callIdx = [...src.matchAll(/\b(?:call|conference|concall|con\.\s?call)\b/gi)].map(m => m.index);
-  const future = candidates.filter(c => c.iso >= todayIst);
-  future.sort((a, b) => {
-    const da = callIdx.length ? Math.min(...callIdx.map(i => Math.abs(i - a.idx))) : 0;
-    const db = callIdx.length ? Math.min(...callIdx.map(i => Math.abs(i - b.idx))) : 0;
-    return da - db;
-  });
-  const date = future.length ? future[0].iso : null;
+  const distToCall = (c) => (callIdx.length ? Math.min(...callIdx.map(i => Math.abs(i - c.idx))) : 0);
+  const pool = future.some(c => c.nearCall) ? future.filter(c => c.nearCall) : future.filter(c => !c.aboutBoardOrResults);
+  pool.sort((a, b) => distToCall(a) - distToCall(b));
+  let date = pool.length ? pool[0].iso : null;
+  if (!date && hint.date && /^\d{4}-\d{2}-\d{2}$/.test(hint.date) && hint.date >= todayIst) date = hint.date;
 
   let time = null;
   if (hint.time && /^\d{1,2}:\d{2}$/.test(hint.time)) time = hint.time.padStart(5, "0");
@@ -499,6 +552,7 @@ const BSE_PAGE_LIMIT = 4;
  * @param {number} lookbackDays
  */
 const BSE_SESSION_TTL_MS = 15 * 60 * 1000;
+const BSE_EMPTY_SESSION_TTL_MS = 5 * 60 * 1000;
 const BSE_BROWSER_HEADERS = {
   "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
   "Accept": "application/json, text/plain, */*",
@@ -533,7 +587,9 @@ export class ExchangeBlockedError extends Error {
  * without the cookies a real visit sets. Best effort: any failure leaves an empty session and the call is still attempted.
  */
 async function getBseCookie() {
-  if (bseSession.cookie && Date.now() - bseSession.at < BSE_SESSION_TTL_MS) return bseSession.cookie;
+  // A session with cookies holds 15 min; a failed or cookie-less warm-up holds briefly. (It used to be cached as an empty cookie that
+  // this check ignored, so every stock of a scan paid the homepage request again, up to 15 s each.)
+  if (bseSession.at && Date.now() - bseSession.at < (bseSession.cookie ? BSE_SESSION_TTL_MS : BSE_EMPTY_SESSION_TTL_MS)) return bseSession.cookie;
   try {
     const res = await fetch("https://www.bseindia.com/", {
       headers: {
@@ -681,9 +737,29 @@ async function getNseCookies() {
   return nseCookies;
 }
 
+/** NSE symbols that were renamed: a filing may carry either one. */
+const NSE_SYMBOL_ALIASES = [["HBLPOWER", "HBLENGINE"]];
+
+/** The requested symbol first, then its alias(es). */
+function nseSymbolGroup(symbol) {
+  const s = String(symbol || "").trim().toUpperCase();
+  const group = NSE_SYMBOL_ALIASES.find((g) => g.includes(s));
+  return group ? [s, ...group.filter((x) => x !== s)] : [s];
+}
+
+/**
+ * Keeps only the NSE rows whose own `symbol` field is the requested symbol (or its renamed alias).
+ * A row without a symbol is NOT assumed to belong: ownership is never guessed.
+ */
+export function selectNseRowsForSymbol(rows, symbol) {
+  if (!Array.isArray(rows)) return [];
+  const wanted = new Set(nseSymbolGroup(symbol));
+  return rows.filter((r) => wanted.has(String(r?.symbol || "").trim().toUpperCase()));
+}
+
 /**
  * Fetches recent announcements from NSE API for a specific symbol.
- * @param {string} symbol 
+ * @param {string} symbol
  * @param {number} lookbackDaysNum Number of days to look back (default 30)
  */
 export async function fetchNseAnnouncements(symbol, lookbackDaysNum = 30) {
@@ -703,55 +779,50 @@ export async function fetchNseAnnouncements(symbol, lookbackDaysNum = 30) {
 
   const fromDateStr = formatDate(fromDateObj);
   const toDateStr = formatDate(toDateObj);
-  
-  // New NSE NextApi endpoint
-  const url = `https://www.nseindia.com/api/NextApi/apiClient/GetQuoteApi?functionName=getCorporateAnnouncement&symbol=${symbol}&marketApiType=equities&subject=&fromDate=${fromDateStr}&toDate=${toDateStr}`;
 
-  try {
-    let response = await fetch(url, {
+  const getRows = async (url, refererSymbol) => {
+    const res = await fetch(url, {
       headers: {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Accept": "*/*",
-        "Referer": `https://www.nseindia.com/get-quotes/equity?symbol=${symbol}`,
+        "Referer": `https://www.nseindia.com/get-quotes/equity?symbol=${refererSymbol}`,
         "Cookie": cookies
       },
     });
+    if (!res.ok) return [];
+    const body = await res.json();
+    return Array.isArray(body) ? body : [];
+  };
 
-    let data = [];
-    if (response.ok) {
-      data = await response.json();
-    }
+  try {
+    // NSE's NextApi answers with the latest filings of the WHOLE market (any symbol, even a made-up one) since 2026-11-06, and
+    // that answer is never empty, so the old "empty -> legacy endpoint" fallback never fired. Every row is therefore checked
+    // against the requested symbol, and only rows that belong to it count; no matching row -> the per-symbol endpoint.
+    let foreignRows = 0;
+    const mine = (rows) => {
+      const kept = selectNseRowsForSymbol(rows, symbol);
+      foreignRows += rows.length - kept.length;
+      return kept;
+    };
 
-    // Symbol alias check (e.g. HBLPOWER -> HBLENGINE)
-    if ((!Array.isArray(data) || data.length === 0) && symbol === "HBLPOWER") {
-      const aliasUrl = `https://www.nseindia.com/api/NextApi/apiClient/GetQuoteApi?functionName=getCorporateAnnouncement&symbol=HBLENGINE&marketApiType=equities&subject=&fromDate=${fromDateStr}&toDate=${toDateStr}`;
-      const aliasRes = await fetch(aliasUrl, {
-        headers: {
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-          "Accept": "*/*",
-          "Referer": `https://www.nseindia.com/get-quotes/equity?symbol=HBLENGINE`,
-          "Cookie": cookies
-        },
-      });
-      if (aliasRes.ok) {
-        data = await aliasRes.json();
+    let data = mine(await getRows(
+      `https://www.nseindia.com/api/NextApi/apiClient/GetQuoteApi?functionName=getCorporateAnnouncement&symbol=${symbol}&marketApiType=equities&subject=&fromDate=${fromDateStr}&toDate=${toDateStr}`,
+      symbol
+    ));
+
+    if (data.length === 0) {
+      // the per-symbol endpoint filters on the server; the requested symbol first, then its renamed alias (HBLPOWER <-> HBLENGINE)
+      for (const sym of nseSymbolGroup(symbol)) {
+        data = mine(await getRows(
+          `https://www.nseindia.com/api/corporate-announcements?index=equities&symbol=${sym}&from_date=${fromDateStr}&to_date=${toDateStr}`,
+          sym
+        ));
+        if (data.length) break;
       }
     }
 
-    // Fallback to legacy endpoint if NextApi returned 0 results
-    if (!Array.isArray(data) || data.length === 0) {
-      const legacyUrl = `https://www.nseindia.com/api/corporate-announcements?index=equities&symbol=${symbol}`;
-      const legacyRes = await fetch(legacyUrl, {
-        headers: {
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-          "Accept": "*/*",
-          "Referer": `https://www.nseindia.com/get-quotes/equity?symbol=${symbol}`,
-          "Cookie": cookies
-        },
-      });
-      if (legacyRes.ok) {
-        data = await legacyRes.json();
-      }
+    if (foreignRows > 0) {
+      console.warn(`[NSE] ${symbol}: the API returned ${foreignRows} filing(s) of other companies (dropped; they would have been saved under ${symbol}).`);
     }
 
     const lookbackDate = new Date();
@@ -770,6 +841,7 @@ export async function fetchNseAnnouncements(symbol, lookbackDaysNum = 30) {
         const uniqueNewsId = ann.seq_id || attachFilename || `${ann.desc}_${ann.sort_date || ann.an_dt || ann.dt}`;
         return {
           NEWS_ID: uniqueNewsId,
+          ALT_IDS: [ann.seq_id, attachFilename].filter(Boolean).map(String),
           NEWSSUB: ann.desc,
           DT_TM: annIso(ann) || ann.sort_date || ann.an_dt || ann.dt,
           SOURCE: "NSE",
@@ -806,17 +878,19 @@ export function generateAnnouncementHash(ticker, title, timestamp, discriminator
 /**
  * Checks if an announcement has already been processed or ingested in the DB.
  */
-export async function isAnnouncementProcessed(ticker, sourceId, titleHash) {
-  const cleanSourceId = sourceId && String(sourceId).trim().length > 0 ? String(sourceId).trim() : null;
+export async function isAnnouncementProcessed(ticker, sourceId, titleHash, altSourceIds = []) {
+  // One NSE filing has two ids: its file name (what the NextApi-era rows stored) and a numeric seq_id (what the per-symbol endpoint
+  // returns). Either one means "already stored", otherwise a change of endpoint would re-ingest the last 30 days.
+  const ids = [...new Set([sourceId, ...(altSourceIds || [])].map((x) => (x == null ? "" : String(x).trim())).filter(Boolean))];
   // A 'failed' row (classification could not run) counts as "already handled" only while its backoff timer is running;
   // once the timer passes (or if none was recorded) it is picked up again.
   const result = await pool.query(
     `SELECT id FROM corporate_announcements
      WHERE ticker = $1
-     AND (($2::text IS NOT NULL AND source_id = $2) OR title_hash = $3)
+     AND (($2::text[] IS NOT NULL AND source_id = ANY($2::text[])) OR title_hash = $3)
      AND (status != 'failed'
           OR (status = 'failed' AND (event_analysis->>'scan_next_retry_at')::timestamptz > NOW()))`,
-    [ticker, cleanSourceId, titleHash]
+    [ticker, ids.length ? ids : null, titleHash]
   );
   return result.rows.length > 0;
 }
@@ -1642,15 +1716,20 @@ const FULL_OCR_PROMPT = `Transcribe the text of this corporate filing verbatim. 
  * Multimodal Gemini Vision OCR fallback for scanned zero-text PDFs.
  * @param {{statementsOnly?: boolean}} [opts] statementsOnly: transcribe just the results statements (fast re-read)
  */
-export async function ocrPdfWithGemini(uint8Buffer, apiKey, { statementsOnly = false, accept = null, totalMs = 80000, perModelMs = 35000, minMs = 5000 } = {}) {
-  if (!apiKey || !uint8Buffer || uint8Buffer.length === 0) return null;
+export async function ocrPdfWithGemini(uint8Buffer, apiKey, { statementsOnly = false, accept = null, totalMs = 80000, perModelMs = 35000, minMs = 5000, images = null } = {}) {
+  // `images`: PNG renders of just the pages worth reading (the statement pages of a long filing), sent instead of the whole PDF.
+  const haveImages = Array.isArray(images) && images.length > 0;
+  if (!apiKey || (!haveImages && (!uint8Buffer || uint8Buffer.length === 0))) return null;
   // Guard: max 20MB inline base64
-  if (uint8Buffer.length > 20 * 1024 * 1024) {
+  if (!haveImages && uint8Buffer.length > 20 * 1024 * 1024) {
     console.warn("[PDF OCR WARN] PDF exceeds 20MB inline limit for Gemini OCR.");
     return null;
   }
 
-  const base64Data = Buffer.from(uint8Buffer).toString("base64");
+  const docParts = haveImages
+    ? images.map((img) => ({ inline_data: { mime_type: "image/png", data: Buffer.from(img).toString("base64") } }))
+    : [{ inline_data: { mime_type: "application/pdf", data: Buffer.from(uint8Buffer).toString("base64") } }];
+  const sizeKb = haveImages ? Math.round(images.reduce((n, i) => n + i.length, 0) / 1024) : Math.round(uint8Buffer.length / 1024);
   // Models come from the discovered registry (fast lite models first, then newer flash models), never a hard-coded list: on
   // 2026-10-31 a measured list was already out of date (newer models appeared, 2.5 was retired). Measured on the 10.8 MB
   // scanned GRAVITA PDF: lite models 11-25 s, flash models 37-50 s, all reading the statements correctly.
@@ -1665,7 +1744,7 @@ export async function ocrPdfWithGemini(uint8Buffer, apiKey, { statementsOnly = f
     const msLeft = ocrDeadline - Date.now();
     if (msLeft < minMs) break;
     const sliceMs = Math.min(msLeft, perModelMs);
-    console.log(`[GEMINI OCR] ${statementsOnly ? "Statements" : "Full-document"} transcription with ${model} (${Math.round(uint8Buffer.length / 1024)} KB, ${Math.round(sliceMs / 1000)}s slice, ${Math.round(msLeft / 1000)}s total left)...`);
+    console.log(`[GEMINI OCR] ${statementsOnly ? "Statements" : "Full-document"} transcription with ${model} (${haveImages ? `${images.length} page image(s), ` : ""}${sizeKb} KB, ${Math.round(sliceMs / 1000)}s slice, ${Math.round(msLeft / 1000)}s total left)...`);
     try {
       const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`, {
         method: "POST",
@@ -1674,12 +1753,7 @@ export async function ocrPdfWithGemini(uint8Buffer, apiKey, { statementsOnly = f
         body: JSON.stringify({
           contents: [{
             parts: [
-              {
-                inline_data: {
-                  mime_type: "application/pdf",
-                  data: base64Data
-                }
-              },
+              ...docParts,
               {
                 text: statementsOnly ? STATEMENTS_OCR_PROMPT : FULL_OCR_PROMPT
               }
@@ -1842,16 +1916,24 @@ export async function extractPdfTextDetailed(url, { forceOcr = false, acceptOcr 
       };
 
       let cleanText = "";
+      let pageList = [];
       try {
         const parser = new PDFParse(uint8);
         const data = await parser.getText();
         if (data && data.text) {
-          cleanText = data.text
+          pageList = Array.isArray(data.pages) ? data.pages : [];
+          const normalised = data.text
             .replace(/[^\S\r\n]+/g, ' ')
             .replace(/\r\n/g, '\n')
             .replace(/\n{3,}/g, '\n\n')
-            .trim()
-            .substring(0, 60000);
+            .trim();
+          // A long combined filing (letter + press release + deck + statements) is capped, but the statement pages are kept:
+          // POLICYBZR's statements start at character 91,000 of a 143-page file, past the old 60,000-character cut.
+          // A call transcript is NOT a combined filing: its Q&A is the second half, and a 60,000-character cut lost it (POLICYBZR's
+          // call was cut mid-sentence with its later analysts and closing remarks missing). Everything downstream is bounded
+          // (the verdict by capContext, the highlights by splitTranscript), so a transcript keeps up to 160,000 characters.
+          const textCap = /transcript/i.test(String(url)) ? 160000 : 60000;
+          cleanText = normalised.length > textCap && pageList.length ? capDocumentText(pageList, textCap) : normalised.substring(0, textCap);
         }
       } catch (parseErr) {
         console.warn(`[PDF PARSE WARN] Native pdf-parse failed (${parseErr.message}). Falling back to Vision OCR.`);
@@ -1862,6 +1944,30 @@ export async function extractPdfTextDetailed(url, { forceOcr = false, acceptOcr 
       // OCR Fallback: If native parse threw or extracted < 100 characters (scanned image or compressed xref), fallback to Gemini Vision
       const activeGeminiKey = GEMINI_API_KEY || process.env.GEMINI_API_KEY;
       let ocrUsed = false;
+
+      // Statement pages whose text layer is garbled (a scan with broken labels): re-read ONLY those few pages by vision, not the
+      // whole filing (143 pages of POLICYBZR never fitted the OCR budget). Any failure here keeps the text as it is.
+      if (!forceOcr && activeGeminiKey && pageList.length) {
+        const stmtPages = findStatementPages(pageList);
+        const garbled = stmtPages.length > 0 && stmtPages.every((n) => looksGarbled(pageList.find((p) => p.num === n)?.text || ""));
+        if (garbled) {
+          try {
+            console.log(`[PDF OCR] Statement page(s) ${stmtPages.join(", ")} have a garbled text layer; reading just those pages by vision.`);
+            const shots = await new PDFParse(new Uint8Array(bytes)).getScreenshot({ partial: stmtPages.slice(0, 3), scale: 1.8, imageBuffer: true });
+            const images = (shots?.pages || []).map((p) => Buffer.from(p.data)).filter((b) => b.length > 0);
+            const pageOcr = images.length ? await ocrPdfWithGemini(null, activeGeminiKey, { statementsOnly: true, images }) : null;
+            if (pageOcr && pageOcr.length > 50) {
+              ocrUsed = true;
+              const keep = cleanText.includes("[statement pages]") ? cleanText.slice(0, cleanText.indexOf("[statement pages]")) : cleanText.slice(0, 40000);
+              cleanText = `${keep.trim()}\n\n[statement pages, read by vision OCR]\n${pageOcr}`.substring(0, 60000);
+              console.log(`[PDF OCR SUCCESS] Read ${images.length} statement page(s) by vision (${pageOcr.length} characters).`);
+            }
+          } catch (pageErr) {
+            console.warn(`[PDF OCR WARN] Page-targeted statement OCR failed (${pageErr.message}); keeping the text layer.`);
+          }
+        }
+      }
+
       if (forceOcr && !activeGeminiKey) {
         console.warn(`[PDF OCR] Vision OCR requested but GEMINI_API_KEY is not configured; keeping the embedded text layer.`);
       }
@@ -1934,7 +2040,7 @@ export async function syncAnnouncementsForTicker(stockId, ticker, lookbackDays =
       const timestamp = ann.DT_TM;
       const titleHash = generateAnnouncementHash(ticker, title, timestamp);
 
-      if (await isAnnouncementProcessed(ticker, sourceId, titleHash)) {
+      if (await isAnnouncementProcessed(ticker, sourceId, titleHash, ann.ALT_IDS)) {
         results.skipped++;
         continue;
       }

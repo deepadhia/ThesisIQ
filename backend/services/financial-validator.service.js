@@ -51,7 +51,13 @@ const PAT_EXCLUDE = /before|comprehensive|attributable|per\s+share|margin|from\s
 // "d) Fin a nc e Cos ts": letter-spaced labels.
 const FIN_ROW = /^\W*(?:\S{1,3}\s+)?(?:f\s?i\s?n\s?a\s?n\s?c\s?e\s+c\s?o\s?s\s?t\s?s?\b|fi\s?nance\s+costs?|interest\s+expenses?|interest\s+and\s+finance|interest\s+cost)/i;
 // "Depreci~tion": the text layer swaps or drops a letter inside the word, so tolerate up to four stray characters between "depre" and "tion".
-const DEP_ROW = /^\W*(?:\S{1,3}\s+)?(?:depre\s*ci\s*ation|depre\w{0,4}\W?\w{0,2}tion|amorti[sz]ation)/i;
+// "Depreciati on and amortisation": the text layer also splits the word after "ati" ("depreciati" + "on").
+const DEP_ROW = /^\W*(?:\S{1,3}\s+)?(?:depre\s*ci\s*ation|depre\w{0,4}\W?\w{0,2}tion|depreci\w{0,3}\s+on\b|amorti[sz]ation)/i;
+// "Share of profit in associate": an investment, not operating profit, so it is taken out of EBITDA (SBCL: +62% EBITDA as the
+// company reports it only without it). A row that also names a JOINT VENTURE is left in: project joint ventures (EPC firms such as
+// TRANSRAILL) are part of the operating business and their EBITDA includes them.
+const ASSOCIATE_ROW = /share\s+of\s+(?:net\s+)?(?:profit|loss|\(?\s*loss)[^0-9]{0,60}?associate/i;
+const ASSOCIATE_EXCLUDE = /before|after|attributable|comprehensive|joint|\bjv\b/i;
 const EXC_ROW = /exceptional\s+(?:item|gain|loss|income|expense)s?/i;
 // "III Other income" / "Oth er In co me" (line item between revenue and total income). Not "other operating revenue" (that is revenue),
 // not "other comprehensive income", not "total income".
@@ -486,6 +492,10 @@ function locateBlocks(lines) {
     const totalIncome = findRow(TOTAL_INCOME_ROW);
     // Other income sits between revenue and total income: only look there, never in the notes further down.
     const otherIncome = findRow(OTHER_INCOME_ROW, { exclude: OTHER_INCOME_EXCLUDE });
+    // Share of an associate's profit printed ABOVE the profit-before-tax line is part of that line but not of operating profit.
+    const associateFound = findRow(ASSOCIATE_ROW, { exclude: ASSOCIATE_EXCLUDE });
+    const pbtLineIdx = pbtBefore ? pbtBefore.idx : (pbt ? pbt.idx : null);
+    const associate = associateFound && associateFound.idx > idx && pbtLineIdx !== null && associateFound.idx < pbtLineIdx ? associateFound : null;
 
     // Attributable-to-owners row (only trusted when it follows the PAT row under a "Profit attributable to" heading)
     let owners = null;
@@ -536,6 +546,10 @@ function locateBlocks(lines) {
       fin: inScale(fin?.row),
       dep: inScale(dep?.row),
       otherIncome: otherIncome && (!totalIncome || otherIncome.idx < totalIncome.idx) ? inScale(otherIncome.row) : null,
+      associate: associate ? inScale(associate.row) : null,
+      // revenue, other income and total income on consecutive lines: only then is "revenue + other income = total income" a fact
+      // (another income line between them, e.g. "other operating revenue", makes the sum differ legitimately).
+      incomeRowsConsecutive: Boolean(otherIncome && totalIncome && otherIncome.idx === idx + 1 && totalIncome.idx === otherIncome.idx + 1),
       exc: exc?.row || null,
       isFull,
       hasStatement: Boolean(pbt || pat),
@@ -616,7 +630,7 @@ function extractSegmentRedFlags(lines, totalRevenueYoyBase) {
  * @param {string} pdfText Raw text extracted from PDF
  * @returns {object|null} Financial metrics object, or null when no full statement table is present
  */
-export function extractDeterministicFinancials(pdfText = "") {
+export function extractDeterministicFinancials(pdfText = "", { periodEndHint = null } = {}) {
   if (!pdfText || typeof pdfText !== "string") {
     return null;
   }
@@ -630,13 +644,57 @@ export function extractDeterministicFinancials(pdfText = "") {
   // A block whose figures fail the plausibility checks (a corrupted consolidated table) must not hide a good one
   // (the standalone table of the same filing): try the blocks in order and return the first that holds up.
   for (const primary of orderBlocks(blocks)) {
-    const result = buildResult(primary, standaloneFor(primary, blocks), lines);
+    const result = buildResult(primary, standaloneFor(primary, blocks), lines, { periodEndHint });
     if (result) return result;
   }
   return null;
 }
 
-function buildResult(primary, standalone, lines) {
+/**
+ * The quarter end a filing most likely reports: the latest March / June / September / December 31st-or-30th strictly before the
+ * filing date. Used only when the statement's own header dates are unreadable (SHAKTIPUMP's real PDF), and only to decide which
+ * cumulative columns a layout carries.
+ */
+export function quarterEndBefore(filingDate) {
+  const d = filingDate ? new Date(filingDate) : null;
+  if (!d || Number.isNaN(d.getTime())) return null;
+  const ends = [];
+  for (const y of [d.getUTCFullYear() - 1, d.getUTCFullYear()]) for (const [m, day] of [[2, 31], [5, 30], [8, 30], [11, 31]]) ends.push(Date.UTC(y, m, day));
+  const before = ends.filter((t) => t < d.getTime()).pop();
+  return before ? new Date(before).toISOString().slice(0, 10) : null;
+}
+
+/**
+ * Cumulative columns, by layout (the revenue row must prove it; otherwise null, never a guess):
+ *  - Sep / Dec quarter, SIX columns: quarter, previous quarter, year-ago quarter, year to date, year-ago year to date, last full year.
+ *  - Sep / Dec quarter, FIVE columns: the same without last full year (some companies do not print it).
+ *  - March quarter, FIVE columns: quarter, previous quarter, year-ago quarter, the FULL YEAR just ended, the year before: the
+ *    actual outcome that full-year guidance is judged against.
+ */
+function cumulativeColumns(primary, quarterEnded, periodEndHint = null) {
+  if (!primary || ![5, 6].includes(primary.cols)) return null;
+  const at = quarterEnded || periodEndHint;
+  if (!at) return null;
+  const month = Number(String(at).slice(5, 7));
+  const r = primary.revenue;
+  if (!r || r.length !== primary.cols || r.some((v) => v === null || v === undefined || !(v > 0))) return null;
+  const [q0, q1, py, c3, c4, c5] = r;
+  if (primary.cols === 5 && month === 3) {
+    // full year just ended: roughly four quarters of revenue, and the year before likewise
+    if (!(c3 >= q0 * 1.5 && c3 <= q0 * 6 && c4 >= py * 1.5 && c4 <= py * 6)) return null;
+    return { fullYear: true };
+  }
+  const ytdMonths = month === 9 ? 6 : month === 12 ? 9 : null;
+  if (!ytdMonths) return null;
+  const sumTwo = q0 + q1;
+  if (ytdMonths === 6 && Math.abs(c3 - sumTwo) > 0.03 * Math.max(c3, sumTwo)) return null;
+  if (ytdMonths === 9 && !(c3 >= sumTwo * 0.97 && c3 <= sumTwo * 2.2)) return null;
+  if (!(c4 >= py * 0.97)) return null;
+  if (primary.cols === 6 && !(c5 >= c4 * 0.99 && c5 <= c4 * 3.2)) return null;
+  return { ytdMonths, hasFyPrior: primary.cols === 6 };
+}
+
+function buildResult(primary, standalone, lines, { periodEndHint = null } = {}) {
   const f = primary.unit.factor;
   const { yoyIdx, qoqIdx } = primary.colMap;
 
@@ -662,10 +720,28 @@ function buildResult(primary, standalone, lines) {
     segmentRedFlags: []
   };
 
+  // Income identity: revenue + other income = total income, column by column. A column that breaks it holds a mis-read cell
+  // (SJS: vision OCR printed 2,827 as 2,327, which became "revenue -3.7%" and a red alert). The current quarter breaking it
+  // rejects the block (the caller then tries the next block or the clearly-labelled UNVERIFIED fallback); a comparison column
+  // breaking it only withholds the growth rate built on it. Unknown (no other-income or total-income row) is never a failure.
+  const incomeIdentity = (idx) => {
+    if (idx === null || idx === undefined || !primary.incomeRowsConsecutive || !primary.totalIncome || !primary.otherIncome) return null;
+    const r = primary.revenue[idx], o = primary.otherIncome[idx], t = primary.totalIncome[idx];
+    if ([r, o, t].some((v) => v === null || v === undefined) || t <= 0 || r <= 0 || o < 0) return null;
+    // Total income can neither be below revenue nor several times it: a total-income cell outside that band is itself damaged
+    // text ("total income 6", a stray note number), so it proves nothing about the revenue cell. Unknown, not a failure.
+    if (t < r * 0.999 || t > r * 1.5) return null;
+    return Math.abs(r + o - t) <= Math.max(0.015 * t, 0.02);
+  };
+  if (incomeIdentity(0) === false) {
+    console.warn(`[FINANCIAL VALIDATOR] Rejected block: revenue ${primary.revenue[0]} + other income ${primary.otherIncome[0]} != total income ${primary.totalIncome[0]}. Treating the table as mis-read.`);
+    return null;
+  }
+
   // Revenue
   const rev0 = scaled(primary.revenue, 0, f);
-  const revSeq = scaled(primary.revenue, qoqIdx, f);
-  const revYoy = scaled(primary.revenue, yoyIdx, f);
+  const revSeq = incomeIdentity(qoqIdx) === false ? null : scaled(primary.revenue, qoqIdx, f);
+  const revYoy = incomeIdentity(yoyIdx) === false ? null : scaled(primary.revenue, yoyIdx, f);
   if (rev0 !== null) result.revenue = round2(rev0);
   result.revenueQoQGrowthPct = pct(rev0, revSeq);
   if (result.revenueQoQGrowthPct === null) delete result.revenueQoQGrowthPct;
@@ -701,7 +777,8 @@ function buildResult(primary, standalone, lines) {
     let base = pbtBase;
     if (!primary.pbtBefore && idx === 0 && exceptionalFound) base = pbtBase - exceptionalNet / f;
     const otherV = primary.otherIncome ? (primary.otherIncome[idx] ?? 0) : 0;
-    return (base + finV + depV - otherV) * f;
+    const associateV = primary.associate ? (primary.associate[idx] ?? 0) : 0; // a share of profit/(loss) is not operating
+    return (base + finV + depV - otherV - associateV) * f;
   };
 
   const ebitda0 = ebitdaFor(0);
@@ -722,6 +799,42 @@ function buildResult(primary, standalone, lines) {
         result.ebitdaMarginBpsDelta = Math.round((result.ebitdaMarginPct - prevMargin) * 100);
         if (result.ebitdaMarginBpsDelta < -100) result.isMarginErosion = true;
       }
+    }
+  }
+
+  // Cumulative columns for GUIDANCE PACING and for the full-year outcome (fulfilment of last year's guidance). Reported only when the
+  // arithmetic of the columns holds; otherwise every cumulative field is absent.
+  const cumulative = cumulativeColumns(primary, result.quarterEnded, periodEndHint);
+  if (cumulative && incomeIdentity(3) !== false) {
+    const patCum = primary.owners || primary.pat;
+    const rev = (i) => scaled(primary.revenue, i, f);
+    const fill = (prefix, curIdx, priorIdx, fyPriorIdx) => {
+      result[`${prefix}Revenue`] = round2(rev(curIdx));
+      result[`${prefix}RevenuePrior`] = round2(rev(priorIdx));
+      result[`${prefix}RevenueYoYGrowthPct`] = pct(rev(curIdx), rev(priorIdx));
+      const eC = ebitdaFor(curIdx), eP = ebitdaFor(priorIdx);
+      if (eC !== null) { result[`${prefix}Ebitda`] = round2(eC); result[`${prefix}EbitdaMarginPct`] = round2((eC / rev(curIdx)) * 100); }
+      if (eP !== null) { result[`${prefix}EbitdaPrior`] = round2(eP); result[`${prefix}EbitdaMarginPriorPct`] = round2((eP / rev(priorIdx)) * 100); }
+      if (patCum) {
+        const pC = scaled(patCum, curIdx, f), pP = scaled(patCum, priorIdx, f);
+        if (pC !== null) result[`${prefix}Pat`] = round2(pC);
+        if (pP !== null) result[`${prefix}PatPrior`] = round2(pP);
+        if (pC !== null && pP !== null && pP > 0) result[`${prefix}PatYoYGrowthPct`] = round2(((pC - pP) / pP) * 100);
+      }
+      if (fyPriorIdx !== null) {
+        result.fyPriorRevenue = round2(rev(fyPriorIdx));
+        const eF = ebitdaFor(fyPriorIdx);
+        if (eF !== null) result.fyPriorEbitda = round2(eF);
+        const pF = patCum ? scaled(patCum, fyPriorIdx, f) : null;
+        if (pF !== null) result.fyPriorPat = round2(pF);
+      }
+    };
+    if (cumulative.fullYear) {
+      fill("fy", 3, 4, null);
+      result.fyEnded = result.quarterEnded || periodEndHint;
+    } else {
+      result.ytdMonths = cumulative.ytdMonths;
+      fill("ytd", 3, 4, cumulative.hasFyPrior ? 5 : null);
     }
   }
 

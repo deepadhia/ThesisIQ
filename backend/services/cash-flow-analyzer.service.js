@@ -61,6 +61,21 @@ function parseNumbersFromLine(line) {
 
 const round2 = (n) => (n === null || n === undefined ? null : parseFloat(Number(n).toFixed(2)));
 
+/** The period the cash flow statement covers, read from its own heading (null when it does not say). */
+function detectCashFlowPeriodMonths(lines, startIdx) {
+  for (let i = Math.max(0, startIdx - 6); i <= Math.min(lines.length - 1, startIdx + 4); i++) {
+    const l = lines[i];
+    if (l.length > 200) continue;
+    if (/half[\s-]*year|six\s+months|\bh1\b/i.test(l)) return 6;
+    if (/nine\s+months|\b9\s*m\b/i.test(l)) return 9;
+    if (/for\s+the\s+(?:financial\s+)?year\s+ended|year\s+ended/i.test(l)) return 12;
+    if (/\bquarter\b/i.test(l)) return 3;
+  }
+  return null;
+}
+
+const PERIOD_LABEL = { 3: "Q", 6: "H1", 9: "9M", 12: "FY" };
+
 /**
  * Deterministically parses cash flow statements from filing text.
  * @param {string} pdfText Raw text of the quarterly/annual filing
@@ -95,6 +110,10 @@ export function extractDeterministicCashFlow(pdfText = "") {
   const extracted = {
     statementScope: primarySection.scope,
     unit: unit.name,
+    // How many months the statement covers (3, 6, 9 or 12) and its own pre-tax profit for THAT period. The cash flow of a
+    // half-year must be set against the half-year's profit, never against one quarter's PAT (cash conversion of 300%+).
+    periodMonths: detectCashFlowPeriodMonths(lines, start),
+    pbtPeriodCr: null,
     operatingCashFlowCr: null,
     operatingCashFlowPriorCr: null,
     operatingProfitBeforeWcCr: null,
@@ -114,6 +133,10 @@ export function extractDeterministicCashFlow(pdfText = "") {
     const line = lines[i];
     const nums = parseNumbersFromLine(line);
     if (nums.length === 0) continue;
+
+    if (extracted.pbtPeriodCr === null && ROW_PATTERNS.pbtBeforeTax.test(line) && i <= start + 8) {
+      extracted.pbtPeriodCr = round2(nums[0] * f);
+    }
 
     if (extracted.operatingCashFlowCr === null && ROW_PATTERNS.netOperatingCashFlow.test(line)) {
       extracted.operatingCashFlowCr = round2(nums[0] * f);
@@ -240,16 +263,37 @@ export function formatCashFlowAndQualitySection(cf, eq, patCr = null) {
 
   const lines = [];
 
-  // Cash flow block
-  if (cf && cf.operatingCashFlowCr !== null) {
-    const priorStr = cf.operatingCashFlowPriorCr !== null ? ` _(vs ₹${cf.operatingCashFlowPriorCr} Cr a year ago)_` : "";
-    lines.push(`• *Net Operating Cash Flow (H1):* ₹${cf.operatingCashFlowCr} Cr${priorStr}`);
+  // Operating cash flow more than five times the period's profit, or twenty times the year-ago figure, is a mis-read cell
+  // (a lost decimal point or a shifted column), not a result: showing "18487% cash conversion" and a ₹10,679 Cr free cash
+  // flow next to a ₹58 Cr profit is worse than showing nothing.
+  // The profit the cash flow is compared with must cover the SAME period: the statement's own pre-tax profit when it printed
+  // one; otherwise the quarter's PAT, widened to the longest period a statement can cover (four quarters) so a legitimate
+  // half-year or full-year cash flow is not withheld for being larger than one quarter's profit.
+  const periodProfit = cf && cf.pbtPeriodCr > 0 ? cf.pbtPeriodCr : null;
+  const periodLabel = PERIOD_LABEL[cf?.periodMonths] || "period";
+  const scaleBase = periodProfit ?? (patCr && patCr > 0 ? patCr * 4 : null);
+  const ocfImplausible = Boolean(cf && cf.operatingCashFlowCr !== null && (
+    (scaleBase && Math.abs(cf.operatingCashFlowCr) > 5 * scaleBase) ||
+    (cf.operatingCashFlowPriorCr && Math.abs(cf.operatingCashFlowPriorCr) > 0 && Math.abs(cf.operatingCashFlowCr) > 20 * Math.abs(cf.operatingCashFlowPriorCr))
+  ));
+  if (ocfImplausible) {
+    lines.push("• *Operating cash flow:* ⚠️ the printed figure looks mis-read (it is out of scale with the profit), so it could not be verified; open the filing");
+  }
 
-    if (patCr && patCr > 0) {
-      const conv = round2((cf.operatingCashFlowCr / patCr) * 100);
+  // Cash flow block
+  if (cf && cf.operatingCashFlowCr !== null && !ocfImplausible) {
+    const priorStr = cf.operatingCashFlowPriorCr !== null ? ` _(vs ₹${cf.operatingCashFlowPriorCr} Cr a year ago)_` : "";
+    lines.push(`• *Net Operating Cash Flow (${periodLabel}):* ₹${cf.operatingCashFlowCr} Cr${priorStr}`);
+
+    // Conversion is shown only against a profit of the same period. A quarter's PAT against a half-year's cash flow is not a ratio.
+    const quarterStatement = cf.periodMonths === 3 && patCr && patCr > 0;
+    const convBase = periodProfit ?? (quarterStatement ? patCr : null);
+    if (convBase) {
+      const conv = round2((cf.operatingCashFlowCr / convBase) * 100);
       const isWeak = conv < 40;
       const emoji = isWeak ? "⚠️" : "✅";
-      lines.push(`• *Cash Conversion:* ${emoji} ${conv}% of Profit _(₹${cf.operatingCashFlowCr} Cr OCF / ₹${patCr} Cr PAT)_`);
+      const baseName = periodProfit ? `${periodLabel} pre-tax profit` : "PAT";
+      lines.push(`• *Cash Conversion:* ${emoji} ${conv}% of Profit _(₹${cf.operatingCashFlowCr} Cr OCF / ₹${convBase} Cr ${baseName})_`);
     }
 
     if (cf.inventoryChangeCr !== null && cf.inventoryChangeCr < 0) {

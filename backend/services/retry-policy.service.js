@@ -44,6 +44,18 @@ export function buildClassificationStuckMessage({ ticker, title, failures, docUr
   return `⚠️ ${clean(ticker).toUpperCase()}: could not classify "${clean(title)}" after ${failures} attempts because the AI providers are failing. Still retrying about hourly; nothing is lost.${docUrl ? `\n${docUrl}` : ''}`;
 }
 
+/**
+ * Recordings wait much longer: a company has up to 24 h to publish the call's audio, and the link in its letter is often live only
+ * hours later (QPOWER's letter said the file would be at the link "once the technical issue is resolved"). Twelve attempts with
+ * these waits cover about 29 hours; the written transcript is the backstop after that.
+ */
+export const AUDIO_BACKOFF_MINUTES = [5, 10, 20, 30, 60, 120, 180, 240, 360];
+
+export function audioBackoffDelayMs(failuresSoFar) {
+  const n = Number.isFinite(failuresSoFar) && failuresSoFar >= 1 ? Math.floor(failuresSoFar) : 1;
+  return AUDIO_BACKOFF_MINUTES[Math.min(n, AUDIO_BACKOFF_MINUTES.length) - 1] * 60 * 1000;
+}
+
 /** Delay before the next retry after the nth consecutive failure (n >= 1); holds at the last step. */
 export function backoffDelayMs(failuresSoFar) {
   const n = Number.isFinite(failuresSoFar) && failuresSoFar >= 1 ? Math.floor(failuresSoFar) : 1;

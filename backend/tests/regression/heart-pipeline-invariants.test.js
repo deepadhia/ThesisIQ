@@ -283,6 +283,18 @@ describe('Reporting period & Telegram delivery', () => {
     expect(chunks.join('\n\n').replace(/\s+/g, '').length).toBe(text.replace(/\s+/g, '').length);
   });
 
+  it('a message just over the limit is not cut into a big piece and a two-line orphan (POLICYBZR 2026-11-04)', () => {
+    const para = 'y'.repeat(300);
+    const body = Array.from({ length: 13 }, (_, i) => `P${i} ${para}`).join('\n\n'); // ~4,000 chars: just over the limit
+    const text = `${body}\n\n*Operating revenue:* 1,234\n\n*SIGNAL:* HOLD`;
+    expect(text.length).toBeGreaterThan(3900);
+    const chunks = splitTelegramText(text);
+    expect(chunks.length).toBe(2);
+    expect(chunks.every(c => c.length <= 3900)).toBe(true);
+    expect(chunks[1].length).toBeGreaterThan(3900 * 0.25); // the last piece is substantial, not an orphan
+    expect(chunks.join('\n\n').replace(/\s+/g, '')).toBe(text.replace(/\s+/g, '')); // nothing lost, nothing reordered
+  });
+
   it('sendTelegramMessage THROWS when Telegram is not configured (never reports a phantom send)', async () => {
     if (process.env.TELEGRAM_BOT_TOKEN && process.env.TELEGRAM_CHAT_ID) return; // configured env: nothing to assert hermetically
     await expect(sendTelegramMessage('hello')).rejects.toThrow(/not configured/i);

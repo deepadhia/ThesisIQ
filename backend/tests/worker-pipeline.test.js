@@ -6,12 +6,15 @@
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const shaktiText = fs.readFileSync(path.resolve(here, 'fixtures/shaktipump-q2fy27-results.txt'), 'utf8');
 
-const state = vi.hoisted(() => ({
+const state = vi.hoisted(() => {
+  // The allocation gate is ON in production; the pre-existing delivery tests assert "every filing is delivered", so they run with it off.
+  process.env.ALLOCATION_GATE = 'off';
+  return {
   calls: [],
   item: null,
   docText: '',
@@ -21,13 +24,27 @@ const state = vi.hoisted(() => ({
   llmVerdict: null,
   tableJson: null,
   highlightsJson: null,
+  whisperText: '',
+  twinFailure: false,
+  foreignCopies: 0,
+  transcriptCovers: false,
+  audioTwin: false,
+  recentResultsAlert: false,
+  earlierRecordingItems: [],
+  marketSnapshot: null,
   nimBodies: [],
   ocrText: '',
   pdfFailReason: 'NO_TEXT',
   pdfFailDetail: '',
   digestStore: new Map(),
-  otherPending: 0
-}));
+  otherPending: 0,
+  previousRows: [],
+  guidanceRows: [],
+  outcomeRows: [],
+  healthStuck: [],
+  boardRows: new Map()
+};
+});
 
 vi.mock('../config/env.js', () => ({
   NVIDIA_API_KEY: 'test-key',
@@ -49,7 +66,33 @@ vi.mock('../db/pool.js', () => ({
         state.digestStore.set(params[1], { id: params[1], ticker: state.item?.ticker, company_name: state.item?.company_name, filing_date: state.item?.filing_date, digest_item: JSON.parse(params[0]) });
         return { rows: [] };
       }
+      // a recording whose call already has an analysed written transcript
+      if (text.includes("'transcript_covers_call' AS tag")) return { rows: state.transcriptCovers ? [{ tag: 'transcript_covers_call' }] : [] };
+      // foreign-filing guard: how many tracked tickers hold this same attachment
+      if (text.includes("'foreign_copies' AS tag")) return { rows: [{ n: state.foreignCopies }] };
+      // dead-letter bookkeeping: a sibling filing that failed for the same reason, and a results alert already sent for the stock
+      if (text.includes("o.event_analysis->>'audio_media_url' = $3")) return { rows: state.audioTwin ? [{}] : [] };
+      if (text.includes("event_analysis->>'pipeline_error' = $3")) return { rows: state.twinFailure ? [{}] : [] };
+      if (text.includes("filing_category = 'QUARTERLY_EARNINGS' AND sent_to_telegram = true")) return { rows: state.recentResultsAlert ? [{}] : [] };
       if (text.includes("event_analysis->>'digest_pending' = 'true'")) return { rows: [...state.digestStore.values()].filter(r => !r.sent) };
+      // guidance tracking tables: the verified track record read, and the upserts (no rows back)
+      if (text.includes("'guidance_outcomes_read' AS tag")) return { rows: state.outcomeRows };
+      if (text.includes('INSERT INTO guidance_pacing_history') || text.includes('INSERT INTO guidance_outcomes')) return { rows: [] };
+      // guidance pacing: the stock's stored guidance statements
+      if (text.includes("'pacing_commitments' AS tag")) return { rows: state.guidanceRows };
+      // self-audit: both guidance tracking tables exist
+      if (text.includes('information_schema.tables') && text.includes('guidance_outcomes')) return { rows: [{ table_name: 'guidance_pacing_history' }, { table_name: 'guidance_outcomes' }] };
+      // self-audit: the stuck-filings check (every other health query falls through to the empty default)
+      if (text.includes('AS age_hours') && text.includes("IN ('pending_stage1','pending_stage2','pending_audio')")) return { rows: state.healthStuck };
+      // allocation gate: the stock's earlier verdicts, filings parked on the end-of-day board, and the board's own bookkeeping
+      if (text.includes("'previous_view' AS tag")) return { rows: state.previousRows };
+      if (text.includes("'board_pending', true")) { for (const id of params[1]) { state.boardRows.set(id, { bi: JSON.parse(params[0]), sent: false }); const r = state.digestStore.get(id); if (r) r.sent = true; } return { rows: [] }; }
+      if (text.includes("event_analysis->>'board_pending' = 'true'")) return { rows: [...state.boardRows.entries()].filter(([, v]) => !v.sent).map(([id, v]) => ({ id, bi: v.bi })) };
+      if (text.includes("'board_sent_at'")) { for (const id of params[0]) { const v = state.boardRows.get(id); if (v) v.sent = true; } return { rows: [] }; }
+      // a batch folded into the record instead of sent (press release restating results / transcript repeating a recording write-up)
+      if (text.includes("'digest_folded'")) { for (const id of params[1]) { const r = state.digestStore.get(id); if (r) { r.sent = true; r.folded = params[0]; } } return { rows: [] }; }
+      if (text.includes('earlier_recording_writeup')) return { rows: state.earlierRecordingItems.map(di => ({ di })) };
+      if (text.includes('FROM market_data_snapshots') && text.includes('digest_price_line')) return { rows: state.marketSnapshot ? [state.marketSnapshot] : [] };
       if (text.includes('GROUP BY ticker')) return { rows: state.otherPending ? [{ ticker: state.item?.ticker, n: state.otherPending }] : [] };
       if (text.includes('digest_sent_at')) { for (const id of params[0]) { const r = state.digestStore.get(id); if (r) r.sent = true; } return { rows: [] }; }
       if (text.includes('FROM corporate_announcements ca') && text.includes('JOIN stocks')) return { rows: [state.item] };
@@ -99,7 +142,19 @@ vi.mock('../services/telegram.service.js', async () => {
   };
 });
 
-import { processPendingDeepDives, flushThesisDigests } from '../workers/quarterly-deepdive-worker.js';
+// Recordings: the download and the Whisper call are replaced; the link extraction, routing and everything after are real.
+vi.mock('../services/audio-transcript-analyzer.service.js', async () => {
+  const actual = await vi.importActual('../services/audio-transcript-analyzer.service.js');
+  return {
+    ...actual,
+    resolveAudioMediaUrl: vi.fn(async (url) => ({ type: 'DIRECT_AUDIO', url })),
+    downloadAndExtractMp3: vi.fn(async (_url, out) => out),
+    transcribeAudioWithGroqWhisper: vi.fn(async () => state.whisperText),
+    analyzeAudioWithGemini: vi.fn(async () => ({ executive_summary: 'Gemini audio summary', catalysts: [], commitments: [] }))
+  };
+});
+
+import { processPendingDeepDives, flushThesisDigests, flushAllocationBoard, flushHealthReport } from '../workers/quarterly-deepdive-worker.js';
 import { getThesisContract } from '../services/thesis-driver-context.service.js';
 import { sendPipelineFailureAlert } from '../services/telegram.service.js';
 import { extractPdfTextDetailed } from '../services/announcement.service.js';
@@ -140,7 +195,7 @@ function stubFetch(mode) {
         content = '**Tier 2: Neutral**\n**Credibility** is unproven; the filing shows mixed results and I would HOLD.';
       }
       else if (body.includes('financial data transcriber') && state.tableJson) content = state.tableJson;
-      else if (body.includes('concall highlight') && state.highlightsJson) content = state.highlightsJson;
+      else if ((body.includes('concall highlight') || body.includes('presentation highlight')) && state.highlightsJson) content = state.highlightsJson;
       else content = JSON.stringify(state.llmVerdict || llmVerdictJson());
       return { ok: true, json: async () => ({ choices: [{ message: { content } }] }) };
     }
@@ -183,6 +238,17 @@ describe('quarterly deep-dive worker', () => {
     state.llmVerdict = null;
     state.tableJson = null;
     state.highlightsJson = null;
+    state.twinFailure = false;
+    state.foreignCopies = 0;
+    state.transcriptCovers = false;
+    state.audioTwin = false;
+    state.recentResultsAlert = false;
+    state.earlierRecordingItems = [];
+    state.marketSnapshot = null;
+    state.previousRows = [];
+    state.guidanceRows = [];
+    state.outcomeRows = [];
+    state.boardRows = new Map();
     state.nimBodies = [];
     state.ocrText = '';
     state.pdfFailReason = 'NO_TEXT';
@@ -217,6 +283,25 @@ describe('quarterly deep-dive worker', () => {
     expect(sendIdx).toBeGreaterThan(-1);
     expect(completedIdx).toBeGreaterThan(sendIdx);       // alert first, completion after
     expect(state.calls.some(c => c.sql.includes("'needs_review'"))).toBe(false);
+  });
+
+  it('the results flash is compact: one price line instead of a valuation block, capped lists, no long footer (user: overwhelmed)', async () => {
+    state.llmVerdict = {
+      verdict_summary: 'Profit fell sharply on lower margins. Revenue held. Management did not explain the fall. A fourth sentence that should not be shown.',
+      key_positives: ['Order book remained healthy this quarter', 'Dispatch volumes continued to grow steadily', 'New export customer was added recently', 'Capacity utilisation stayed high overall', 'Fifth positive point here'],
+      key_concerns_and_drags: ['Receivable days rose during the period', 'Raw material costs went up again', 'A third concern that should be cut', 'A fourth concern that should be cut'],
+      concall_verification_points: ['Why did margins fall during the quarter?', 'When will receivables normalise again?', 'Third query that should be cut']
+    };
+    state.item.deep_dive_status = 'pending_stage1';
+    await processPendingDeepDives({ announcementIds: ['aaaaaaaa-0000-0000-0000-000000000001'], deadlineAt: Date.now() + 20000 });
+    const msg = state.sends[0];
+    expect(msg).not.toContain('LIVE VALUATION');
+    expect(msg).not.toContain('Fifth positive point');
+    expect(msg).not.toContain('third concern');
+    expect(msg).not.toContain('Third query');
+    expect(msg).not.toContain('fourth sentence');
+    expect(msg).not.toContain('Stage 1 snapshot judged against');
+    expect(msg.length).toBeLessThan(3400);
   });
 
   it('worker LLM calls do not use response_format JSON mode (measured 3.5x slower on llama-3.2-11b: 9.9s -> 35.6s, same output)', async () => {
@@ -470,6 +555,95 @@ describe('quarterly deep-dive worker', () => {
       expect(state.sends).toHaveLength(1);
     });
 
+    describe('volume: fewer messages (deck + press release batched, repeats folded, price context shown)', () => {
+      const mkItem = (id, kind, extra = {}, queuedMinAgo = 1) => {
+        const queuedAt = new Date(Date.now() - queuedMinAgo * 60_000).toISOString();
+        state.digestStore.set(id, { id, ticker: 'SHAKTIPUMP', company_name: 'Shakti Pumps (India) Limited', filing_date: '2026-10-24T10:00:00.000Z', digest_item: { kind, title: kind === 'PRESS' ? 'Press Release' : kind === 'DECK' ? 'Investor Presentation' : 'Transcript', url: `https://example.test/${id}.pdf`, filedAt: '2026-10-24T10:00:00.000Z', queuedAt, summary: 'Revenue up 12%.', positives: ['PAT up 9%'], concerns: [], guidance: [], commitmentFlags: [], assessment: [], ...extra } });
+      };
+
+      const H = 60;
+
+      it('after an alerted results statement, a deck / press release is held (no message yet), and goes out ONCE, together, after 24 h if no call has come', async () => {
+        state.item = baseItem();
+        state.recentResultsAlert = true;
+        mkItem('p1', 'PRESS', { positives: ['Capex of Rs 80 Cr announced'], growthInitiatives: ['New line'] }, 5 * H);
+        mkItem('d1', 'DECK', {}, 2 * H);
+        expect(await flushThesisDigests()).toBe(0);
+        expect(state.sends).toHaveLength(0);
+        // 20 h later the OLDEST item (the press release, queued 5 h before) is 25 h old, so the hold is over: one message, both filings
+        expect(await flushThesisDigests({ now: Date.now() + 20 * H * 60_000 })).toBe(1);
+        expect(state.sends).toHaveLength(1);
+        expect(state.sends[0]).toContain('Press Release');
+        expect(state.sends[0]).toContain('Investor Presentation');
+      });
+
+      it('the call arriving releases the held deck: deck, press release and call go out as ONE message', async () => {
+        state.item = baseItem();
+        state.recentResultsAlert = true;
+        mkItem('p1', 'PRESS', { growthInitiatives: ['New line'] }, 6 * H);
+        mkItem('d1', 'DECK', {}, 5 * H);
+        mkItem('c1', 'CONCALL', { highlights: { guidance_changes: ['Margin guide: 27-28% -> 29-30% (raised)'] } }, 1);
+        expect(await flushThesisDigests()).toBe(1);
+        expect(state.sends).toHaveLength(1);
+        expect(state.sends[0]).toContain('Press Release');
+        expect(state.sends[0]).toContain('Investor Presentation');
+        expect([...state.digestStore.values()].every(r => r.sent)).toBe(true);
+      });
+
+      it('urgent news is not held for the call: a deck with a guidance cut goes out immediately', async () => {
+        state.item = baseItem();
+        state.recentResultsAlert = true;
+        mkItem('d1', 'DECK', { guidanceCuts: ['Revenue growth outlook 1.5-2x -> 1.2-1.5x (cut)'], highlights: { guidance_changes: ['Revenue growth outlook 1.5-2x -> 1.2-1.5x (cut)'] } }, 3);
+        expect(await flushThesisDigests()).toBe(1);
+        expect(state.sends).toHaveLength(1);
+        expect(state.sends[0]).toContain('cut');
+      });
+
+      it('a press release that only restates the results is folded once its 24 h hold is over: nothing sent, the row records why', async () => {
+        state.item = baseItem();
+        state.recentResultsAlert = true;
+        mkItem('p1', 'PRESS', {}, 25 * H);
+        expect(await flushThesisDigests()).toBe(0);
+        expect(state.sends).toHaveLength(0);
+        const row = state.digestStore.get('p1');
+        expect(row.sent).toBe(true);
+        expect(String(row.folded)).toMatch(/restates the results/i);
+      });
+
+      it('without an alerted results statement nothing is held or folded (old behaviour)', async () => {
+        state.item = baseItem();
+        mkItem('p1', 'PRESS', {}, 1);
+        expect(await flushThesisDigests()).toBe(1);
+        expect(state.sends).toHaveLength(1);
+      });
+
+      it('the written transcript of a call already written up from its recording is folded when it adds no new figure', async () => {
+        state.item = baseItem();
+        state.earlierRecordingItems = [{ kind: 'CONCALL', source: 'audio', highlights: { guidance_changes: ['Revenue growth outlook: 1.5-2x -> 1.2-1.5x (cut)'], financial_performance: ['Revenue Rs 2,827.3 mn up 16.9%'] } }];
+        mkItem('t1', 'CONCALL', { highlights: { guidance_changes: ['Growth guidance lowered to 1.2-1.5x from 1.5-2x'], financial_performance: ['Revenue of 2,827.3 million, growth 16.9%'] } }, 1);
+        expect(await flushThesisDigests()).toBe(0);
+        expect(state.sends).toHaveLength(0);
+        expect(String(state.digestStore.get('t1').folded)).toMatch(/recording/i);
+      });
+
+      it('a transcript with a figure the recording write-up lacked is sent', async () => {
+        state.item = baseItem();
+        state.earlierRecordingItems = [{ kind: 'CONCALL', source: 'audio', highlights: { guidance_changes: ['Revenue growth outlook: 1.5-2x -> 1.2-1.5x (cut)'] } }];
+        mkItem('t1', 'CONCALL', { highlights: { guidance_changes: ['Export share targeted at 18% by FY28'] } }, 1);
+        expect(await flushThesisDigests()).toBe(1);
+        expect(state.sends).toHaveLength(1);
+      });
+
+      it('the message carries the live price line from the latest market snapshot', async () => {
+        state.item = baseItem();
+        state.marketSnapshot = { share_price: '2222', pe_ratio: '37.5', market_cap: '7164', market_data_as_of: new Date().toISOString() };
+        mkItem('t1', 'CONCALL', {}, 1);
+        expect(await flushThesisDigests()).toBe(1);
+        expect(state.sends[0]).toContain('CMP ₹2,222');
+        expect(state.sends[0]).toContain('P/E 37.5');
+      });
+    });
+
     it('several queued filings of one stock go out as ONE message', async () => {
       state.item = baseItem();
       const queuedAt = new Date().toISOString();
@@ -482,6 +656,314 @@ describe('quarterly deep-dive worker', () => {
       expect(state.sends[0]).toContain('Earnings Call Transcript');
       expect(state.sends[0]).toContain('Dispatch volumes continued under PM-KUSUM');
       expect([...state.digestStore.values()].every(r => r.sent)).toBe(true);
+    });
+  });
+
+  describe('allocation gate: only what changes the view is pushed; the rest waits on the end-of-day board (user: "only important info useful for share allocation")', () => {
+    const ID = 'aaaaaaaa-0000-0000-0000-000000000001';
+    const daysAgo = (d) => new Date(Date.now() - d * 86400000).toISOString();
+    // the Shakti statement with a benign profit (88.00 vs 90.71 a year ago) instead of the -57% fall: no surprise to report
+    const benignText = () => shaktiText.replace(/38\.51/g, '88.00').replace(/49\.53/g, '118.00');
+    const prevRow = (o = {}) => ({ action: 'HOLD / MONITOR', conviction: '5', hurdle: null, assessment: [], guidance: null, judged_at: daysAgo(30), ...o });
+    const holdVerdict = () => ({
+      ...llmVerdictJson(), action_signal: 'HOLD', final_action: 'HOLD', conviction_score: 5,
+      thesis_driver_assessment: [{ driver: drivers[0].name, status: 'ON_TRACK', evidence: 'Dispatch volumes continued under PM-KUSUM in the quarter per management' }]
+    });
+    // what the real gate concludes for this statement (the Shakti hurdles are not met): REASSESS THESIS, conviction 4
+    const sameView = () => prevRow({ action: 'REASSESS THESIS', conviction: '4' });
+    const runFlash = () => processPendingDeepDives({ announcementIds: [ID], deadlineAt: Date.now() + 20000 });
+
+    beforeEach(() => { process.env.ALLOCATION_GATE = 'on'; });
+    afterEach(() => { process.env.ALLOCATION_GATE = 'off'; });
+
+    it('results that leave the view unchanged are NOT pushed: recorded on the row for the board, and the filing still completes', async () => {
+      state.docText = benignText();
+      state.llmVerdict = holdVerdict();
+      state.previousRows = [sameView()];
+      const res = await runFlash();
+      expect(res.processed).toBe(1);
+      expect(state.sends).toHaveLength(0);
+      expect(state.boardRows.get(ID)?.bi).toMatchObject({ ticker: 'SHAKTIPUMP', kinds: ['RESULTS'], stance: 'REASSESS THESIS' });
+      const boardIdx = state.calls.findIndex(c => c.sql.includes("'board_pending', true"));
+      const completedIdx = state.calls.findIndex(c => c.sql.includes("SET deep_dive_status = 'completed'"));
+      expect(boardIdx).toBeGreaterThan(-1);
+      expect(completedIdx).toBeGreaterThan(boardIdx);   // recorded BEFORE it is marked completed (a restart cannot lose it)
+    });
+
+    it('the previous view is the last judgement made on VERIFIED numbers: a later deck / press release re-grade without numbers does not replace it (9 same-stock conflicts in 21 days: results said REASSESS, a deck then said HOLD)', async () => {
+      state.docText = benignText();
+      state.llmVerdict = holdVerdict();
+      state.previousRows = [
+        prevRow({ action: 'HOLD / MONITOR', conviction: '5', has_fin: false, judged_at: daysAgo(5) }),                  // newest: a deck, no verified numbers (outside the 72 h damper)
+        prevRow({ action: 'REASSESS THESIS', conviction: '4', has_fin: true, judged_at: daysAgo(8) })                   // the results judgement
+      ];
+      await runFlash();
+      // the flash concludes REASSESS 4/10; against the authoritative REASSESS 4/10 that is no change (against the deck's HOLD it would have been pushed)
+      expect(state.sends).toHaveLength(0);
+      expect(state.boardRows.get(ID)?.bi).toMatchObject({ stance: 'REASSESS THESIS' });
+    });
+
+    it('a stance change is pushed, with the allocation line first', async () => {
+      state.docText = benignText();
+      state.llmVerdict = holdVerdict();
+      state.previousRows = [prevRow({ action: 'BUY / ACCUMULATE', conviction: '8', judged_at: daysAgo(40) })];
+      await runFlash();
+      expect(state.sends).toHaveLength(1);
+      expect(state.sends[0]).toContain('ALLOCATION');
+      expect(state.sends[0]).toMatch(/BUY \/ ACCUMULATE.*REASSESS THESIS/);
+      expect(state.sends[0].indexOf('ALLOCATION')).toBeLessThan(state.sends[0].indexOf('ACTION SIGNAL'));
+      expect(state.boardRows.size).toBe(0);
+    });
+
+    it('a downside surprise (profit -57%) is pushed even though the stance is unchanged', async () => {
+      state.llmVerdict = holdVerdict();
+      state.previousRows = [sameView()];
+      await runFlash();
+      expect(state.sends).toHaveLength(1);
+      expect(state.sends[0]).toMatch(/profit -57/);
+    });
+
+    it('an unknown previous view (lookup failed) pushes rather than hides', async () => {
+      state.docText = benignText();
+      state.llmVerdict = holdVerdict();
+      const { pool } = await import('../db/pool.js');
+      const real = vi.mocked(pool.query).getMockImplementation();
+      vi.mocked(pool.query).mockImplementation(async (sql, params) => {
+        if (String(sql).includes("'previous_view' AS tag")) throw new Error('db down');
+        return real(sql, params);
+      });
+      try { await runFlash(); } finally { vi.mocked(pool.query).mockImplementation(real); }
+      expect(state.sends).toHaveLength(1);
+      expect(state.sends[0]).toContain('could not be loaded');
+    });
+
+    it('the kill switch ALLOCATION_GATE=off restores "every filing is pushed"', async () => {
+      process.env.ALLOCATION_GATE = 'off';
+      state.docText = benignText();
+      state.llmVerdict = holdVerdict();
+      state.previousRows = [sameView()];
+      await runFlash();
+      expect(state.sends).toHaveLength(1);
+      expect(state.boardRows.size).toBe(0);
+    });
+
+    describe('decks, calls and recordings (digest)', () => {
+      const mk = (id, kind, extra = {}) => state.digestStore.set(id, { id, ticker: 'SHAKTIPUMP', company_name: 'Shakti Pumps (India) Limited', filing_date: '2026-10-24T10:00:00.000Z', digest_item: { kind, title: kind === 'DECK' ? 'Investor Presentation' : 'Transcript', url: 'https://example.test/' + id + '.pdf', filedAt: '2026-10-24T10:00:00.000Z', queuedAt: new Date().toISOString(), summary: 'Management reiterated the plan.', positives: ['Order book healthy'], concerns: [], guidance: [], commitmentFlags: [], assessment: [], action: 'HOLD / MONITOR', conviction: 5, ...extra } });
+
+      it('a deck / call that says nothing new goes to the board, not to Telegram', async () => {
+        state.item = baseItem();
+        state.previousRows = [prevRow()];
+        mk('d1', 'DECK');
+        expect(await flushThesisDigests()).toBe(0);
+        expect(state.sends).toHaveLength(0);
+        expect(state.boardRows.get('d1')?.bi).toMatchObject({ ticker: 'SHAKTIPUMP', kinds: ['DECK'] });
+      });
+
+      it('a deck that CUTS guidance is pushed at once with the guidance change in the allocation line (no 24 h hold)', async () => {
+        state.item = baseItem();
+        state.recentResultsAlert = true;
+        state.previousRows = [prevRow()];
+        mk('d1', 'DECK', { highlights: { guidance_changes: ['Revenue growth outlook: 1.5-2x -> 1.2-1.5x (cut)'] }, guidanceCuts: ['Revenue growth outlook: 1.5-2x -> 1.2-1.5x (cut)'] });
+        expect(await flushThesisDigests()).toBe(1);
+        expect(state.sends[0]).toContain('ALLOCATION');
+        expect(state.sends[0]).toMatch(/guidance cut/i);
+      });
+
+      it('a guidance change already stated earlier (the call) is not pushed again by the deck that repeats it', async () => {
+        state.item = baseItem();
+        state.previousRows = [prevRow({ judged_at: daysAgo(1), guidance: ['Revenue growth outlook: 1.5-2x -> 1.2-1.5x (cut)'] })];
+        mk('d1', 'DECK', { highlights: { guidance_changes: ['Growth guidance lowered to 1.2-1.5x from 1.5-2x (cut)'] } });
+        expect(await flushThesisDigests()).toBe(0);
+        expect(state.sends).toHaveLength(0);
+        expect(state.boardRows.has('d1')).toBe(true);
+      });
+
+      it('a deck cannot flip the stance by itself (same-day flip-flop damper): a REASSESS read from a deck stays on the board', async () => {
+        state.item = baseItem();
+        state.previousRows = [prevRow({ action: 'HOLD / MONITOR' })];
+        mk('d1', 'DECK', { action: 'REASSESS THESIS', conviction: 3 });
+        expect(await flushThesisDigests()).toBe(0);
+        expect(state.boardRows.has('d1')).toBe(true);
+      });
+    });
+
+    describe('the end-of-day allocation board', () => {
+      const park = (id, entry) => state.boardRows.set(id, { bi: entry, sent: false });
+      const IST = (h, m = 0) => Date.parse('2026-11-06T' + String(h).padStart(2, '0') + ':' + String(m).padStart(2, '0') + ':00+05:30');
+
+      it('sends ONE message at 18:00 IST listing every parked filing by stock, and marks them sent', async () => {
+        park('b1', { ticker: 'SJS', kinds: ['PRESS', 'DECK'], stance: 'HOLD / MONITOR', conviction: 6, gist: 'Nothing changes the view.' });
+        park('b2', { ticker: 'TIMETECHNO', kinds: ['CONCALL'], stance: 'HOLD / MONITOR', conviction: 5, gist: 'Call confirms the margin guide.' });
+        expect(await flushAllocationBoard({ now: IST(17, 30) })).toBe(0);
+        expect(state.sends).toHaveLength(0);
+        expect(await flushAllocationBoard({ now: IST(18, 5) })).toBe(1);
+        expect(state.sends).toHaveLength(1);
+        expect(state.sends[0]).toContain('ALLOCATION BOARD');
+        expect(state.sends[0]).toContain('SJS');
+        expect(state.sends[0]).toContain('TIMETECHNO');
+        expect([...state.boardRows.values()].every(v => v.sent)).toBe(true);
+        expect(state.settings.allocation_board_last_sent).toMatchObject({ ymd: '2026-11-06' });
+      });
+
+      it('sends nothing when nothing is parked, and only once a day', async () => {
+        expect(await flushAllocationBoard({ now: IST(19) })).toBe(0);
+        park('b1', { ticker: 'SJS', kinds: ['DECK'], stance: 'HOLD / MONITOR', conviction: 6, gist: 'x' });
+        state.settings.allocation_board_last_sent = { ymd: '2026-11-06' };
+        expect(await flushAllocationBoard({ now: IST(19) })).toBe(0);
+        expect(state.sends).toHaveLength(0);
+      });
+
+      it('a failed send keeps the filings parked for the next cycle', async () => {
+        park('b1', { ticker: 'SJS', kinds: ['DECK'], stance: 'HOLD / MONITOR', conviction: 6, gist: 'x' });
+        state.sendImpl = async () => { throw new Error('Telegram API error (429)'); };
+        expect(await flushAllocationBoard({ now: IST(19) })).toBe(0);
+        expect(state.boardRows.get('b1').sent).toBe(false);
+        state.sendImpl = null;
+        expect(await flushAllocationBoard({ now: IST(19, 10) })).toBe(1);
+      });
+    });
+  });
+
+  describe('guidance pacing in the results flash (year to date vs the full-year guide)', () => {
+    const ID = 'aaaaaaaa-0000-0000-0000-000000000001';
+    const guide = (statement, metric, target_value) => ({ statement, metric, target_value, timeline: 'FY27', quarter: 'Q4 FY26', created_at: '2026-05-20T10:00:00Z' });
+    const run = () => processPendingDeepDives({ announcementIds: [ID], deadlineAt: Date.now() + 20000 });
+
+    it('a growth guide the half-year is behind on is shown with the growth the rest of the year must deliver (Shakti H1 +24.5%; guide 35-40% needs +44.6% in H2)', async () => {
+      state.guidanceRows = [guide('Full year FY27 revenue growth guidance of 35-40%.', 'Revenue growth FY27', '35-40%')];
+      await run();
+      const msg = state.sends[0];
+      expect(msg).toContain('GUIDANCE PACING (FY27, H1 done)');
+      expect(msg).toMatch(/BEHIND/);
+      expect(msg).toContain('H1 +24.5%');
+      expect(msg).toContain('H2 needs +44.6%');
+    });
+
+    it('is stored on the verdict so the next filing can compare, and the old quarter-only annual pacing line is not shown next to it', async () => {
+      state.guidanceRows = [guide('Full year FY27 revenue growth guidance of 35-40%.', 'Revenue growth FY27', '35-40%')];
+      await run();
+      const upd = state.calls.find(c => String(c.params?.[1] || '').includes('"guidance_pacing"'));
+      expect(upd).toBeTruthy();
+      expect(JSON.parse(upd.params[1]).institutional_verdict.guidance_pacing[0]).toMatchObject({ kind: 'REVENUE_GROWTH', fy: 'FY27', status: 'BEHIND' });
+      expect(state.sends[0]).not.toMatch(/ANNUAL PACING (?:ACTIVE|BEHIND|AHEAD)/);
+    });
+
+    it('no guidance on file, no pacing block (and nothing breaks)', async () => {
+      await run();
+      expect(state.sends[0]).not.toContain('GUIDANCE PACING');
+    });
+
+    it('with the gate on, a pacing that is BEHIND on first reading is a reason to push', async () => {
+      process.env.ALLOCATION_GATE = 'on';
+      try {
+        state.guidanceRows = [guide('Full year FY27 revenue growth guidance of 35-40%.', 'Revenue growth FY27', '35-40%')];
+        state.previousRows = [{ action: 'REASSESS THESIS', conviction: '4', hurdle: null, assessment: [], guidance: null, pacing: null, has_fin: true, judged_at: new Date(Date.now() - 30 * 86400000).toISOString() }];
+        await run();
+        expect(state.sends).toHaveLength(1);
+        expect(state.sends[0]).toMatch(/ALLOCATION.*guidance pacing: Revenue growth FY27 guide .* is BEHIND/s);
+      } finally { process.env.ALLOCATION_GATE = 'off'; }
+    });
+  });
+
+  describe('guidance tracking in the database (pacing history, year-end outcomes, verified track record)', () => {
+    const ID = 'aaaaaaaa-0000-0000-0000-000000000001';
+    const guide = (statement, metric, target_value, extra = {}) => ({ id: 'cid-' + metric, statement, metric, target_value, timeline: 'FY27', quarter: 'Q4 FY26', created_at: '2026-05-20T10:00:00Z', ...extra });
+    const run = () => processPendingDeepDives({ announcementIds: [ID], deadlineAt: Date.now() + 20000 });
+    const inserts = (table) => state.calls.filter(c => c.sql.includes('INSERT INTO ' + table));
+
+    it('a half-year reading is stored per guide with its status and numbers (idempotent upsert keyed by stock, year, kind and quarter end)', async () => {
+      state.guidanceRows = [guide('Full year FY27 revenue growth guidance of 35-40%.', 'Revenue growth FY27', '35-40%')];
+      await run();
+      const ins = inserts('guidance_pacing_history');
+      expect(ins).toHaveLength(1);
+      expect(ins[0].sql).toMatch(/ON CONFLICT \(ticker, fiscal_year, kind, as_of\) DO UPDATE/);
+      const [ticker, fy, kind, asOf, ytdLabel, status] = ins[0].params;
+      expect([ticker, fy, kind, ytdLabel, status]).toEqual(['SHAKTIPUMP', 'FY27', 'REVENUE_GROWTH', 'H1', 'BEHIND']);
+      expect(String(asOf)).toMatch(/2026-09-30/);
+      expect(ins[0].params[12]).not.toMatch(/\*/);   // stored as plain text
+    });
+
+    it('a March-quarter statement JUDGES the year: the original guide is MISSED, the revised one MET, both are stored, and the alert shows the outcome', async () => {
+      state.item = { ...baseItem(), filing_date: '2027-05-20T12:00:00.000Z' };
+      state.docText = fs.readFileSync(path.resolve(here, 'fixtures/q4-five-column-synthetic.txt'), 'utf8') + '\n' + 'Outcome of Board Meeting. The Board approved the audited results for the year. '.repeat(6);
+      state.guidanceRows = [
+        guide('Revised: FY27 full year revenue growth of 15-18%.', 'Revenue growth FY27', '15-18%', { id: 'c-last', created_at: '2026-11-05T10:00:00Z' }),
+        guide('FY27 full year revenue growth of 25-28%.', 'Revenue growth FY27', '25-28%', { id: 'c-first', created_at: '2026-05-20T10:00:00Z' })
+      ];
+      await run();
+      expect(state.sends[0]).toContain('GUIDANCE OUTCOME (FY27 full year)');
+      expect(state.sends[0]).toMatch(/MET.*Revenue growth FY27 guide 15–18% growth: delivered \+19\.2%/);
+      const outcomes = inserts('guidance_outcomes');
+      expect(outcomes).toHaveLength(2);
+      const byInitial = Object.fromEntries(outcomes.map(o => [o.params[3], o.params[4]]));   // initial -> status
+      expect(byInitial).toEqual({ true: 'MISSED', false: 'MET' });
+      expect(outcomes.find(o => o.params[3] === true).params[8]).toBe('c-first');
+    });
+
+    it('a missing tracking table never blocks the alert', async () => {
+      state.guidanceRows = [guide('Full year FY27 revenue growth guidance of 35-40%.', 'Revenue growth FY27', '35-40%')];
+      const { pool } = await import('../db/pool.js');
+      const real = vi.mocked(pool.query).getMockImplementation();
+      vi.mocked(pool.query).mockImplementation(async (sql, params) => {
+        if (String(sql).includes('guidance_pacing_history') || String(sql).includes('guidance_outcomes')) throw new Error('relation "guidance_outcomes" does not exist');
+        return real(sql, params);
+      });
+      try { await run(); } finally { vi.mocked(pool.query).mockImplementation(real); }
+      expect(state.sends).toHaveLength(1);
+      expect(state.sends[0]).toContain('GUIDANCE PACING');
+    });
+
+    it('the verified track record of the ORIGINAL guides is shown in the alert, misses first; with none recorded there is no line', async () => {
+      await run();
+      expect(state.sends[0]).not.toContain('TRACK RECORD');
+      state.sends.length = 0;
+      state.outcomeRows = [
+        { fiscal_year: 'FY26', kind: 'REVENUE_GROWTH', status: 'MET', guided_text: '15–18% growth' },
+        { fiscal_year: 'FY26', kind: 'EBITDA_MARGIN', status: 'MISSED', guided_text: '16%' }
+      ];
+      await run();
+      expect(state.sends[0]).toContain('GUIDANCE TRACK RECORD');
+      expect(state.sends[0]).toMatch(/1 of 2 met, 1 missed/);
+    });
+  });
+
+  describe('system check (self-audit): reports silent failures once a day, only when something is wrong', () => {
+    const IST = (h) => Date.parse('2026-11-06T' + String(h).padStart(2, '0') + ':00:00+05:30');
+    // the audit (correctly) reports a switched-off gate, and this suite runs with it off: switch it on for these tests
+    beforeEach(() => { state.healthStuck = []; process.env.ALLOCATION_GATE = 'on'; });
+    afterEach(() => { process.env.ALLOCATION_GATE = 'off'; });
+
+    it('reports the allocation gate being switched off', async () => {
+      process.env.ALLOCATION_GATE = 'off';
+      expect(await flushHealthReport({ now: IST(20) })).toBe(1);
+      expect(state.sends[0]).toMatch(/gate is switched OFF/);
+    });
+
+    it('stays silent when everything is fine, and before 19:00 IST', async () => {
+      expect(await flushHealthReport({ now: IST(20) })).toBe(0);
+      state.healthStuck = [{ ticker: 'SJS', status: 'pending_stage1', age_hours: 9 }];
+      expect(await flushHealthReport({ now: IST(18) })).toBe(0);
+      expect(state.sends).toHaveLength(0);
+    });
+
+    it('sends ONE message naming what is stuck, remembers it, and does not repeat the same report the same day', async () => {
+      state.healthStuck = [{ ticker: 'SJS', status: 'pending_stage1', age_hours: 9 }];
+      expect(await flushHealthReport({ now: IST(20) })).toBe(1);
+      expect(state.sends).toHaveLength(1);
+      expect(state.sends[0]).toContain('SYSTEM CHECK');
+      expect(state.sends[0]).toContain('SJS');
+      expect(state.settings.pipeline_health_last).toMatchObject({ ymd: '2026-11-06', fingerprint: 'FILINGS_STUCK' });
+      expect(await flushHealthReport({ now: IST(21) })).toBe(0);
+      expect(state.sends).toHaveLength(1);
+    });
+
+    it('a failed send is retried (nothing is recorded as sent)', async () => {
+      state.healthStuck = [{ ticker: 'SJS', status: 'pending_stage1', age_hours: 9 }];
+      state.sendImpl = async () => { throw new Error('Telegram API error (429)'); };
+      expect(await flushHealthReport({ now: IST(20) })).toBe(0);
+      expect(state.settings.pipeline_health_last).toBeUndefined();
+      state.sendImpl = null;
+      expect(await flushHealthReport({ now: IST(20) })).toBe(1);
     });
   });
 
@@ -582,6 +1064,32 @@ describe('quarterly deep-dive worker', () => {
       state.docText = 'Press Release. Unaudited financial results Q2 FY27. Revenue from operations grew 10% to Rs 1,384 crore; total income rose; profit before tax up 40%.\n' + 'x'.repeat(300);
       await runOne();
       expect(attemptKeys()).not.toContain('unreadable_attempts');
+      expect(state.calls.some(c => c.sql.includes("'digest_pending', true"))).toBe(true);
+    });
+
+    it('an investor presentation is written up in the same structure as a call (guidance changes first), from its own text, and a guidance CUT in it vetoes a buy', async () => {
+      state.item = { ...baseItem(), title: 'Investor Presentation', attachment_url: 'https://nsearchives.nseindia.com/corporate/deck_Q2.pdf', deep_dive_status: 'pending_stage1' };
+      state.docText = 'Investor Presentation Q2 FY27. We have revised our revenue growth outlook to 1.2 to 1.5 times from 1.5 to 2 times. EBITDA margin guidance is raised to 29-30%. Display plant in Pune to be commissioned by Q2 FY28. ' + 'Passenger vehicle segment drove growth in the quarter. '.repeat(8);
+      state.highlightsJson = JSON.stringify({
+        guidance_changes: ['Revenue growth outlook: 1.5 to 2 times -> 1.2 to 1.5 times (cut)', 'EBITDA margin guidance: raised to 29-30% (raised)'],
+        operational_highlights: ['Display plant in Pune to be commissioned by Q2 FY28'],
+        key_challenges: ['Passenger vehicle segment drove growth in the quarter']
+      });
+      await runOne();
+      const queued = [...state.digestStore.values()][0]?.digest_item;
+      expect(queued).toBeTruthy();
+      expect(queued.kind).toBe('DECK');
+      expect(queued.highlights?.guidance_changes?.length).toBe(2);
+      expect(queued.guidanceCuts?.length).toBe(1);
+      expect(String(queued.action)).not.toMatch(/BUY|ADD/);          // the model's buy is vetoed by the cut
+      expect(state.nimBodies.some(b => JSON.stringify(b.messages).includes('presentation highlight'))).toBe(true);
+    });
+
+    it('a deck whose highlights come back empty or unusable is still queued with its ordinary verdict (never lost, never blocked)', async () => {
+      state.item = { ...baseItem(), title: 'Investor Presentation', attachment_url: 'https://nsearchives.nseindia.com/corporate/deck_Q2.pdf', deep_dive_status: 'pending_stage1' };
+      state.docText = 'Investor Presentation Q2 FY27. ' + 'Passenger vehicle segment drove growth in the quarter. '.repeat(12);
+      state.highlightsJson = 'this is not json';
+      await runOne();
       expect(state.calls.some(c => c.sql.includes("'digest_pending', true"))).toBe(true);
     });
 
@@ -862,5 +1370,199 @@ Profit for the period 80.96 78.00 74.20 158.96 140.00 300.00
     for (const leaked of ['Aerospace', 'Dholera', 'Wayout', '₹3,000', '₹600 Cr', '₹1,500', '₹1,200', '₹10,000', '25% PAT']) {
       expect(msg, `alert still contains "${leaked}"`).not.toContain(leaked);
     }
+  });
+
+  describe('concall RECORDINGS (SJS / SBCL / TRANSRAILL 2026-11-04..05: a one-paragraph summary, "concall not analysed yet", and a guidance cut that never reached the alert)', () => {
+    const audioItem = () => ({ ...baseItem(), title: 'Analysts/Institutional Investor Meet/Con. Call Updates', deep_dive_status: 'pending_audio', filing_category: 'QUARTERLY_EARNINGS', is_earnings_release: false, attachment_url: 'https://nsearchives.nseindia.com/corporate/SHAKTIPUMP_AudioRecording.pdf' });
+    const letterWithLink = 'Subject: Submission of audio recording pertaining to Earnings Call of Q2 of FY 2026-27. The audio recording of the same is available on the website of the Company at shaktipumps.com/Docs/FY2627/Q2/call.mp3. Request you to kindly take the above on record. Thank you.';
+    const callText = (n = 50) =>
+      "Moderator: Ladies and gentlemen, good day and welcome to the Q2 FY27 earnings conference call.\n" +
+      Array.from({ length: n }, (_, i) => `Management: Point ${i}: in light of the global macro environment we have recalibrated our FY27 revenue growth outlook to 1.2 to 1.5 times industry growth, from 1.5 to 2 times earlier, while EBITDA margin guidance is now 29-30%.\n`).join('');
+
+    beforeEach(() => {
+      process.env.GROQ_API_KEY = 'gsk_test-key';   // the server's key name (GROK_API_KEY alone was the only one the worker looked at)
+      state.whisperText = callText();
+    });
+
+    it('a recording is transcribed and goes through the concall flow: one digest with the seven-part write-up, the cut as the reason, a buy downgraded', async () => {
+      state.item = audioItem();
+      state.docText = letterWithLink;
+      state.highlightsJson = JSON.stringify({
+        guidance_changes: ['Revenue growth outlook: 1.5 to 2 times -> 1.2 to 1.5 times industry growth (cut), due to the global macro environment', 'EBITDA margin guidance: 29-30% (raised)'],
+        annual_guidance: ['EBITDA margin: 29-30%'],
+        financial_performance: ['EBITDA margin guidance is now 29-30%'],
+        key_challenges: ['Global macro environment'],
+        management_tone: 'Confident',
+        key_takeaway: 'Management cut FY27 revenue growth outlook to 1.2 to 1.5 times industry growth.'
+      });
+      const res = await processPendingDeepDives({ announcementIds: ['aaaaaaaa-0000-0000-0000-000000000001'], deadlineAt: Date.now() + 20000 });
+      expect(res.processed).toBe(1);
+      expect(state.sends).toHaveLength(1);
+      const msg = state.sends[0];
+      expect(msg).toContain('GUIDANCE & OUTLOOK');
+      expect(msg).toMatch(/🔻 Revenue growth outlook: 1\.5 to 2 times -> 1\.2 to 1\.5 times/);
+      expect(msg).toContain('Concall (heard from the company');       // says it came from the recording
+      expect(msg).toContain('✅ analysed');                              // not "concall not analysed yet"
+      expect(msg).toContain('management cut guidance on the call');
+      expect(msg).toContain('HOLD / MONITOR');                         // the model's ADD 8/10 is vetoed by the cut
+      expect(msg).not.toContain('not analysed yet');
+    });
+
+    it('the transcript of the recording is what is analysed (the verdict prompt receives the call text, not the one-page intimation letter)', async () => {
+      state.item = audioItem();
+      state.docText = letterWithLink;
+      state.highlightsJson = JSON.stringify({ key_positives: ['EBITDA margin guidance is now 29-30%'] });
+      await processPendingDeepDives({ announcementIds: ['aaaaaaaa-0000-0000-0000-000000000001'], deadlineAt: Date.now() + 20000 });
+      const verdictCalls = state.nimBodies.filter((b) => JSON.stringify(b.messages).includes('thesis_driver_assessment'));
+      expect(verdictCalls.length).toBeGreaterThan(0);
+      expect(verdictCalls.some((b) => JSON.stringify(b.messages).includes('recalibrated our FY27 revenue growth outlook'))).toBe(true);
+      expect(verdictCalls.every((b) => !JSON.stringify(b.messages).includes('kindly take the above on record'))).toBe(true);
+    });
+
+    it('the second exchange copy of the same recording is skipped: one download, one transcription, one write-up', async () => {
+      state.item = audioItem();
+      state.docText = letterWithLink;
+      state.audioTwin = true;
+      state.highlightsJson = JSON.stringify({ key_positives: ['EBITDA margin guidance is now 29-30%'] });
+      const { transcribeAudioWithGroqWhisper } = await import('../services/audio-transcript-analyzer.service.js');
+      vi.mocked(transcribeAudioWithGroqWhisper).mockClear();
+      const res = await processPendingDeepDives({ announcementIds: ['aaaaaaaa-0000-0000-0000-000000000001'], deadlineAt: Date.now() + 20000 });
+      expect(res.processed).toBe(1);
+      expect(vi.mocked(transcribeAudioWithGroqWhisper)).not.toHaveBeenCalled();
+      expect(state.sends).toHaveLength(0);
+    });
+
+    it('a recording is skipped when the written transcript of the same call is already analysed: no download, no Whisper, no second write-up of one call', async () => {
+      state.item = audioItem();
+      state.docText = letterWithLink;
+      state.transcriptCovers = true;
+      const { downloadAndExtractMp3, transcribeAudioWithGroqWhisper } = await import('../services/audio-transcript-analyzer.service.js');
+      vi.mocked(downloadAndExtractMp3).mockClear();
+      vi.mocked(transcribeAudioWithGroqWhisper).mockClear();
+      const res = await processPendingDeepDives({ announcementIds: ['aaaaaaaa-0000-0000-0000-000000000001'], deadlineAt: Date.now() + 20000 });
+      expect(res.processed).toBe(1);
+      expect(vi.mocked(downloadAndExtractMp3)).not.toHaveBeenCalled();
+      expect(vi.mocked(transcribeAudioWithGroqWhisper)).not.toHaveBeenCalled();
+      expect(state.sends).toHaveLength(0);
+      expect(state.calls.some(c => c.sql.includes("deep_dive_status = 'completed'"))).toBe(true);   // recorded, never left pending
+      // another company's transcript saved under this ticker (the 2026-11-06 flood) never counts as covering the call
+      const lookup = state.calls.find(c => c.sql.includes("'transcript_covers_call' AS tag"));
+      expect(lookup.sql).toContain("foreign_filing");
+      expect(lookup.sql).toMatch(/count\(DISTINCT t\.ticker\)[\s\S]*< 3/);
+    });
+
+    it('a recording not published yet (404) is retried with a growing delay, not dead-lettered after two hours (QPOWER: "available once the technical issue is resolved")', async () => {
+      state.item = audioItem();
+      state.docText = letterWithLink;
+      state.attempts = 7;                                    // the old budget (6) would already have given up
+      const { downloadAndExtractMp3 } = await import('../services/audio-transcript-analyzer.service.js');
+      vi.mocked(downloadAndExtractMp3).mockRejectedValueOnce(new Error('Failed to download audio stream: 404 Not Found'));
+      await processPendingDeepDives({ announcementIds: ['aaaaaaaa-0000-0000-0000-000000000001'], deadlineAt: Date.now() + 20000 });
+      expect(state.calls.some(c => c.sql.includes("deep_dive_status = 'needs_review'"))).toBe(false);
+      const defer = state.calls.find(c => c.sql.includes("'retry_not_before'"));
+      expect(defer).toBeTruthy();
+      const waitMs = new Date(defer.params[0]).getTime() - Date.now();
+      expect(waitMs).toBeGreaterThan(2.5 * 60 * 60 * 1000);  // the 7th wait is 3 h
+      expect(waitMs).toBeLessThan(3.5 * 60 * 60 * 1000);
+    });
+
+    it('a recording that cannot be fetched after the retries is dead-lettered WITHOUT a failure alert: the written transcript covers the call (QPOWER 404, INOXINDIA fetch failed)', async () => {
+      state.item = audioItem();
+      state.docText = letterWithLink;
+      state.attempts = 12;                                   // the retry budget (MAX_AUDIO_ATTEMPTS) is used up
+      const { downloadAndExtractMp3 } = await import('../services/audio-transcript-analyzer.service.js');
+      vi.mocked(downloadAndExtractMp3).mockRejectedValueOnce(new Error('Failed to download audio stream: 404 Not Found'));
+      vi.mocked(sendPipelineFailureAlert).mockClear();
+      await processPendingDeepDives({ announcementIds: ['aaaaaaaa-0000-0000-0000-000000000001'], deadlineAt: Date.now() + 20000 });
+      expect(state.calls.some(c => c.sql.includes("deep_dive_status = 'needs_review'"))).toBe(true);   // still recorded, never silently dropped
+      expect(vi.mocked(sendPipelineFailureAlert)).not.toHaveBeenCalled();
+    });
+
+    it('an intimation with no readable media link sends nothing and does not raise a failure alert (it used to go out as a full digest saying only that a recording exists)', async () => {
+      state.item = audioItem();
+      state.docText = 'Subject: Audio recording of the earnings conference call. The audio recording of the call is available on the website of the Company. Request you to kindly take the above on record.';
+      vi.mocked(sendPipelineFailureAlert).mockClear();
+      const res = await processPendingDeepDives({ announcementIds: ['aaaaaaaa-0000-0000-0000-000000000001'], deadlineAt: Date.now() + 20000 });
+      expect(res.processed).toBe(1);
+      expect(state.sends).toHaveLength(0);
+      expect(vi.mocked(sendPipelineFailureAlert)).not.toHaveBeenCalled();
+      expect(state.calls.some(c => c.sql.includes("deep_dive_status = 'completed'"))).toBe(true);
+    });
+  });
+
+  describe('failure alerts: one per cause, and none for a deck the results note already covers (SBCL / INOXINDIA 2026-11-04 sent the same alert for the NSE and the BSE copy)', () => {
+    const unreadable = () => { state.docText = ''; state.pdfFailReason = 'NO_TEXT'; state.pdfFailDetail = 'no text'; state.attempts = 99; };
+
+    it('the second copy of a filing that fails for the same reason does not raise a second alert', async () => {
+      state.item = { ...baseItem(), title: 'Announcement under Regulation 30 (LODR)-Analyst / Investor Meet - Outcome', deep_dive_status: 'pending_stage2', filing_category: 'QUARTERLY_EARNINGS', is_earnings_release: false };
+      unreadable();
+      state.twinFailure = true;
+      vi.mocked(sendPipelineFailureAlert).mockClear();
+      await processPendingDeepDives({ announcementIds: ['aaaaaaaa-0000-0000-0000-000000000001'], deadlineAt: Date.now() + 20000 });
+      expect(vi.mocked(sendPipelineFailureAlert)).not.toHaveBeenCalled();
+    });
+
+    it('the first failure is still alerted', async () => {
+      state.item = { ...baseItem(), title: 'Announcement under Regulation 30 (LODR)-Analyst / Investor Meet - Outcome', deep_dive_status: 'pending_stage2', filing_category: 'QUARTERLY_EARNINGS', is_earnings_release: false };
+      unreadable();
+      vi.mocked(sendPipelineFailureAlert).mockClear();
+      await processPendingDeepDives({ announcementIds: ['aaaaaaaa-0000-0000-0000-000000000001'], deadlineAt: Date.now() + 20000 });
+      expect(vi.mocked(sendPipelineFailureAlert)).toHaveBeenCalledTimes(1);
+    });
+
+    it('an unreadable investor presentation of a stock whose results were already alerted is dead-lettered quietly', async () => {
+      state.item = { ...baseItem(), title: 'Investor Presentation', deep_dive_status: 'pending_stage1', filing_category: 'QUARTERLY_EARNINGS', is_earnings_release: true };
+      unreadable();
+      state.recentResultsAlert = true;
+      vi.mocked(sendPipelineFailureAlert).mockClear();
+      await processPendingDeepDives({ announcementIds: ['aaaaaaaa-0000-0000-0000-000000000001'], deadlineAt: Date.now() + 20000 });
+      expect(vi.mocked(sendPipelineFailureAlert)).not.toHaveBeenCalled();
+      expect(state.calls.some(c => c.sql.includes("deep_dive_status = 'needs_review'"))).toBe(true);
+    });
+
+    it('a document that three or more tracked tickers hold is another company\'s filing: never read, analysed or alerted, and set aside on its row (NSE ignored the symbol on 2026-11-06)', async () => {
+      state.item = { ...baseItem(), title: 'Press Release', attachment_url: 'https://nsearchives.nseindia.com/corporate/DENTA_06112026233924_Denta_Press_Release_Q2_H1_FY27.pdf' };
+      state.foreignCopies = 19;
+      vi.mocked(extractPdfTextDetailed).mockClear();
+      const res = await processPendingDeepDives({ announcementIds: ['aaaaaaaa-0000-0000-0000-000000000001'], deadlineAt: Date.now() + 20000 });
+      expect(res.processed).toBe(1);
+      expect(state.sends).toHaveLength(0);
+      expect(vi.mocked(extractPdfTextDetailed)).not.toHaveBeenCalled();
+      expect(state.nimBodies).toHaveLength(0);
+      const setAside = state.calls.find(c => c.sql.includes('foreign_filing') && c.sql.includes("deep_dive_status = 'not_required'"));
+      expect(setAside?.params).toEqual(['aaaaaaaa-0000-0000-0000-000000000001']);
+      expect(state.calls.some(c => c.sql.includes('INSERT INTO quarterly_snapshots'))).toBe(false);
+      expect(state.calls.some(c => c.sql.includes('INSERT INTO management_commitments'))).toBe(false);
+    });
+
+    it('a concall INTIMATION filed as earnings ("General Updates", real JSLL letter) is not treated as a results statement: no OCR of statement pages, no failure alert, no results flash', async () => {
+      const jsll = fs.readFileSync(path.resolve(here, 'fixtures/real-layouts/JSLL_concall-intimation_2026-11-05.txt'), 'utf8');
+      state.item = { ...baseItem(), ticker: 'JSLL', title: 'General Updates', attachment_url: 'https://nsearchives.nseindia.com/corporate/JSLL_05112026121700_Intimation.pdf', filing_category: 'QUARTERLY_EARNINGS', is_earnings_release: true };
+      state.docText = jsll;
+      vi.mocked(extractPdfTextDetailed).mockClear();
+      vi.mocked(sendPipelineFailureAlert).mockClear();
+      await processPendingDeepDives({ announcementIds: ['aaaaaaaa-0000-0000-0000-000000000001'], deadlineAt: Date.now() + 20000 });
+      expect(vi.mocked(extractPdfTextDetailed).mock.calls.some(([, opts]) => opts?.forceOcr)).toBe(false);
+      expect(vi.mocked(sendPipelineFailureAlert)).not.toHaveBeenCalled();
+      // it went out (if at all) as an ordinary digest item, never as the immediate results flash
+      expect(state.sends.every(s => /HOW THIS SIGNAL WAS REACHED/.test(s))).toBe(true);
+    });
+
+    it('a document held by only two tickers (a parent and its subsidiary) is still analysed normally', async () => {
+      state.foreignCopies = 2;
+      const res = await processPendingDeepDives({ announcementIds: ['aaaaaaaa-0000-0000-0000-000000000001'], deadlineAt: Date.now() + 20000 });
+      expect(res.processed).toBe(1);
+      expect(state.sends).toHaveLength(1);
+      expect(state.calls.some(c => c.sql.includes('foreign_filing'))).toBe(false);
+    });
+
+    it('but an unreadable results STATEMENT is always alerted', async () => {
+      state.item = { ...baseItem(), title: 'Outcome of Board Meeting', deep_dive_status: 'pending_stage1', filing_category: 'QUARTERLY_EARNINGS', is_earnings_release: true };
+      unreadable();
+      state.recentResultsAlert = true;
+      vi.mocked(sendPipelineFailureAlert).mockClear();
+      await processPendingDeepDives({ announcementIds: ['aaaaaaaa-0000-0000-0000-000000000001'], deadlineAt: Date.now() + 20000 });
+      expect(vi.mocked(sendPipelineFailureAlert)).toHaveBeenCalledTimes(1);
+    });
   });
 });

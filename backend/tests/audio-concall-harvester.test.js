@@ -27,6 +27,18 @@ describe("Audio Concall Harvester", () => {
       expect(extractAudioUrlFromFiling("Researchbytes link: https://www.researchbytes.com/webcast.aspx?id=999")).toBe("https://www.researchbytes.com/webcast.aspx?id=999");
     });
 
+    it("reads a media link printed WITHOUT https:// (SJS 2026-11-05: 'available on the website of the Company at sjsindia.com/Docs/FY2627/Q2/FY27Q2FEACV1.mp3')", () => {
+      const sjs = `the audio recording of the same is available on the website of the Company at
+sjsindia.com/Docs/FY2627/Q2/FY27Q2FEACV1.mp3.
+Request you to kindly take the above on record.`;
+      expect(extractAudioUrlFromFiling(sjs)).toBe("https://sjsindia.com/Docs/FY2627/Q2/FY27Q2FEACV1.mp3");
+      expect(extractAudioUrlFromFiling("recording: www.example.co.in/ir/q2/call.m4a, thank you")).toBe("https://www.example.co.in/ir/q2/call.m4a");
+    });
+
+    it("a bare website or an e-mail address in the letter is not a media link", () => {
+      expect(extractAudioUrlFromFiling("Email: info@sjsindia.com, compliance@sjsindia.com  www.sjsindia.com Creating Possibilities")).toBeNull();
+    });
+
     it("extracts company IR landing pages from Lumax-style Regulation 30 intimation", () => {
       const lumaxText = `
         Pursuant to Regulation 30 of SEBI (LODR) Regulations, 2015, the Audio Recording Link
@@ -41,6 +53,27 @@ describe("Audio Concall Harvester", () => {
     it("reconnects URLs wrapped across line breaks in PDF text", () => {
       const wrapped = "Recording link: https://www.company.com/investor-\nrelations/audio/q2.mp3";
       expect(extractAudioUrlFromFiling(wrapped)).toBe("https://www.company.com/investor-relations/audio/q2.mp3");
+    });
+
+    it("a meeting-joining link is never a recording, and a wrapped link is not glued to the next sentence (POLICYBZR 2026-10-27: 'register/WN_c2cb8g6AQeejnEt0RyZAwQ' + 'Once registered...' became a 404 'audio' link)", () => {
+      const intimation = `Participants are requested to register using the link below:
+https://zoom.us/webinar/register/WN_c2cb8g6AQeejnEt0RyZAwQ
+Once registered, a confirmation email will be sent with important details for this call. Further, the transcript and an audio recording will be made available on the website of the company at www.pbfintech.in.
+You are requested to kindly take the same in your records.`;
+      expect(extractAudioUrlFromFiling(intimation)).toBeNull();
+      expect(extractAudioUrlFromFiling("Join: https://us02web.zoom.us/j/84012345678?pwd=abc and https://teams.microsoft.com/l/meetup-join/19%3ameeting_x")).toBeNull();
+      expect(extractAudioUrlFromFiling("Join: https://meet.google.com/abc-defg-hij. Audio recording will follow.")).toBeNull();
+      // a recorded Zoom share IS a recording
+      expect(extractAudioUrlFromFiling("Audio recording: https://zoom.us/rec/share/AbCdEf123")).toBe("https://zoom.us/rec/share/AbCdEf123");
+    });
+
+    it("still reconnects a link wrapped mid-name when the next line is only the rest of the link (QPOWER 2026-11-02)", () => {
+      const qpower = `at the following link once the technical issue is resolved:
+https://qualitypower.com/wp-content/uploads/2026/09/Quality-Power-Q2FY27-Concall-
+Audio.mp3
+Thanking You,
+Yours faithfully,`;
+      expect(extractAudioUrlFromFiling(qpower)).toBe("https://qualitypower.com/wp-content/uploads/2026/09/Quality-Power-Q2FY27-Concall-Audio.mp3");
     });
 
     it("ignores exchange URLs (NSE/BSE archives) and picks the company's recording URL", () => {
@@ -113,4 +146,14 @@ describe("Audio Concall Harvester", () => {
         .rejects.toThrow("GROK_API_KEY is not configured");
     });
   });
+});
+
+describe("which key runs Whisper (the worker looked only at GROK_API_KEY, so a server configured with GROQ_API_KEY never transcribed a call)", async () => {
+  const { getWhisperApiKey } = await import("../services/audio-transcript-analyzer.service.js");
+  it("GROQ_API_KEY is used", () => expect(getWhisperApiKey({ GROQ_API_KEY: "gsk_abc" })).toBe("gsk_abc"));
+  it("GROK_API_KEY counts only when it is a Groq key (gsk_), never an xAI key", () => {
+    expect(getWhisperApiKey({ GROK_API_KEY: "gsk_abc" })).toBe("gsk_abc");
+    expect(getWhisperApiKey({ GROK_API_KEY: "xai-abc" })).toBe("");
+  });
+  it("neither set: no key", () => expect(getWhisperApiKey({})).toBe(""));
 });

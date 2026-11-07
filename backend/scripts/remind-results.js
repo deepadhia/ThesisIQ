@@ -1,5 +1,6 @@
 import { pool } from "../db/pool.js";
 import { sendTelegramMessage } from "../services/telegram.service.js";
+import { buildEarningsCalendarMessage } from "../services/earnings-calendar.service.js";
 
 const NSE_BASE = 'https://www.nseindia.com';
 const NSE_HEADERS = {
@@ -310,108 +311,66 @@ export async function checkAndSendReminders({ isDryRun = false } = {}) {
   // Get local YYYY-MM-DD for today in IST wall-clock time
   const todayYmd = getIstTodayYmd();
 
-  let remindersSent = 0;
-
+  // One message for the whole day (see earnings-calendar.service.js): what reports today / tomorrow / in 3 days, and which stocks
+  // reported in the last few days without a concall analysis yet. Five separate messages per stock per quarter used to go out.
+  const entries = [];
   for (const stock of stocks) {
     const resultDateStr = formatDbDateToYmd(stock.next_results_date);
     if (!resultDateStr) continue;
-
     const diffDays = getDaysDifference(resultDateStr, todayYmd);
-    let message = null;
+    if (![3, 1, 0, -1, -2, -3, -4].includes(diffDays)) continue;
+    const resultsPublished = await checkResultsPublished(stock.id, stock.next_results_date);
+    entries.push({ ticker: stock.ticker, company: stock.company_name, resultDate: resultDateStr, diffDays, resultsPublished, concallAnalysed: false });
+  }
 
-    const cleanedCompany = (stock.company_name || stock.ticker)
-      .replace(/\s+share\s+price\s*$/i, "")
-      .replace(/\s+ltd\b\.?/i, " Ltd")
-      .trim();
-    const companyHeader = cleanedCompany ? `*${stock.ticker.toUpperCase()}* | ${cleanedCompany}` : `*${stock.ticker.toUpperCase()}*`;
-
-    if (diffDays === 3) {
-      // Skip if results were already published (e.g. published early)
-      const hasResults = await checkResultsPublished(stock.id, stock.next_results_date);
-      if (hasResults) {
-        console.log(`[SKIP] Skipped upcoming reminder for ${stock.ticker} (diffDays=3) because results were already published.`);
-        continue;
-      }
-      message = `📅 *UPCOMING EARNINGS CALENDAR*\n` +
-        `🏢 ${companyHeader}\n` +
-        `──────────────────────────────\n` +
-        `📢 *Event:* Board Meeting for Financial Results\n` +
-        `🗓️ *Scheduled Date:* ${resultDateStr} (in 3 days)\n` +
-        `🎯 *Status:* Pre-Result Stance Active\n` +
-        `──────────────────────────────\n` +
-        `_Auto-monitoring BSE/NSE feeds for financial results & concall intimation._`;
-    } else if (diffDays === 1) {
-      // Skip if results were already published
-      const hasResults = await checkResultsPublished(stock.id, stock.next_results_date);
-      if (hasResults) {
-        console.log(`[SKIP] Skipped upcoming reminder for ${stock.ticker} (diffDays=1) because results were already published.`);
-        continue;
-      }
-      message = `📅 *UPCOMING EARNINGS CALENDAR*\n` +
-        `🏢 ${companyHeader}\n` +
-        `──────────────────────────────\n` +
-        `📢 *Event:* Board Meeting for Financial Results\n` +
-        `🗓️ *Scheduled Date:* *TOMORROW* (${resultDateStr})\n` +
-        `⚡ *Watch Items:* YoY/QoQ revenue growth, EBITDA margin resilience, order intake\n` +
-        `──────────────────────────────\n` +
-        `_Stage 1 Flash note will trigger automatically upon exchange publication._`;
-    } else if (diffDays === 0) {
-      // Skip if results were already published
-      const hasResults = await checkResultsPublished(stock.id, stock.next_results_date);
-      if (hasResults) {
-        console.log(`[SKIP] Skipped upcoming reminder for ${stock.ticker} (diffDays=0) because results were already published.`);
-        continue;
-      }
-      message = `🚨 *EARNINGS RELEASE EXPECTED TODAY*\n` +
-        `🏢 ${companyHeader}\n` +
-        `──────────────────────────────\n` +
-        `📢 *Event:* Quarterly Results Board Meeting\n` +
-        `🗓️ *Scheduled Date:* *TODAY* (${resultDateStr})\n` +
-        `🎯 *System Status:* High-priority scanner active on BSE/NSE corporate feeds\n` +
-        `──────────────────────────────\n` +
-        `_Stage 1 Flash note will dispatch immediately upon filing receipt._`;
-    } else if (diffDays === -1) {
-      // 3a. Verify results are actually published for post-result review
-      const hasResults = await checkResultsPublished(stock.id, stock.next_results_date);
-      if (!hasResults) {
-        console.log(`[SKIP] Skipped review reminder for ${stock.ticker} (diffDays=-1): No earnings release found around ${resultDateStr}.`);
-        continue;
-      }
-      message = `📋 *POST-RESULT REVIEW ACTION*\n` +
-        `🏢 ${companyHeader}\n` +
-        `──────────────────────────────\n` +
-        `📢 *Event:* Results Published Yesterday (${resultDateStr})\n` +
-        `🔍 *Audit Action:* Review Stage 1 Flash numbers against management commitments\n` +
-        `🎯 *Decision Gate:* Verify if thesis assumptions hold or concall queries need tracking\n` +
-        `──────────────────────────────\n` +
-        `_ThesisIQ Post-Earnings Governance_`;
-    } else if (diffDays === -3) {
-      // 3b. Verify results are actually published for final post-result reminder
-      const hasResults = await checkResultsPublished(stock.id, stock.next_results_date);
-      if (!hasResults) {
-        console.log(`[SKIP] Skipped final reminder for ${stock.ticker} (diffDays=-3): No earnings release found around ${resultDateStr}.`);
-        continue;
-      }
-      message = `📋 *FINAL POST-RESULT REMINDER*\n` +
-        `🏢 ${companyHeader}\n` +
-        `──────────────────────────────\n` +
-        `📢 *Event:* Results Published 3 Days Ago (${resultDateStr})\n` +
-        `🔍 *Audit Action:* Finalize quarterly thesis rating, forward IRR, and allocation posture\n` +
-        `──────────────────────────────\n` +
-        `_ThesisIQ Portfolio Governance_`;
+  // A concall counts as analysed when a transcript or an analysed recording was digested for the stock recently.
+  const reported = entries.filter((e) => e.diffDays < 0 && e.resultsPublished).map((e) => e.ticker);
+  if (reported.length > 0) {
+    try {
+      const { rows } = await pool.query(
+        `SELECT DISTINCT ticker FROM corporate_announcements
+         WHERE ticker = ANY($1) AND created_at > NOW() - INTERVAL '10 days'
+           AND (event_analysis->'digest_item'->>'kind' = 'CONCALL'
+                OR (event_analysis->'digest_item'->>'kind' = 'AUDIO' AND event_analysis->'digest_item'->>'analysed' = 'true')
+                OR event_analysis->'audio_analysis' IS NOT NULL)`,
+        [reported]
+      );
+      const analysed = new Set(rows.map((r) => r.ticker));
+      for (const e of entries) if (analysed.has(e.ticker)) e.concallAnalysed = true;
+    } catch (err) {
+      // Unknown is not "analysed": the stock stays on the list rather than silently dropping off it.
+      console.warn("[REMINDER] Could not check which concalls were analysed:", err.message);
     }
+  }
 
-    if (message) {
-      if (isDryRun) {
-        console.log(`[DRY RUN] Would send reminder for ${stock.ticker}: diffDays=${diffDays}`);
-      } else {
-        try {
-          await sendTelegramMessage(message);
-          console.log(`Sent reminder for ${stock.ticker} (${diffDays} days)`);
-          remindersSent++;
-        } catch (err) {
-          console.error(`Failed to send reminder for ${stock.ticker}:`, err.message);
-        }
+  // Filings the worker recorded instead of sending in the last day (event_analysis.digest_folded): shown as one line, never as a message.
+  let folded = [];
+  try {
+    const { rows } = await pool.query(
+      `SELECT ticker, title, attachment_url AS url, event_analysis->>'digest_folded' AS reason
+       FROM corporate_announcements
+       WHERE event_analysis->>'digest_folded' IS NOT NULL
+         AND (event_analysis->>'digest_folded_at')::timestamptz > NOW() - INTERVAL '26 hours'
+       ORDER BY ticker`
+    );
+    folded = rows;
+  } catch (err) {
+    console.warn("[REMINDER] Could not list folded filings (the calendar is sent without that line):", err.message);
+  }
+
+  let remindersSent = 0;
+  const message = buildEarningsCalendarMessage(entries, { todayYmd, folded });
+  if (message) {
+    if (isDryRun) {
+      console.log(`[DRY RUN] Would send calendar:
+${message}`);
+    } else {
+      try {
+        await sendTelegramMessage(message);
+        remindersSent = 1;
+        console.log(`Sent the earnings calendar (${entries.length} stock(s) in window).`);
+      } catch (err) {
+        console.error("Failed to send the earnings calendar:", err.message);
       }
     }
   }

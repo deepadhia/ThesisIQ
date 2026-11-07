@@ -112,6 +112,11 @@ For EVERY listed thesis driver return one entry in "thesis_driver_assessment":
 
 const ABSENCE_OF_EVIDENCE = /\b(?:not|no|nor|without|neither)\b[^.]{0,50}\b(?:separately\s+)?(?:detail(?:ed|s)?|disclos(?:ed|ure)|provid(?:ed|e)|available|mention(?:ed)?|address(?:ed)?|specif(?:ied|ic)|stat(?:ed|e)|explicit(?:ly)?|quantif(?:ied|y)|break-?down)\b/i;
 
+// Evidence text that is itself the model saying "nothing here" ("No new evidence in this filing", "Not addressed in this deck").
+const EMPTY_EVIDENCE = /^\W*(?:no|nil|none|n\/?a)\b[^.]{0,40}\b(?:evidence|information|update|updates|data|mention|commentary|disclosure|detail|details)\b|\bnot\s+(?:addressed|discussed|covered|mentioned|referred)\b|\bno\s+(?:direct\s+)?(?:mention|reference)\b/i;
+// A stated event that needs no number to be a fact.
+const COMPLETION_WORDS = /\b(?:commission(?:ed|ing)|complet(?:ed|ion)|operational|received|signed|awarded|won|launch(?:ed)?|approv(?:ed|al)|inaugurat(?:ed)|acquir(?:ed)|started|began|began\s+production|achieved|met|exceed(?:ed)?)\b/i;
+
 const VALID_STATUS = new Set(["CONFIRMED", "ON_TRACK", "AT_RISK", "BROKEN", "NO_EVIDENCE"]);
 const STATUS_SEVERITY = { BROKEN: 4, AT_RISK: 3, CONFIRMED: 2, ON_TRACK: 1, NO_EVIDENCE: 0 };
 
@@ -151,8 +156,13 @@ export function normalizeDriverAssessment(rawAssessments, drivers = []) {
     // "Specific EBITDA figures are not separately detailed in this deck" is a statement that the filing is SILENT on the driver,
     // not evidence that it is on track. Only unquantified text is judged so: a figure plus a caveat is real evidence, and a
     // risk flag (AT_RISK / BROKEN) is never erased by this rule.
-    if ((status === "CONFIRMED" || status === "ON_TRACK") && !/\d/.test(evidence) && ABSENCE_OF_EVIDENCE.test(evidence)) {
+    if ((status === "CONFIRMED" || status === "ON_TRACK") && !/\d/.test(evidence) && (ABSENCE_OF_EVIDENCE.test(evidence) || EMPTY_EVIDENCE.test(evidence))) {
       status = "NO_EVIDENCE";
+    }
+    // A confirmation is a claim that something happened: it needs a figure or a stated completion. "Steady positive operating cash
+    // flow" with no number is a mood, not a confirmation; it is shown as ON_TRACK (still unconfirmed) rather than a green tick.
+    if (status === "CONFIRMED" && !/\d/.test(evidence) && !COMPLETION_WORDS.test(evidence)) {
+      status = "ON_TRACK";
     }
     if (status === "NO_EVIDENCE") evidence = "No new evidence in this filing";
 

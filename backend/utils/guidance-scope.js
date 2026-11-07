@@ -314,7 +314,9 @@ export function extractQuarter(text = "", originQuarter = "") {
 export function reconcileGuidanceVsActual({
   commitments = [],
   currentQuarter = "",
-  currentFinancials = {}
+  currentFinancials = {},
+  // The half-year pacing (guidance-pacing.service.js) replaces the quarter-only annual pacing line when it can be computed.
+  omitAnnualPacing = false
 } = {}) {
   if (!commitments || commitments.length === 0) return null;
   const fin = currentFinancials || {};
@@ -408,7 +410,10 @@ export function reconcileGuidanceVsActual({
       }
 
       // Match B: Revenue (₹ Cr)
-      if (classification.targetUnit === 'CR' && (isRev || !isMargin) && actualRev && classification.targetNumericValue && !seenQuarterlyMetrics.has('REVENUE')) {
+      // Only a target that is about REVENUE is scored against revenue (an order-inflow, capex or segment figure in rupees is not),
+      // and one more than 2x away from the actual is a mis-scoped number (a full-year or segment figure), never a "beat" or "miss".
+      const revWithinReach = (g) => actualRev && g > 0 && actualRev / g >= 0.5 && actualRev / g <= 2;
+      if (classification.targetUnit === 'CR' && isRev && !isMargin && actualRev && classification.targetNumericValue && revWithinReach(classification.targetNumericValue) && !seenQuarterlyMetrics.has('REVENUE')) {
         const guidedRev = classification.targetNumericValue;
         const diff = actualRev - guidedRev;
         const diffPct = ((diff / guidedRev) * 100).toFixed(1);
@@ -438,7 +443,15 @@ export function reconcileGuidanceVsActual({
       }
 
       // Match C: Revenue Growth (% YoY)
-      if (classification.targetUnit === 'PCT' && (isRev || !isMargin) && actualRevGrowth !== null && !isNaN(actualRevGrowth) && classification.targetNumericValue && !seenQuarterlyMetrics.has('GROWTH')) {
+      const growthBand = () => {
+        const lo = classification.rangeMin !== null ? classification.rangeMin : classification.targetNumericValue;
+        const hi = classification.rangeMax !== null ? classification.rangeMax : classification.targetNumericValue;
+        return { lo, hi };
+      };
+      // A growth target 40+ points away from the actual is a different metric (a segment, PAT, a multi-year figure), not a revenue miss.
+      const growthComparable = actualRevGrowth !== null && !isNaN(actualRevGrowth) && classification.targetNumericValue
+        && actualRevGrowth >= growthBand().lo - 40 && actualRevGrowth <= growthBand().hi + 40;
+      if (classification.targetUnit === 'PCT' && isRev && !isMargin && growthComparable && !seenQuarterlyMetrics.has('GROWTH')) {
         const minPct = classification.rangeMin !== null ? classification.rangeMin : classification.targetNumericValue;
         const maxPct = classification.rangeMax !== null ? classification.rangeMax : classification.targetNumericValue;
 
@@ -543,7 +556,7 @@ export function reconcileGuidanceVsActual({
       }
 
       // Revenue Pacing (₹ Cr)
-      if (classification.targetUnit === 'CR' && actualRev && classification.targetNumericValue) {
+      if (classification.targetUnit === 'CR' && /revenue|topline|sales|turnover/i.test(combinedText) && actualRev && classification.targetNumericValue) {
         const guidedAnnualRev = classification.targetNumericValue;
         const runRateProgress = ((actualRev / guidedAnnualRev) * 100).toFixed(1);
         const targetFY = classification.targetFY || "Target Year";
@@ -562,7 +575,7 @@ export function reconcileGuidanceVsActual({
       }
 
       // Growth Pacing (% YoY)
-      else if (classification.targetUnit === 'PCT' && actualRevGrowth !== null && !isNaN(actualRevGrowth) && classification.targetNumericValue) {
+      else if (classification.targetUnit === 'PCT' && /revenue|topline|sales|turnover|growth/i.test(combinedText) && !/pat\b|profit|ebitda|margin|segment|business\b/i.test(combinedText.replace(/revenue growth|sales growth/g, '')) && actualRevGrowth !== null && !isNaN(actualRevGrowth) && classification.targetNumericValue && Math.abs(actualRevGrowth - classification.targetNumericValue) <= 60) {
         const minPct = classification.rangeMin !== null ? classification.rangeMin : classification.targetNumericValue;
         const maxPct = classification.rangeMax !== null ? classification.rangeMax : classification.targetNumericValue;
         const isAhead = actualRevGrowth >= maxPct;
@@ -577,15 +590,20 @@ export function reconcileGuidanceVsActual({
           guidedStatement: shortStmt,
           guidedValue: classification.isRange ? `${minPct}%–${maxPct}% YoY (${targetFY} Target)` : `${minPct}% YoY (${targetFY} Target)`,
           actualValue: `${actualRevGrowth >= 0 ? '+' : ''}${actualRevGrowth}% YoY (${currentQuarter})`,
+          // Below the bottom of the guided band the full-year number is only reachable if the rest of the year grows faster than
+          // the guide: say so, instead of the neutral "pacing active" that read as on track (SKIPPER: 7% vs a 13-14% guide).
           verdictBadge: isAhead
             ? `🟢 *ANNUAL PACING AHEAD:* Running at ${actualRevGrowth}% YoY vs ${band} full-year target`
-            : `⏳ *ANNUAL PACING ACTIVE:* Running at ${actualRevGrowth}% YoY vs ${band} full-year target`
+            : actualRevGrowth < minPct
+              ? `🟠 *ANNUAL PACING BEHIND:* Running at ${actualRevGrowth}% YoY vs ${band} full-year target; needs faster growth in the remaining quarters to reach it`
+              : `⏳ *ANNUAL PACING ACTIVE:* Running at ${actualRevGrowth}% YoY vs ${band} full-year target`
         };
       }
     }
   }
 
   const bestQuarterlyMatch = quarterlyScorecardItems[0] || null;
+  if (omitAnnualPacing) bestAnnualMatch = null;
   if (!bestQuarterlyMatch && !bestAnnualMatch) return null;
 
   // Build clean, disambiguated markdown presentation

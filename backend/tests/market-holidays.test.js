@@ -20,7 +20,6 @@ import {
   syncDynamicMarketHolidays,
   loadDynamicMarketHolidays
 } from '../services/market-holidays.service.js';
-import { pool } from '../db/pool.js';
 
 // Polyfill describe / it / expect for seamless compatibility with both Vitest and standalone Node
 const describeFn = typeof describe !== 'undefined' ? describe : (name, fn) => {
@@ -113,17 +112,46 @@ describeFn('NSE/BSE Market Holiday Calendar Invariants', () => {
     expectFn(parseNseTradingDate(null)).toBe(null);
   });
 
-  testFn('Dynamic holiday sync and database persistence executes without errors', async () => {
-    const syncResult = await syncDynamicMarketHolidays(pool);
-    expectFn(syncResult.count >= 20).toBe(true);
+  // This test used to hand the REAL pool to the sync and call the real NSE API: every run wrote system_settings.dynamic_market_holidays
+  // in the production database (seen 2026-11-07) and failed offline. Now a fake NSE answer and an in-memory settings store.
+  testFn('Dynamic holiday sync persists what NSE returned and loads it back (fake NSE, in-memory store, no production writes)', async () => {
+    const store = new Map();
+    const fakePool = {
+      query: async (sql, params = []) => {
+        if (/INSERT INTO system_settings/i.test(sql)) { store.set('dynamic_market_holidays', JSON.parse(params[0])); return { rows: [] }; }
+        if (/FROM system_settings/i.test(sql)) {
+          const v = store.get('dynamic_market_holidays');
+          return { rows: v ? [{ value: v, updated_at: new Date() }] : [] };
+        }
+        throw new Error(`unexpected query: ${sql}`);
+      }
+    };
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = async (url) => {
+      if (!String(url).includes('holiday-master')) throw new Error(`unexpected fetch ${url}`);
+      return { ok: true, status: 200, json: async () => ({ CM: [
+        { tradingDate: '04-Mar-2027', description: 'Test Closure*' },
+        { tradingDate: '05-Mar-2027', description: 'Second Closure' }
+      ] }) };
+    };
+    try {
+      const syncResult = await syncDynamicMarketHolidays(fakePool);
+      expectFn(syncResult.success).toBe(true);
+      expectFn(syncResult.liveCount).toBe(2);
+      expectFn(syncResult.count >= 20).toBe(true);                       // static calendar + the live rows
+      expectFn(store.get('dynamic_market_holidays').holidays['2027-03-04']).toBe('Test Closure');   // trailing * stripped, persisted
+      expectFn(isMarketOpenDay('2027-03-04T12:00:00+05:30')).toBe(false);
 
-    const loadResult = await loadDynamicMarketHolidays(pool);
-    expectFn(loadResult.count >= 20).toBe(true);
+      const loadResult = await loadDynamicMarketHolidays(fakePool);
+      expectFn(loadResult.loaded).toBe(true);
+      expectFn(loadResult.count >= 20).toBe(true);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
   });
 
 });
 
 if (!process.env.VITEST) {
   console.log('\n✅ All Market Holiday tests passed successfully!');
-  pool.end();
 }

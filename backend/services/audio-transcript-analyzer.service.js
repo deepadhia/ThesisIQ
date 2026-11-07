@@ -1,13 +1,15 @@
 import fs from "fs";
 import path from "path";
+import http from "http";
+import https from "https";
 import { execFile } from "child_process";
 import { promisify } from "util";
 import { getGeminiModelNames, runLlm } from "./llm.service.js";
 
 const execFileAsync = promisify(execFile);
 
-// Helper to find ffmpeg on system
-function getFfmpegPath() {
+// Helper to find ffmpeg on system (FFMPEG_PATH, a known local install, then PATH). Exported so the deploy smoke check tests the SAME binary the pipeline will use.
+export function getFfmpegPath() {
   if (process.env.FFMPEG_PATH && fs.existsSync(process.env.FFMPEG_PATH)) {
     return process.env.FFMPEG_PATH;
   }
@@ -21,16 +23,25 @@ function getFfmpegPath() {
   return "ffmpeg"; // fallback to PATH
 }
 
+/** A link that joins or registers for a LIVE call (Zoom webinar / meeting, Teams, Google Meet): never a recording. */
+function isJoiningLink(url) {
+  return /zoom\.us\/(?:webinar\/register|meeting\/register|j\/|my\/|s\/)|teams\.microsoft\.com\/l\/meetup-join|teams\.live\.com\/meet|meet\.google\.com\/[a-z]|webex\.com\/(?:meet|join|webappng)/i.test(String(url || ""));
+}
+
 /**
  * Extracts candidate media or webcast URLs from filing PDF text or attachment URL.
  */
 export function extractAudioUrlFromFiling(pdfText = "", attachmentUrl = "") {
   // Reconnect URLs wrapped across line breaks in PDF layout (e.g. "https://example.com/path-\nsubpath" or "https://example.com/path/\nsubpath")
+  // The next line continues the link only when it is the rest of the link: the WHOLE line, or a piece that looks like part of a
+  // URL (it holds a dot, slash or query character). A plain word that starts a sentence ("Once registered, ...") is not a
+  // continuation: POLICYBZR's Zoom link was glued to "Once" and sent to the downloader as an "audio" URL (404).
+  const isLinkRest = (rest, after) => /^[a-zA-Z0-9_\-\.\/?&=%#]+$/.test(rest) && (/[.\/?&=%#]/.test(rest) || /^[ \t]*(?:\r?\n|$)/.test(after));
   const unwrappedText = (pdfText || "")
-    .replace(/(https?:\/\/[^\s"'<>]+)-\r?\n([a-zA-Z0-9_\-\.\/?&=%#]+)/gi, "$1-$2")
-    .replace(/(https?:\/\/[^\s"'<>\-]+)\r?\n([a-zA-Z0-9_\-\.\/?&=%#]+)/gi, (match, p1, p2) => {
+    .replace(/(https?:\/\/[^\s"'<>]+)-\r?\n([a-zA-Z0-9_\-\.\/?&=%#]+)(?=([\s\S]{0,3}))/gi, (match, p1, p2, after) => (isLinkRest(p2, after) ? `${p1}-${p2}` : match))
+    .replace(/(https?:\/\/[^\s"'<>\-]+)\r?\n([a-zA-Z0-9_\-\.\/?&=%#]+)(?=([\s\S]{0,3}))/gi, (match, p1, p2, after) => {
       if (/\.(?:html?|pdf|php|aspx?)$/i.test(p1)) return match;
-      if (/^[a-zA-Z0-9_\-\.\/?&=%#]+$/.test(p2) && !/^(To|From|Dear|Date|Subject|The|Ref|Yours|For|National|BSE|NSE|You|Please|Kindly|With)\b/i.test(p2)) {
+      if (isLinkRest(p2, after) && !/^(To|From|Dear|Date|Subject|The|Ref|Yours|For|National|BSE|NSE|You|Please|Kindly|With)\b/i.test(p2)) {
         return `${p1}${p2}`;
       }
       return match;
@@ -42,20 +53,29 @@ export function extractAudioUrlFromFiling(pdfText = "", attachmentUrl = "") {
   const directMatch = combined.match(/https?:\/\/[^\s"'<>]+\.(?:mp3|mp4|m4a|wav|aac|ogg)(?:\?[^\s"'<>]*)?/i);
   if (directMatch) return directMatch[0].replace(/[.,;)\]]+$/, "");
 
+  // 1b. A media link printed WITHOUT "https://" ("...available on the website of the Company at sjsindia.com/Docs/Q2/call.mp3").
+  // Only a host + path ending in a media extension counts; a bare website or an e-mail address never does.
+  const bareMatch = unwrappedText.match(/(?<![\w@/.-])((?:[a-z0-9-]+\.)+[a-z]{2,}\/[^\s"'<>]*\.(?:mp3|mp4|m4a|wav|aac|ogg))(?![\w])/i);
+  if (bareMatch) return `https://${bareMatch[1].replace(/[.,;)\]]+$/, "")}`;
+
   // 2. Look for common Indian corporate audio hosting, IR short links, or webcast links
-  const webcastMatch = combined.match(/https?:\/\/(?:www\.)?(?:[a-zA-Z0-9-]+\.)*(?:researchbytes|choruscall|orientcapital|zoom|webex|youtube|youtu\.be|drive\.google|dropbox|vimeo|tinyurl|bit\.ly|diamondpass)[^\s"'<>]+/i);
-  if (webcastMatch) return webcastMatch[0].replace(/[.,;)\]]+$/, "");
+  const webcastMatch = [...combined.matchAll(/https?:\/\/(?:www\.)?(?:[a-zA-Z0-9-]+\.)*(?:researchbytes|choruscall|orientcapital|zoom|webex|youtube|youtu\.be|drive\.google|dropbox|vimeo|tinyurl|bit\.ly|diamondpass)[^\s"'<>]+/gi)]
+    .map((m) => m[0].replace(/[.,;)\]]+$/, ""))
+    .find((u) => !isJoiningLink(u));
+  if (webcastMatch) return webcastMatch;
 
   // 3. Look for generic URLs containing audio/concall/recording/webcast/transcript/investor pathways
-  const genericAudioMatch = combined.match(/https?:\/\/[^\s"'<>]+\/(?:audio|concall|recording|webcast|media|transcript|investor)[^\s"'<>]*/i);
-  if (genericAudioMatch) return genericAudioMatch[0].replace(/[.,;)\]]+$/, "");
+  const genericAudioMatch = [...combined.matchAll(/https?:\/\/[^\s"'<>]+\/(?:audio|concall|recording|webcast|media|transcript|investor)[^\s"'<>]*/gi)]
+    .map((m) => m[0].replace(/[.,;)\]]+$/, ""))
+    .find((u) => !isJoiningLink(u));
+  if (genericAudioMatch) return genericAudioMatch;
 
   // 4. In explicit audio intimation notices, capture any non-exchange corporate landing URL mentioned in the letter
   const isAudioNotice = /(?:audio recording|recording link|audio link|conference call recording|concall recording)/i.test(pdfText || "");
   if (isAudioNotice) {
     const allUrls = [...unwrappedText.matchAll(/https?:\/\/[a-zA-Z0-9\-\.]+\.[a-zA-Z]{2,}[^\s"'<>]+/gi)]
       .map(m => m[0].replace(/[.,;)\]]+$/, ""))
-      .filter(u => !/(?:nseindia\.com|bseindia\.com|bse\.com|w3\.org|adobe\.com)/i.test(u));
+      .filter(u => !/(?:nseindia\.com|bseindia\.com|bse\.com|w3\.org|adobe\.com)/i.test(u) && !isJoiningLink(u));
     if (allUrls.length > 0) return allUrls[0];
   }
 
@@ -123,6 +143,45 @@ export async function resolveAudioMediaUrl(url, { fetchFn = fetch, timeoutMs = 6
   }
 }
 
+const MEDIA_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36";
+
+/**
+ * GET a media URL. Node's fetch (undici) refuses some company web servers (odd response headers, TLS quirks) with a bare
+ * "fetch failed" (INOXINDIA's recording was dead-lettered that way): retry once with the https module, which is more tolerant.
+ */
+async function fetchMedia(url) {
+  try {
+    return await fetch(url, { headers: { "User-Agent": MEDIA_UA } });
+  } catch (primaryErr) {
+    console.warn(`[AUDIO ANALYZER] fetch() failed for ${url} (${primaryErr.cause?.code || primaryErr.message}); retrying with the https module.`);
+    const body = await new Promise((resolve, reject) => {
+      const target = new URL(url);
+      const lib = target.protocol === "http:" ? http : https;
+      const req = lib.get(target, { headers: { "User-Agent": MEDIA_UA }, insecureHTTPParser: true, timeout: 60000 }, (res) => {
+        if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+          res.resume();
+          resolve({ redirect: new URL(res.headers.location, target).href });
+          return;
+        }
+        const chunks = [];
+        res.on("data", (c) => chunks.push(c));
+        res.on("end", () => resolve({ status: res.statusCode, statusText: res.statusMessage || "", headers: res.headers, buffer: Buffer.concat(chunks) }));
+        res.on("error", reject);
+      });
+      req.on("timeout", () => req.destroy(new Error("timeout")));
+      req.on("error", reject);
+    }).catch((fallbackErr) => { throw new Error(`fetch failed: ${primaryErr.cause?.code || primaryErr.message}; https fallback: ${fallbackErr.message}`); });
+    if (body.redirect) return fetchMedia(body.redirect);
+    return {
+      ok: body.status >= 200 && body.status < 300,
+      status: body.status,
+      statusText: body.statusText,
+      headers: { get: (k) => body.headers[String(k).toLowerCase()] || null },
+      arrayBuffer: async () => body.buffer.buffer.slice(body.buffer.byteOffset, body.buffer.byteOffset + body.buffer.byteLength)
+    };
+  }
+}
+
 /**
  * Downloads media from URL and converts/extracts lightweight MP3 audio using ffmpeg.
  */
@@ -130,11 +189,7 @@ export async function downloadAndExtractMp3(url, outputMp3Path) {
   const tempDownloadPath = outputMp3Path.replace(/\.mp3$/i, "_raw.tmp");
   
   console.log(`[AUDIO ANALYZER] Downloading media stream from: ${url}`);
-  const response = await fetch(url, {
-    headers: {
-      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-    }
-  });
+  const response = await fetchMedia(url);
 
   if (!response.ok) {
     throw new Error(`Failed to download audio stream: ${response.status} ${response.statusText}`);
@@ -162,12 +217,16 @@ export async function downloadAndExtractMp3(url, outputMp3Path) {
   console.log(`[AUDIO ANALYZER] Extracting MP3 using ffmpeg (${ffmpeg})...`);
 
   try {
-    // Fast audio extraction without video re-encoding
+    // Speech needs 16 kHz mono, not music quality. A call re-encoded at -q:a 4 (~130 kbps) is ~60 MB per hour, far above the
+    // 25 MB limit of the Whisper endpoint, so every hour-long call silently fell back to the slower, weaker audio analysis.
+    // 32 kbps mono is ~14 MB per hour and transcribes just as well.
     await execFileAsync(ffmpeg, [
       "-i", tempDownloadPath,
       "-vn",
+      "-ac", "1",
+      "-ar", "16000",
       "-acodec", "libmp3lame",
-      "-q:a", "4",
+      "-b:a", "32k",
       outputMp3Path,
       "-y"
     ]);
@@ -186,39 +245,77 @@ export async function downloadAndExtractMp3(url, outputMp3Path) {
   return outputMp3Path;
 }
 
-/**
- * Ultra-fast transcription of an audio file using Groq's whisper-large-v3-turbo LPU runner.
- * Transcribes audio up to 200x real-time speed.
- */
-export async function transcribeAudioWithGroqWhisper(mp3Path, { apiKey = process.env.GROK_API_KEY, timeoutMs = 60000 } = {}) {
-  if (!apiKey) throw new Error("GROK_API_KEY is not configured for Whisper transcription");
-  if (!fs.existsSync(mp3Path)) throw new Error(`Audio file not found at ${mp3Path}`);
+/** The Whisper endpoint rejects bodies above 25 MB; stay under it with headroom. */
+export const WHISPER_MAX_BYTES = 24 * 1024 * 1024;
+const WHISPER_SEGMENT_SECONDS = 1200;
 
-  const buffer = fs.readFileSync(mp3Path);
+/** Splits a long recording into 20-minute pieces (stream copy, no re-encode) and returns the piece paths in order. */
+async function splitAudioForWhisper(mp3Path) {
+  const ffmpeg = getFfmpegPath();
+  const dir = path.dirname(mp3Path);
+  const base = path.basename(mp3Path, path.extname(mp3Path));
+  const pattern = path.join(dir, `${base}_part%03d.mp3`);
+  await execFileAsync(ffmpeg, ["-i", mp3Path, "-f", "segment", "-segment_time", String(WHISPER_SEGMENT_SECONDS), "-c", "copy", pattern, "-y"]);
+  return fs.readdirSync(dir).filter((f) => f.startsWith(`${base}_part`) && f.endsWith(".mp3")).sort().map((f) => path.join(dir, f));
+}
+
+async function transcribeOnePiece(filePath, apiKey, timeoutMs) {
+  const buffer = fs.readFileSync(filePath);
   const blob = new Blob([buffer], { type: "audio/mp3" });
   const form = new FormData();
-  form.append("file", blob, path.basename(mp3Path));
+  form.append("file", blob, path.basename(filePath));
   form.append("model", "whisper-large-v3-turbo");
   form.append("response_format", "json");
   form.append("temperature", "0.0");
+  // Company names, units and ratios are spelled the Indian-market way; a prompt steers the spelling of numbers and terms.
+  form.append("prompt", "Indian company earnings conference call. Figures in rupees crore, EBITDA, PAT, YoY, QoQ, basis points, FY27, Q2.");
 
   const signal = typeof AbortSignal?.timeout === "function" ? AbortSignal.timeout(timeoutMs) : undefined;
   const res = await fetch("https://api.groq.com/openai/v1/audio/transcriptions", {
     method: "POST",
     signal,
-    headers: {
-      "Authorization": `Bearer ${apiKey}`
-    },
+    headers: { "Authorization": `Bearer ${apiKey}` },
     body: form
   });
-
   if (!res.ok) {
     const errText = await res.text();
     throw new Error(`Groq Whisper failed: ${res.status} ${errText}`);
   }
-
   const data = await res.json();
   return data.text || "";
+}
+
+/**
+ * Fast transcription of an audio file with Groq's whisper-large-v3-turbo. A recording above the endpoint's 25 MB limit is
+ * split into 20-minute pieces that are transcribed in order and joined.
+ */
+/**
+ * The Groq key for Whisper. The server's key is GROQ_API_KEY; the worker used to look only at GROK_API_KEY (a name that is
+ * otherwise just an alias, and that may hold an xAI "xai-" key), so on a server configured with GROQ_API_KEY alone Whisper
+ * never ran and every call went to the thinner Gemini audio path. Read at call time so a changed environment is honoured.
+ */
+export function getWhisperApiKey(env = process.env) {
+  const groq = String(env.GROQ_API_KEY || "").trim();
+  if (groq) return groq;
+  const alias = String(env.GROK_API_KEY || "").trim();
+  return alias.startsWith("gsk_") ? alias : "";
+}
+
+export async function transcribeAudioWithGroqWhisper(mp3Path, { apiKey = getWhisperApiKey(), timeoutMs = 90000 } = {}) {
+  if (!apiKey) throw new Error("GROK_API_KEY is not configured for Whisper transcription (set GROQ_API_KEY)");
+  if (!fs.existsSync(mp3Path)) throw new Error(`Audio file not found at ${mp3Path}`);
+
+  if (fs.statSync(mp3Path).size <= WHISPER_MAX_BYTES) return transcribeOnePiece(mp3Path, apiKey, timeoutMs);
+
+  const pieces = await splitAudioForWhisper(mp3Path);
+  if (pieces.length === 0) throw new Error("Could not split the recording for transcription");
+  const texts = [];
+  try {
+    for (const piece of pieces) texts.push(await transcribeOnePiece(piece, apiKey, timeoutMs));
+  } finally {
+    for (const piece of pieces) { try { fs.unlinkSync(piece); } catch (_) { /* best-effort cleanup */ } }
+  }
+  return texts.join("\n");
 }
 
 /**

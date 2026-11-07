@@ -20,3 +20,20 @@ describe('requeue-stuck-filings helpers', () => {
     expect(stageForFiling('Investor Presentation', 'https://x/Investorpresentation27102026.pdf')).toBe('pending_stage1');
   });
 });
+
+import { buildSelection } from '../scripts/requeue-stuck-filings.js';
+
+describe('buildSelection: --only re-queues exactly the named rows', () => {
+  const ids = ['cecfe84e-d1b6-4c09-a019-0cd31af725fb', '04b82c32-627d-45e6-bd08-fd2c902fe7f1'];
+  it('without --only it also selects the stuck needs_review / failed rows of the quarter (unchanged behaviour)', () => {
+    const s = buildSelection({ since: '2026-10-01', ids });
+    expect(s.sql).toMatch(/needs_review/);
+    expect(s.params).toEqual(['2026-10-01', ids]);
+  });
+  it('with --only it selects nothing but the named ids', () => {
+    const s = buildSelection({ since: '2026-10-01', ids, only: true });
+    expect(s.sql).not.toMatch(/needs_review/);
+    expect(s.sql).toMatch(/id = ANY\(\$1::uuid\[\]\)/);
+    expect(s.params).toEqual([ids]);
+  });
+});

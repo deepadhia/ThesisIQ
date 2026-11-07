@@ -23,6 +23,8 @@ import {
   isFuzzyDuplicateTitle,
   isEarningsConcallInvite,
   extractConcallSchedule,
+  isImmaterialSubsidiaryFormation,
+  largestRupeeAmountCr,
   findContentDuplicate,
   getFilingAgeHours,
   acquireScanLease,
@@ -31,7 +33,7 @@ import {
 } from "../services/announcement.service.js";
 import { CLASSIFICATION_ALERT_AFTER_FAILURES, buildClassificationStuckMessage } from "../services/retry-policy.service.js";
 import { classifyAnnouncementWithNim } from "../services/nim.service.js";
-import { classifyFilingCategory, extractCorporateActionDetails, isRoutineCreditRatingReaffirmation, isNewspaperPublicationFiling } from "../services/filing-classifier.service.js";
+import { classifyFilingCategory, extractCorporateActionDetails, isRoutineCreditRatingReaffirmation, isNewspaperPublicationFiling, isResultsOutcomeFiling } from "../services/filing-classifier.service.js";
 import { processPendingDeepDives } from "../workers/quarterly-deepdive-worker.js";
 import { sendAnnouncementAlert, sendConcallScheduleAlert, sendRunSummary, sendTelegramMessage, buildBseDocumentUrl } from "../services/telegram.service.js";
 import { 
@@ -42,6 +44,8 @@ import {
 import { syncAllPortfolioValuations } from "../services/portfolio-market-valuation.service.js";
 import { pool } from "../db/pool.js";
 import { findThesisGaps } from "../services/thesis-driver-context.service.js";
+import { allocationGateEnabled } from "../services/allocation-relevance.service.js";
+import { decideDirectAlertGate } from "../services/direct-alert-gate.service.js";
 import { getConfiguredProviders, initModelRegistry, settleModelRegistry, markModelsDirty } from "../services/llm.service.js";
 import { reportLlmHealth, dbStore } from "../services/llm-health.service.js";
 import { evaluateExchangeAccess, alertExchangeAccess, shouldSkipBse } from "../services/exchange-access.service.js";
@@ -243,7 +247,7 @@ async function runScan({ isDryRun, runUrl, targetTicker, forceReevaluate, startT
 
         // 5. Deduplicate against DB
         if (!forceReevaluate) {
-          const processed = await isAnnouncementProcessed(ticker, sourceId, hash);
+          const processed = await isAnnouncementProcessed(ticker, sourceId, hash, ann.ALT_IDS);
           if (processed) {
             continue;
           }
@@ -465,6 +469,13 @@ async function runScan({ isDryRun, runUrl, targetTicker, forceReevaluate, startT
         } else if ((aiResult.is_earnings_release || filingCategory === "QUARTERLY_EARNINGS") && !isExcludedFromEarnings) {
           deepDiveStatus = "pending_stage1";
         }
+        // Safety net: a results OUTCOME is recognised from its own title and letter, whatever category the AI chose. MOREPENLAB's Q2
+        // results (GOVERNANCE_RISK / GENERAL), LUMAXTECH's (RESTRUCTURING) and QPOWER's (CAPITAL_RAISE) were all marked `not_required`
+        // and never read, so those stocks had no results alert with verified numbers.
+        if (deepDiveStatus === "not_required" && isResultsOutcomeFiling({ title, text: announcementText })) {
+          console.warn(`[OVERRIDE] results outcome queued for the deep-dive although classified ${filingCategory}${aiResult.is_earnings_release ? "" : " / not earnings"}: ${ticker} - ${title}`);
+          deepDiveStatus = "pending_stage1";
+        }
 
         // 7. Alert ONLY if non-earnings routine/regulatory event (Earnings Results & Concalls/Audio are deferred to Quarterly Deep-Dive Worker for verified full-page/audio audit)
         let sentToTelegram = false;
@@ -635,8 +646,15 @@ async function runScan({ isDryRun, runUrl, targetTicker, forceReevaluate, startT
           console.log(`[SKIP NEWSPAPER] Statutory newspaper publication for ${ticker} is not alerted on its own: ${title}`);
         }
 
+        // Forming a small subsidiary (₹ lakh subscription, authorised capital of a few crore) is not a thesis event.
+        const isImmaterialFormation = !isQueuedForDeepDive && isImmaterialSubsidiaryFormation(title, announcementText);
+        if (isImmaterialFormation) {
+          console.log(`[SKIP IMMATERIAL] Small subsidiary formation for ${ticker} is not alerted: ${title}`);
+        }
+
         const shouldHaveAlerted = isConcallScheduleAlert || ageHrs <= MAX_ALERT_AGE_HOURS && !isQueuedForDeepDive &&
           !isNewspaperClipping &&
+          !isImmaterialFormation &&
           !isUnparsedZipFallback &&
           !isMeetingFiling && 
           !isRoutineCreditReaffirmation && 
@@ -665,7 +683,23 @@ async function runScan({ isDryRun, runUrl, targetTicker, forceReevaluate, startT
           }
         }
 
-        if (shouldHaveAlerted && !isDuplicateEvent) {
+        // Allocation gate for a DIRECT alert (not results / deck / call, which the worker judges): push only what could change how much of
+        // the stock is held; everything else is recorded on the row and listed once a day on the allocation board. A concall-date
+        // heads-up keeps its own route. If the market cap cannot be read the filing is pushed, never hidden.
+        const gate = await decideDirectAlertGate({
+          shouldHaveAlerted, isDuplicateEvent, isConcallScheduleAlert, gateEnabled: allocationGateEnabled(),
+          ticker, title, filingCategory, aiResult, announcementText, eventAnalysis,
+          concallSchedule, isRescheduled: Boolean(aiResult.is_rescheduled),
+          getMarketCapCr: async (t) => {
+            const cap = await pool.query("SELECT market_cap FROM market_data_snapshots WHERE ticker = $1 ORDER BY market_data_as_of DESC LIMIT 1", [t]);
+            return cap.rows[0]?.market_cap ?? null;
+          },
+          estimateAmountCr: largestRupeeAmountCr
+        });
+        const boardedByGate = gate.boarded;
+        eventAnalysis = gate.eventAnalysis;
+
+        if (shouldHaveAlerted && !isDuplicateEvent && !boardedByGate) {
           if (alertsSent >= MAX_ALERTS_PER_RUN) {
             // Save as 'pending' so the next scheduled run re-evaluates it — never permanently drop.
             console.warn(`[LIMIT] Max alerts reached. Saving ${ticker} announcement as 'pending' for next run.`);
@@ -745,7 +779,7 @@ async function runScan({ isDryRun, runUrl, targetTicker, forceReevaluate, startT
           ? "sent"
           : (telegramFailed && ageHrs <= MAX_ALERT_AGE_HOURS
               ? "failed"
-              : (shouldHaveAlerted && !isDuplicateEvent && alertsSent >= MAX_ALERTS_PER_RUN ? "pending" : "ignored"));
+              : (shouldHaveAlerted && !isDuplicateEvent && !boardedByGate && alertsSent >= MAX_ALERTS_PER_RUN ? "pending" : "ignored"));
 
         await saveAnnouncement({
           stock_id: stock.id,

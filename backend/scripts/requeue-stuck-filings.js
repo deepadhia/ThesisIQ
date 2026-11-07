@@ -8,6 +8,7 @@
  *   ... --since 2026-10-01          only filings dated on/after this day (default: day after the latest quarter end)
  *   ... --ids <uuid>,<uuid>         ALSO re-queue these (already 'completed') rows, e.g. alerts that went out with bad
  *                                   content and must be re-sent corrected
+ *   ... --ids <...> --only          re-queue ONLY those rows (skip the stuck needs_review / failed selection)
  *
  * Selected: deep_dive_status IN ('needs_review','failed') filed on/after --since, plus any --ids.
  * Effect: deep_dive_status -> pending_stage1 / pending_stage2 / pending_audio (by the filing's own title/URL),
@@ -39,6 +40,19 @@ export function stageForFiling(title = "", attachmentUrl = "", previousError = "
   return "pending_stage1";
 }
 
+/** The rows to re-queue: the stuck needs_review / failed ones of the quarter plus any explicit ids, or ONLY the explicit ids with --only. */
+export function buildSelection({ since, ids = [], only = false } = {}) {
+  if (only) {
+    return { sql: `SELECT id, ticker, title, attachment_url, deep_dive_status, status, filing_date, event_analysis
+     FROM corporate_announcements WHERE id = ANY($1::uuid[]) ORDER BY ticker, filing_date`, params: [ids] };
+  }
+  return { sql: `SELECT id, ticker, title, attachment_url, deep_dive_status, status, filing_date, event_analysis
+     FROM corporate_announcements
+     WHERE (deep_dive_status IN ('needs_review', 'failed') AND filing_date >= $1::date)
+        OR id = ANY($2::uuid[])
+     ORDER BY ticker, filing_date`, params: [since, ids] };
+}
+
 function argValue(args, flag) {
   const i = args.indexOf(flag);
   return i >= 0 ? args[i + 1] : null;
@@ -50,14 +64,10 @@ async function main() {
   const since = argValue(args, "--since") || defaultSinceDate();
   const extraIds = (argValue(args, "--ids") || "").split(",").map(s => s.trim()).filter(Boolean);
 
-  const { rows } = await pool.query(
-    `SELECT id, ticker, title, attachment_url, deep_dive_status, status, filing_date, event_analysis
-     FROM corporate_announcements
-     WHERE (deep_dive_status IN ('needs_review', 'failed') AND filing_date >= $1::date)
-        OR id = ANY($2::uuid[])
-     ORDER BY ticker, filing_date`,
-    [since, extraIds]
-  );
+  const only = args.includes("--only");
+  if (only && extraIds.length === 0) { console.error("--only needs --ids <uuid>,<uuid>"); await pool.end(); process.exit(1); }
+  const selection = buildSelection({ since, ids: extraIds, only });
+  const { rows } = await pool.query(selection.sql, selection.params);
 
   console.log(`Filings to re-queue (since ${since}${extraIds.length ? `, plus ${extraIds.length} explicit id(s)` : ""}): ${rows.length}`);
   const plan = rows.map(r => ({ ...r, newStatus: stageForFiling(r.title, r.attachment_url, r.event_analysis?.pipeline_error) }));

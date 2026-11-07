@@ -146,6 +146,26 @@ describeFn('Guidance vs Actual Delivery Invariants', () => {
     expectFn(rec1.formattedSection).not.toContain('MISSED');
   });
 
+  testFn('growth guidance: running BELOW the guided band is flagged as behind (needs acceleration), not as neutral "pacing active" (SKIPPER 2026-11-04: 7% vs 13-14%)', () => {
+    const growthGuide = [{
+      statement: "We expect full-year FY27 revenue growth of 13-14%.",
+      metric: "Revenue growth FY27",
+      target_value: "13-14%",
+      timeline: "FY27",
+      quarter: "Q4 FY26"
+    }];
+    const behind = reconcileGuidanceVsActual({ commitments: growthGuide, currentQuarter: "Q2 FY27", currentFinancials: { revenue: 600, revenueYoYGrowthPct: 7 } });
+    expectFn(behind.annual).not.toBeNull();
+    expectFn(behind.annual.verdictBadge).toContain('BEHIND');
+    expectFn(behind.annual.verdictBadge).toContain('13');
+    expectFn(behind.annual.verdictBadge).not.toContain('PACING ACTIVE');
+
+    const inband = reconcileGuidanceVsActual({ commitments: growthGuide, currentQuarter: "Q2 FY27", currentFinancials: { revenue: 600, revenueYoYGrowthPct: 13.5 } });
+    expectFn(inband.annual.verdictBadge).toContain('PACING ACTIVE');
+    const ahead = reconcileGuidanceVsActual({ commitments: growthGuide, currentQuarter: "Q2 FY27", currentFinancials: { revenue: 600, revenueYoYGrowthPct: 20 } });
+    expectFn(ahead.annual.verdictBadge).toContain('AHEAD');
+  });
+
   testFn('Quarterly guidance evaluates Beat / Miss accurately', () => {
     const quarterlyCommitments = [
       {
@@ -384,5 +404,32 @@ describe('scorecard shows only firm, concrete milestones (INOXINDIA 2026-11-03 s
     const line = rec.formattedSection.split('\n').find(l => l.includes('Milestone / Capex'));
     expectFn(line).toMatch(/Commission the new 10,000 MT .* [a-z]+…/);   // ends after a whole word, then the ellipsis
     expectFn(line).not.toContain('...');
+  });
+});
+
+describe('scorecard never scores a non-revenue or off-scale target against revenue (JYOTICNC "guided ₹200 Cr vs ₹602 Cr = +201% beat", SJS "guided 100% YoY vs -3.7% = missed")', () => {
+  const run = (commitments, fin) => reconcileGuidanceVsActual({ commitments, currentQuarter: 'Q2 FY27', currentFinancials: fin });
+
+  it('a ₹ figure for something else (order inflow, capex, a segment) is not compared with total revenue', () => {
+    const rec = run([{ statement: 'We expect order inflow of Rs 200 crores in the next quarter from the aerospace vertical.', metric: 'Order Inflow', target_value: '₹200 Cr', timeline: 'Q2 FY27', quarter: 'Q1 FY27' }], { revenue: 602.01, revenueYoYGrowthPct: 18.53 });
+    expectFn(rec === null || !String(rec.formattedSection).includes('Revenue:')).toBe(true);
+  });
+
+  it('a revenue target within a plausible distance of the actual is still scored', () => {
+    const rec = run([{ statement: 'Management guided Q2 FY27 revenue of Rs 560 Cr.', metric: 'Revenue Q2', target_value: '₹560 Cr', timeline: 'Q2 FY27', quarter: 'Q1 FY27' }], { revenue: 602.01, revenueYoYGrowthPct: 18.53 });
+    expectFn(rec).not.toBeNull();
+    expectFn(rec.formattedSection).toContain('QUARTERLY BEAT');
+  });
+
+  it('a revenue target several times the actual is a mis-scoped figure (a full-year number), not a quarterly miss', () => {
+    const rec = run([{ statement: 'Quarterly revenue guidance of Rs 65 Cr for the new vertical.', metric: 'Revenue', target_value: '₹65 Cr', timeline: 'Q2 FY27', quarter: 'Q1 FY27' }], { revenue: 232.73, revenueYoYGrowthPct: 16.9 });
+    expectFn(rec === null || !String(rec.formattedSection).includes('QUARTERLY BEAT')).toBe(true);
+  });
+
+  it('a growth target that is not about revenue, or sits 40+ points from the actual, is not scored as a miss', () => {
+    const notRev = run([{ statement: 'We aim for 100% growth in our display business.', metric: 'Display business', target_value: '100%', timeline: 'Q2 FY27', quarter: 'Q1 FY27' }], { revenue: 282.7, revenueYoYGrowthPct: 16.9 });
+    expectFn(notRev === null || !String(notRev.formattedSection).includes('Revenue Growth')).toBe(true);
+    const offScale = run([{ statement: 'Revenue growth of 100% year on year this quarter.', metric: 'Revenue Growth', target_value: '100%', timeline: 'Q2 FY27', quarter: 'Q1 FY27' }], { revenue: 282.7, revenueYoYGrowthPct: 16.9 });
+    expectFn(offScale === null || !String(offScale.formattedSection).includes('MISSED')).toBe(true);
   });
 });

@@ -7,16 +7,17 @@
 
 import fs from "fs";
 import path from "path";
+import { fileURLToPath } from "url";
 import { pool } from "../db/pool.js";
 import { compareFiscalQuartersDesc, parseFiscalQuarter } from "../utils/fiscal-quarter.js";
 import { reconcileGuidanceVsActual, classifyGuidanceScope } from "../utils/guidance-scope.js";
 import { extractPdfTextDetailed } from "../services/announcement.service.js";
 import { sendTelegramMessage, formatAnnouncementMessage, sendConcallDiscrepancyAlert, sendPipelineFailureAlert } from "../services/telegram.service.js";
-import { classifyFilingForWorker } from "../services/filing-classifier.service.js";
+import { classifyFilingForWorker, looksLikeStatementFiling } from "../services/filing-classifier.service.js";
 import { runLlm } from "../services/llm.service.js";
-import { decideLlmFailureAction, backoffDelayMs, quotaPauseMs, isQuotaPaused, batchSizeAfterPause } from "../services/retry-policy.service.js";
+import { decideLlmFailureAction, backoffDelayMs, audioBackoffDelayMs, quotaPauseMs, isQuotaPaused, batchSizeAfterPause } from "../services/retry-policy.service.js";
 import { dbStore } from "../services/llm-health.service.js";
-import { extractDeterministicFinancials } from "../services/financial-validator.service.js";
+import { extractDeterministicFinancials, quarterEndBefore } from "../services/financial-validator.service.js";
 import {
   extractDeterministicCashFlow,
   extractEarningsQualityMetrics,
@@ -29,14 +30,38 @@ import { extractFinancialsViaLlm } from "../services/financial-table-fallback.se
 import {
   routeAlert,
   buildDigestItem,
+  hasAnalysedConcallItem,
+  guidanceCutsOf,
+  dedupeByLabel,
   isContentFreeDigestItem,
   buildThesisStatusBoard,
   overallThesisStatus,
   shouldSendDigest,
+  quietBatchReason,
+  hasUrgentDigestItem,
+  repeatsEarlierCallWriteup,
+  buildPriceContextLine,
   formatThesisDigestMessage,
   dedupeNearDuplicates,
   dropRestatedFigures
 } from "../services/thesis-digest.service.js";
+import { computeGuidancePacing, formatPacingSection, compactPacing, formatTrackRecord } from "../services/guidance-pacing.service.js";
+import {
+  evaluatePipelineHealth,
+  buildHealthMessage,
+  shouldSendHealthReport,
+  healthFingerprint,
+  gatherHealthSnapshot
+} from "../services/pipeline-health.service.js";
+import {
+  classifyAllocationRelevance,
+  buildAllocationLine,
+  boardEntryFrom,
+  buildAllocationBoardMessage,
+  shouldSendAllocationBoard,
+  allocationGateEnabled,
+  stanceOf
+} from "../services/allocation-relevance.service.js";
 import {
   buildThesisContext,
   getThesisContract,
@@ -52,10 +77,13 @@ import {
   resolveAudioMediaUrl,
   downloadAndExtractMp3, 
   transcribeAudioWithGroqWhisper,
-  analyzeAudioWithGemini, 
+  getWhisperApiKey,
+  analyzeAudioWithGemini,
   analyzeTranscriptWithGemini, 
   auditDiscrepancies 
 } from "../services/audio-transcript-analyzer.service.js";
+import { splitTranscript, buildHighlightPrompts, parseHighlightReply, mergeConcallHighlights } from "../services/concall-highlights.service.js";
+import { countTickersHoldingDocument, isForeignCopy, setAsideForeignFiling } from "../services/foreign-filing.service.js";
 
 
 /**
@@ -553,7 +581,7 @@ Your previous reply was not valid JSON. Reply again with ONLY the JSON object de
  * Reconciles previous quarter guidance against currently reported revenue & growth.
  * Uses strict horizon classification to prevent mixing quarterly guidance with annual guidance.
  */
-export async function reconcilePriorGuidanceVsActual(ticker, currentQuarter, currentFinancials = {}) {
+export async function reconcilePriorGuidanceVsActual(ticker, currentQuarter, currentFinancials = {}, { omitAnnualPacing = false } = {}) {
   if (!ticker) return null;
   try {
     const { rows } = await pool.query(
@@ -590,7 +618,8 @@ export async function reconcilePriorGuidanceVsActual(ticker, currentQuarter, cur
     return reconcileGuidanceVsActual({
       commitments: rows,
       currentQuarter,
-      currentFinancials
+      currentFinancials,
+      omitAnnualPacing
     });
   } catch (err) {
     console.warn(`[GUIDANCE RECONCILE WARN] ${ticker}:`, err.message);
@@ -606,7 +635,7 @@ const MAX_FETCH_ATTEMPTS = 12;
 // about 30 minutes of patience (one attempt per 5-minute cycle) before a failure alert replaces the narrative.
 const MAX_UNREADABLE_STATEMENT_ATTEMPTS = 6;
 // A concall recording that is not downloadable yet: same backoff, about two hours of patience.
-const MAX_AUDIO_ATTEMPTS = 6;
+const MAX_AUDIO_ATTEMPTS = 12;   // with audioBackoffDelayMs: about 29 hours of waiting for a file the company has not published yet
 
 /**
  * Maps a statement period-end date (YYYY-MM-DD) to the Indian fiscal quarter label (e.g. 2026-09-30 -> "Q2 FY27").
@@ -734,14 +763,112 @@ async function recordLlmOutage(itemId, message) {
   return { firstAtMs: Number.isFinite(parsed) ? parsed : Date.now(), retries: rows[0]?.retries || 1 };
 }
 
-async function escalateToReview(item, message, suppressTelegram) {
+/**
+ * True when the written transcript of the SAME call has already been analysed (filed on or after this recording's filing, give or
+ * take a day: an earlier quarter's transcript is months older). A recording that goes live after its transcript was analysed would
+ * produce a second write-up of one call, and its Whisper time is wasted. A failed lookup answers false: the recording is processed.
+ */
+async function transcriptAlreadyCoversCall(item) {
+  try {
+    const { rows } = await pool.query(
+      `SELECT 'transcript_covers_call' AS tag FROM corporate_announcements o, corporate_announcements me
+       WHERE me.id = $1 AND o.ticker = me.ticker AND o.id <> me.id AND o.deep_dive_status = 'completed'
+         AND (o.attachment_url ~* 'transcript' OR o.title ~* 'transcript')
+         AND COALESCE(o.filing_date, o.created_at) >= COALESCE(me.filing_date, me.created_at) - INTERVAL '1 day'
+         AND COALESCE(o.event_analysis->>'foreign_filing', '') <> 'true'
+         AND (SELECT count(DISTINCT t.ticker) FROM corporate_announcements t WHERE t.attachment_url = o.attachment_url) < 3
+       LIMIT 1`,
+      [item.id]
+    );
+    return rows.length > 0;
+  } catch (err) {
+    console.warn(`[WORKER AUDIO] Could not check for an analysed transcript of ${item.ticker}'s call (${err.message}); the recording is processed.`);
+    return false;
+  }
+}
+
+/**
+ * The NSE and BSE copies of one recording intimation carry the same media link. The recording is downloaded, transcribed and
+ * analysed ONCE: this row claims the link, and steps aside when an older, still-healthy row of the same stock claimed it first.
+ * (Two copies would double the Whisper quota use and send the same write-up twice.)
+ */
+async function audioHandledByEarlierTwin(item, mediaUrl) {
+  try {
+    await pool.query(
+      `UPDATE corporate_announcements
+       SET event_analysis = COALESCE(event_analysis, '{}'::jsonb) || jsonb_build_object('audio_media_url', $1::text)
+       WHERE id = $2`,
+      [mediaUrl, item.id]
+    );
+    const { rows } = await pool.query(
+      `SELECT 1 FROM corporate_announcements o, corporate_announcements me
+       WHERE me.id = $2 AND o.ticker = $1 AND o.id <> me.id
+         AND o.event_analysis->>'audio_media_url' = $3
+         AND o.created_at > NOW() - INTERVAL '3 days'
+         AND o.deep_dive_status <> 'needs_review'
+         AND (o.created_at < me.created_at OR (o.created_at = me.created_at AND o.id < me.id))
+       LIMIT 1`,
+      [item.ticker, item.id, mediaUrl]
+    );
+    return rows.length > 0;
+  } catch (err) {
+    console.warn(`[WORKER AUDIO] Could not check for a twin of ${item.ticker}'s recording (analysing it):`, err.message);
+    return false; // unknown: analyse (a duplicate is better than a missed call)
+  }
+}
+
+/** True when another filing of the same stock already failed for the same reason in the last 6 hours (the NSE and BSE copies of one filing fail identically). */
+async function sameFailureAlreadyReported(item, reason) {
+  try {
+    const { rows } = await pool.query(
+      `SELECT 1 FROM corporate_announcements
+       WHERE ticker = $1 AND id <> $2 AND deep_dive_status = 'needs_review'
+         AND event_analysis->>'pipeline_error' = $3
+         AND (event_analysis->>'failed_at')::timestamptz > NOW() - INTERVAL '6 hours'
+       LIMIT 1`,
+      [item.ticker, item.id, reason]
+    );
+    return rows.length > 0;
+  } catch (err) {
+    console.warn(`[WORKER] Could not check for a twin failure of ${item.ticker}:`, err.message);
+    return false; // unknown: send the alert (a duplicate is better than a silent failure)
+  }
+}
+
+/** True when a results alert for this stock went out in the last 5 days (so an unreadable deck or press release adds nothing to chase). */
+async function recentResultsAlertSent(item) {
+  try {
+    const { rows } = await pool.query(
+      `SELECT 1 FROM corporate_announcements
+       WHERE ticker = $1 AND id <> $2 AND filing_category = 'QUARTERLY_EARNINGS' AND sent_to_telegram = true
+         AND created_at > NOW() - INTERVAL '5 days'
+       LIMIT 1`,
+      [item.ticker, item.id]
+    );
+    return rows.length > 0;
+  } catch (err) {
+    console.warn(`[WORKER] Could not check recent results alerts for ${item.ticker}:`, err.message);
+    return false;
+  }
+}
+
+async function escalateToReview(item, message, suppressTelegram, { quiet = false, quietReason = "the stock's results were already alerted" } = {}) {
+  const reason = String(message || "unknown error").slice(0, 500);
   await pool.query(
     `UPDATE corporate_announcements
      SET deep_dive_status = 'needs_review',
          event_analysis = COALESCE(event_analysis, '{}'::jsonb) || jsonb_build_object('pipeline_error', $1::text, 'failed_at', NOW())
      WHERE id = $2`,
-    [String(message || "unknown error").slice(0, 500), item.id]
+    [reason, item.id]
   );
+  if (quiet) {
+    console.warn(`[WORKER] ${item.ticker}: "${item.title}" dead-lettered quietly (${reason}); ${quietReason}.`);
+    return;
+  }
+  if (!suppressTelegram && await sameFailureAlreadyReported(item, reason)) {
+    console.warn(`[WORKER] ${item.ticker}: "${item.title}" failed for the same reason as a sibling filing (${reason}); one failure alert is enough.`);
+    return;
+  }
   if (!suppressTelegram) {
     await sendPipelineFailureAlert({
       ticker: item.ticker,
@@ -749,6 +876,219 @@ async function escalateToReview(item, message, suppressTelegram) {
       error: message,
       docUrl: item.attachment_url
     }).catch(e => console.warn("[WORKER ALERT ERROR]:", e.message));
+  }
+}
+
+// ── Allocation gate: only what could change how much of a stock is held is pushed; the rest goes to one end-of-day board ──
+const ALLOCATION_BOARD_KEY = "allocation_board_last_sent";
+
+/**
+ * The stock's last judged view before this filing: stance, conviction, hurdle, each driver's newest real status and the guidance
+ * changes already stated in the last 3 weeks. `ageHours` is the age of that last judgement and `stanceBefore` the stance the
+ * stock had before it last changed (both feed the flip-flop damper). Null when the stock has no earlier verdict.
+ */
+async function loadPreviousView(ticker, excludeIds = []) {
+  try {
+    const { rows } = await pool.query(
+      `SELECT event_analysis->'institutional_verdict'->>'final_action' AS action,
+              event_analysis->'institutional_verdict'->>'conviction_score' AS conviction,
+              event_analysis->'institutional_verdict'->'thesis_gate_result'->'thesisGate'->>'status' AS hurdle,
+              event_analysis->'institutional_verdict'->'thesis_driver_assessment' AS assessment,
+              event_analysis->'institutional_verdict'->'concall_highlights'->'guidance_changes' AS guidance,
+              event_analysis->'institutional_verdict'->'guidance_pacing' AS pacing,
+              COALESCE(filing_date, created_at) AS judged_at,
+              (event_analysis->'institutional_verdict'->'verified_financials') IS NOT NULL AS has_fin,
+              'previous_view' AS tag
+       FROM corporate_announcements
+       WHERE ticker = $1 AND NOT (id = ANY($2::uuid[])) AND deep_dive_status = 'completed'
+         AND event_analysis->'institutional_verdict'->>'final_action' IS NOT NULL
+         AND COALESCE(filing_date, created_at) > NOW() - INTERVAL '120 days'
+       ORDER BY COALESCE(filing_date, created_at) DESC
+       LIMIT 8`,
+      [ticker, excludeIds]
+    );
+    if (!rows.length) return null;
+    // The stance is anchored on the last judgement made on VERIFIED numbers. A deck, press release or "General Updates" filing
+    // re-grades the stock from carried-forward numbers (9 same-stock conflicts in 21 days: results said REASSESS, a deck then
+    // said HOLD); letting that replace the stance would make the next real results look like a change. With no verified
+    // judgement at all, the newest row of any kind is used.
+    const authoritative = rows.filter((r) => r.has_fin !== false);
+    const judged = authoritative.length ? authoritative : rows;
+    const last = judged[0];
+    const lastStance = stanceOf(last.action);
+    const before = judged.slice(1).find((r) => stanceOf(r.action) !== lastStance);
+    // Each driver's newest status that is real evidence (a later "no evidence" row does not erase an earlier at-risk reading).
+    const seen = new Map();
+    for (const r of rows) {
+      for (const a of Array.isArray(r.assessment) ? r.assessment : []) {
+        if (a && a.driver && a.status && a.status !== "NO_EVIDENCE" && !seen.has(a.driver)) seen.set(a.driver, { driver: a.driver, status: a.status });
+      }
+    }
+    const guidanceChanges = rows
+      .filter((r) => Date.now() - new Date(r.judged_at).getTime() < 21 * 86400000)
+      .flatMap((r) => (Array.isArray(r.guidance) ? r.guidance : []))
+      .filter((t) => typeof t === "string");
+    return {
+      action: last.action,
+      conviction: last.conviction === null || last.conviction === undefined ? null : Number(last.conviction),
+      hurdleStatus: last.hurdle || null,
+      assessment: [...seen.values()],
+      guidanceChanges,
+      // the newest pacing reading on file (a filing without one does not erase an earlier reading)
+      pacing: (rows.find((r) => Array.isArray(r.pacing) && r.pacing.length)?.pacing) || [],
+      ageHours: (Date.now() - new Date(last.judged_at).getTime()) / 3600000,
+      stanceBefore: before ? before.action : null
+    };
+  } catch (err) {
+    console.warn(`[WORKER ALLOCATION] Could not load the previous view of ${ticker} (the filing is pushed):`, err.message);
+    return undefined; // unknown: the caller pushes
+  }
+}
+
+/** Records a filing that was NOT pushed, on its row, until the end-of-day board lists it (nothing is lost, nothing is silent). */
+async function storeBoardItem(ids, entry) {
+  await pool.query(
+    `UPDATE corporate_announcements
+     SET event_analysis = (COALESCE(event_analysis, '{}'::jsonb) - 'digest_pending')
+                          || jsonb_build_object('board_pending', true, 'board_item', $1::jsonb)
+     WHERE id = ANY($2)`,
+    [JSON.stringify(entry), ids]
+  );
+}
+
+const firstSentence = (t) => String(t || "").split(/(?<=[.!?])\s+/)[0] || "";
+
+/**
+ * Sends the allocation board once a day (from 18:00 IST) when filings are waiting on it. A failed send leaves them pending.
+ * @returns {Promise<number>} 1 when a board was sent
+ */
+export async function flushAllocationBoard({ now = Date.now() } = {}) {
+  if (!allocationGateEnabled()) return 0;
+  try {
+    const { rows } = await pool.query(
+      `SELECT id, event_analysis->'board_item' AS bi
+       FROM corporate_announcements
+       WHERE event_analysis->>'board_pending' = 'true' AND created_at > NOW() - INTERVAL '5 days'
+       ORDER BY ticker`
+    );
+    const last = await dbStore(pool).get(ALLOCATION_BOARD_KEY).catch(() => null);
+    if (!shouldSendAllocationBoard({ now, lastSentYmd: last?.ymd || null, pending: rows.length })) return 0;
+    const todayYmd = new Date(now + 5.5 * 3600e3).toISOString().slice(0, 10);
+    const message = buildAllocationBoardMessage(rows.map((r) => r.bi).filter((b) => b && typeof b === "object"), { todayYmd });
+    if (!message) return 0;
+    await sendTelegramMessage(message);
+    await pool.query(
+      `UPDATE corporate_announcements
+       SET event_analysis = (COALESCE(event_analysis, '{}'::jsonb) - 'board_pending') || jsonb_build_object('board_sent_at', NOW())
+       WHERE id = ANY($1)`,
+      [rows.map((r) => r.id)]
+    );
+    await dbStore(pool).set(ALLOCATION_BOARD_KEY, { ymd: todayYmd });
+    console.log(`[WORKER BOARD] Sent the allocation board (${rows.length} filing(s)).`);
+    return 1;
+  } catch (err) {
+    console.error("[WORKER BOARD] Allocation board not sent (filings stay pending for the next cycle):", err.message);
+    return 0;
+  }
+}
+
+const PIPELINE_HEALTH_KEY = "pipeline_health_last";
+const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
+
+/**
+ * The self-audit (pipeline-health.service.js): once a day from 19:00 IST, and only when something is wrong, one short message says
+ * what is silently failing (results never read, results without verified numbers, stuck filings, parked alerts, a board backlog,
+ * conflicting stances, the gate switched off, a corrupted source file). A failed send is retried next cycle.
+ * @returns {Promise<number>} 1 when a report was sent
+ */
+export async function flushHealthReport({ now = Date.now() } = {}) {
+  const ist = new Date(now + 5.5 * 3600e3);
+  if (ist.getUTCHours() < 19) return 0;
+  try {
+    const last = await dbStore(pool).get(PIPELINE_HEALTH_KEY).catch(() => null);
+    const snap = await gatherHealthSnapshot(pool, { now, gateEnabled: allocationGateEnabled(), sourceRoot: REPO_ROOT });
+    const findings = evaluatePipelineHealth(snap);
+    if (!shouldSendHealthReport({ now, findings, last })) return 0;
+    await sendTelegramMessage(buildHealthMessage(findings));
+    await dbStore(pool).set(PIPELINE_HEALTH_KEY, { ymd: ist.toISOString().slice(0, 10), fingerprint: healthFingerprint(findings) });
+    console.log(`[WORKER HEALTH] Sent the system check (${findings.length} finding(s)).`);
+    return 1;
+  } catch (err) {
+    console.error("[WORKER HEALTH] System check not sent (retried next cycle):", err.message);
+    return 0;
+  }
+}
+
+/** Every guidance statement stored for a stock, newest first (the guide in force is the newest of each kind). */
+async function loadGuidanceCommitments(ticker) {
+  try {
+    const { rows } = await pool.query(
+      `SELECT id, statement, metric, target_value, timeline, quarter, created_at, 'pacing_commitments' AS tag
+       FROM management_commitments WHERE ticker = $1 ORDER BY created_at DESC LIMIT 80`,
+      [ticker]
+    );
+    return rows;
+  } catch (err) {
+    console.warn(`[WORKER PACING] Could not load guidance for ${ticker} (pacing skipped):`, err.message);
+    return [];
+  }
+}
+
+/**
+ * Persists what can be VERIFIED about guidance fulfilment (tables from supabase/migrations/20261107000000_guidance_tracking.sql):
+ * each quarter's pacing reading, and at year end the judged outcome of the original and the in-force guide. Idempotent upserts. A
+ * missing table never blocks an alert: it is reported (and the self-audit says the migration has not been run).
+ */
+async function recordGuidanceTracking(ticker, fin, result) {
+  if (!result?.items?.length || !fin) return;
+  const plain = (t) => String(t || "").replace(/\*/g, "");
+  try {
+    if (result.mode === "FINAL") {
+      for (const it of result.items) {
+        const judged = [[true, it.initial], [false, { status: it.status, line: it.line, guidedText: it.guidedText, statement: it.statement, commitmentId: it.commitmentId }]];
+        for (const [initial, j] of judged) {
+          if (!j) continue;
+          await pool.query(
+            `INSERT INTO guidance_outcomes (ticker, fiscal_year, kind, initial, status, guided_text, line, statement, commitment_id, judged_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+             ON CONFLICT (ticker, fiscal_year, kind, initial) DO UPDATE
+               SET status = EXCLUDED.status, guided_text = EXCLUDED.guided_text, line = EXCLUDED.line, statement = EXCLUDED.statement,
+                   commitment_id = EXCLUDED.commitment_id, judged_at = EXCLUDED.judged_at`,
+            [ticker, it.fy, it.kind, initial, j.status, j.guidedText || null, plain(j.line), j.statement || null, j.commitmentId || null, fin.fyEnded]
+          );
+        }
+      }
+    } else {
+      for (const it of result.items) {
+        await pool.query(
+          `INSERT INTO guidance_pacing_history (ticker, fiscal_year, kind, as_of, ytd_label, status, basis, guided_text, ytd_growth_pct, required_low_pct, required_high_pct, gap_pts, line, statement)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+           ON CONFLICT (ticker, fiscal_year, kind, as_of) DO UPDATE
+             SET status = EXCLUDED.status, basis = EXCLUDED.basis, guided_text = EXCLUDED.guided_text, ytd_growth_pct = EXCLUDED.ytd_growth_pct,
+                 required_low_pct = EXCLUDED.required_low_pct, required_high_pct = EXCLUDED.required_high_pct, gap_pts = EXCLUDED.gap_pts,
+                 line = EXCLUDED.line, statement = EXCLUDED.statement`,
+          [ticker, it.fy, it.kind, fin.quarterEnded, it.ytdLabel, it.status, it.basis || null, it.guidedText || null, it.ytdGrowthPct ?? null,
+            it.requiredLowPct ?? null, it.requiredHighPct ?? null, it.gapPts ?? null, plain(it.line), it.statement || null]
+        );
+      }
+    }
+  } catch (err) {
+    console.warn(`[WORKER PACING] Could not record guidance tracking for ${ticker} (run "npm run db:migrate" if the tables are missing):`, err.message);
+  }
+}
+
+/** The verified outcomes of a stock's ORIGINAL full-year guides, newest year first ([] when none are recorded or the table is missing). */
+async function loadGuidanceTrackRecord(ticker) {
+  try {
+    const { rows } = await pool.query(
+      `SELECT fiscal_year, kind, status, guided_text, 'guidance_outcomes_read' AS tag FROM guidance_outcomes
+       WHERE ticker = $1 AND initial = TRUE ORDER BY fiscal_year DESC, kind LIMIT 12`,
+      [ticker]
+    );
+    return rows;
+  } catch (err) {
+    console.warn(`[WORKER PACING] Could not read the guidance track record of ${ticker}:`, err.message);
+    return [];
   }
 }
 
@@ -855,7 +1195,9 @@ async function hasAnalysedConcall(ticker) {
   try {
     const { rows } = await pool.query(
       `SELECT 1 FROM corporate_announcements
-       WHERE ticker = $1 AND event_analysis->'digest_item'->>'kind' = 'CONCALL'
+       WHERE ticker = $1
+         AND (event_analysis->'digest_item'->>'kind' = 'CONCALL'
+              OR (event_analysis->'digest_item'->>'kind' = 'AUDIO' AND event_analysis->'digest_item'->>'analysed' = 'true'))
          AND COALESCE(filing_date, created_at) > NOW() - INTERVAL '45 days'
        LIMIT 1`,
       [ticker]
@@ -864,6 +1206,62 @@ async function hasAnalysedConcall(ticker) {
   } catch (err) {
     console.warn(`[WORKER DIGEST] Could not check concall status for ${ticker}:`, err.message);
     return false;
+  }
+}
+
+/**
+ * True when a results STATEMENT of this stock was alerted in the last 72 h (a deck / press-release digest does not count).
+ * Decides whether the deck and press release that follow it are batched and whether a restating press release is folded.
+ * A failed lookup answers false: nothing is held or folded, so an uncertain state can only produce MORE alerts, never fewer.
+ */
+async function resultsStatementAlertedRecently(ticker, excludeIds = []) {
+  try {
+    const { rows } = await pool.query(
+      `SELECT 1 FROM corporate_announcements
+       WHERE ticker = $1 AND NOT (id = ANY($2::uuid[])) AND filing_category = 'QUARTERLY_EARNINGS' AND sent_to_telegram = true
+         AND NOT (COALESCE(event_analysis, '{}'::jsonb) ? 'digest_item')
+         AND created_at > NOW() - INTERVAL '72 hours'
+       LIMIT 1`,
+      [ticker, excludeIds]
+    );
+    return rows.length > 0;
+  } catch (err) {
+    console.warn(`[WORKER DIGEST] Could not check recent results alerts for ${ticker}:`, err.message);
+    return false;
+  }
+}
+
+/** Digest items of recording write-ups of this stock sent in the last 7 days (a transcript of the same call can then be folded). */
+async function loadEarlierRecordingWriteups(ticker) {
+  try {
+    const { rows } = await pool.query(
+      `SELECT event_analysis->'digest_item' AS di, 'earlier_recording_writeup' AS tag
+       FROM corporate_announcements
+       WHERE ticker = $1
+         AND event_analysis->'digest_item'->>'source' = 'audio'
+         AND sent_to_telegram = true
+         AND COALESCE(filing_date, created_at) > NOW() - INTERVAL '7 days'`,
+      [ticker]
+    );
+    return rows.map(r => r.di).filter(d => d && typeof d === "object");
+  } catch (err) {
+    console.warn(`[WORKER DIGEST] Could not load earlier recording write-ups for ${ticker}:`, err.message);
+    return []; // unknown: the transcript is sent
+  }
+}
+
+/** Latest market snapshot for the digest's price line (age is shown on the line itself; nothing is invented when there is none). */
+async function loadPriceSnapshot(ticker) {
+  try {
+    const { rows } = await pool.query(
+      `SELECT share_price, pe_ratio, market_cap, market_data_as_of, 'digest_price_line' AS tag
+       FROM market_data_snapshots WHERE ticker = $1 ORDER BY market_data_as_of DESC LIMIT 1`,
+      [ticker]
+    );
+    return rows[0] || null;
+  } catch (err) {
+    console.warn(`[WORKER DIGEST] Market snapshot lookup failed for ${ticker}:`, err.message);
+    return null;
   }
 }
 
@@ -984,18 +1382,19 @@ function cleanCompanyForAlert(item) {
 }
 
 function bulletList(list, max = 3) {
-  return dedupeNearDuplicates((list || []).filter(x => typeof x === "string" && x.length > 5)).slice(0, max).map(x => `• ${x.replace(/^•\s*/, "")}`).join("\n");
+  return dedupeByLabel(dedupeNearDuplicates((list || []).filter(x => typeof x === "string" && x.length > 5))).slice(0, max).map(x => `• ${x.replace(/^•\s*/, "")}`).join("\n");
 }
 
 /**
  * Stage-1 flash note: financial results / investor presentation / press release.
  */
-function buildStage1Message({ item, verdict, activeFin, finSource, carried, stageName, periodLabel, guidanceSection, commText, degradedNote }) {
+function buildStage1Message({ item, verdict, activeFin, finSource, carried, stageName, periodLabel, guidanceSection, commText, degradedNote, allocationLine = "" }) {
   const finBlock = buildVerifiedFinancialsBlock(activeFin, { carried: finSource === "CARRIED_FORWARD", periodLabel: carried?.periodLabel || periodLabel });
   const gateSec = buildGateSection(verdict.thesis_gate_result);
   const driverSec = formatDriverAssessmentSection(verdict.thesis_driver_assessment);
   const cashFlowSec = formatCashFlowAndQualitySection(verdict.cash_flow, verdict.earnings_quality, activeFin?.patConsolidated || activeFin?.patAttributable);
-  const valSec = formatValuationSection(verdict.market_data);
+  // One price line (CMP, P/E, market cap, with its date) instead of the multi-line valuation block: the flash is a quick read.
+  const valSec = buildPriceContextLine(verdict.market_data ? { ...verdict.market_data, market_data_as_of: verdict.market_data.market_data_as_of } : null);
   // Consolidate KPIs and positive execution proof under MANAGEMENT EXECUTION & CAPACITY PROOF
   const rawExec = [...(verdict.thesis_operational_kpis || []), ...(verdict.key_positives || [])];
   // Deduplicate case-insensitively
@@ -1010,14 +1409,17 @@ function buildStage1Message({ item, verdict, activeFin, finSource, carried, stag
     }
   }
   // The verified revenue / PAT / EBITDA are already printed once in the financials block: do not list them again as "proof".
-  const executionItems = bulletList(dropRestatedFigures(dedupedExec, activeFin), 4);
+  // A flash is a quick read: the three strongest proof points, two drags and two concall questions. The rest stays in the stored verdict.
+  const executionItems = bulletList(dropRestatedFigures(dedupedExec, activeFin), 3);
   const executionSec = executionItems ? `\n🛡️ *MANAGEMENT EXECUTION & CAPACITY PROOF:*\n${executionItems}\n` : "";
-  const drags = bulletList(verdict.key_concerns_and_drags);
+  const drags = bulletList(verdict.key_concerns_and_drags, 2);
   const dragSec = drags ? `\n⚠️ *KEY DRAGS & FRICTION POINTS:*\n${drags}\n` : "";
-  const points = bulletList(verdict.concall_verification_points || verdict.dodged_questions || verdict.concall_checklist);
+  const points = bulletList(verdict.concall_verification_points || verdict.dodged_questions || verdict.concall_checklist, 2);
   const concallSec = points ? `\n🎙️ *OPEN QUERIES FOR CONCALL:*\n${points}\n` : "";
   const docLink = item.attachment_url ? `\n📄 [View Official Filing →](${item.attachment_url})` : "";
-  const summary = verdict._llm_failed ? "" : `\n📋 *Summary:*\n${verdict.verdict_summary}\n`;
+  // At most the first two sentences of the model's summary (the numbers, drivers and signal are printed below it anyway).
+  const shortSummary = String(verdict.verdict_summary || "").split(/(?<=[.!?])\s+/).slice(0, 2).join(" ").slice(0, 360).trim();
+  const summary = verdict._llm_failed || !shortSummary ? "" : `\n📋 *Summary:*\n${shortSummary}\n`;
   // One line that says WHY the signal is what it is, right under the signal, taken from the gate (never from model text).
   const gate = verdict.thesis_gate_result;
   const hurdle = gate?.thesisGate;
@@ -1048,9 +1450,9 @@ function buildStage1Message({ item, verdict, activeFin, finSource, carried, stag
     concallSec?.trim()
   ].filter(Boolean);
 
-  const footer = `${divider}\n${docLink ? `${docLink}\n` : ""}_Stage 1 snapshot judged against the stock's thesis drivers. Concall transcript will verify the open queries._`;
+  const footer = `${divider}${docLink}`;
 
-  return `${header}\n${divider}\n${actionLine}${whyLine ? `\n${whyLine}` : ""}\n${divider}\n\n${bodyBlocks.join("\n\n")}\n\n${footer}`.trim();
+  return `${header}\n${divider}\n${allocationLine ? `${allocationLine}\n` : ""}${actionLine}${whyLine ? `\n${whyLine}` : ""}\n${divider}\n\n${bodyBlocks.join("\n\n")}\n\n${footer}`.trim();
 }
 
 /**
@@ -1113,9 +1515,15 @@ function buildConcallMessage({ item, verdict, activeFin, finSource, carried, per
 function buildCommitmentsSection(commitments) {
   if (!Array.isArray(commitments) || commitments.length === 0) return "";
   const has = (c, word) => (c.status || "").toLowerCase().includes(word);
-  const achieved = commitments.filter(c => has(c, "achieved") && !has(c, "partially"));
-  const delayed = commitments.filter(c => has(c, "delayed"));
-  const missed = commitments.filter(c => has(c, "missed"));
+  // The same commitment is often extracted twice (NSE and BSE copies, "Rs. 2" vs "₹2"): list each once.
+  const uniq = (list) => {
+    const keep = new Set(dedupeNearDuplicates(list.map(c => String(c.statement || ""))));
+    return list.filter(c => keep.delete(String(c.statement || "")));
+  };
+  // At most three of each kind: a long list of fulfilled promises buries the one that was missed.
+  const achieved = uniq(commitments.filter(c => has(c, "achieved") && !has(c, "partially"))).slice(0, 3);
+  const delayed = uniq(commitments.filter(c => has(c, "delayed"))).slice(0, 3);
+  const missed = uniq(commitments.filter(c => has(c, "missed"))).slice(0, 3);
   const parts = [];
   if (achieved.length > 0) {
     parts.push(`*✅ Fulfilled Commitments:*`);
@@ -1140,6 +1548,21 @@ async function processOneDeepDive(item, ctx) {
   const { suppressTelegram, deadlineAt } = ctx;
   console.log(`[WORKER PARALLEL] Processing ${item.ticker} (${item.deep_dive_status}) - Filing Date: ${item.filing_date || 'N/A'}...`);
 
+  // ── 0. Another company's filing? One document belongs to one company: held by 3+ tracked tickers means the exchange feed answered
+  // for the wrong company (NSE ignored the symbol on 2026-11-06). Never read, analyse or alert it; set it aside on its row.
+  // A failing lookup must not block real filings, so it only warns and the filing goes on.
+  let heldBy = 0;
+  try {
+    heldBy = await countTickersHoldingDocument(pool, { attachmentUrl: item.attachment_url });
+  } catch (err) {
+    console.warn(`[WORKER] Foreign-filing check failed for ${item.ticker} (${err.message}); continuing as a normal filing.`);
+  }
+  if (isForeignCopy(heldBy, { attachmentUrl: item.attachment_url, ticker: item.ticker, nseSymbol: item.nse_symbol })) {
+    console.warn(`[WORKER FOREIGN] ${item.ticker}: "${item.title}" is held by ${heldBy} tracked tickers (another company's filing); set aside, nothing analysed or sent.`);
+    await setAsideForeignFiling(pool, item.id);
+    return { success: true, skipped: true };
+  }
+
   // ── 1. Document text ──
   let docText = "";
   let pdfFailure = { reason: null, detail: "" };
@@ -1154,7 +1577,7 @@ async function processOneDeepDive(item, ctx) {
   }
 
   // ── 2. Unified deterministic classification ──
-  const classification = classifyFilingForWorker({
+  let classification = classifyFilingForWorker({
     title: item.title,
     attachmentUrl: item.attachment_url,
     docText,
@@ -1184,28 +1607,26 @@ async function processOneDeepDive(item, ctx) {
       return { success: false, retry: true };
     }
     console.warn(`[WORKER DEAD-LETTER] Unextractable / unavailable filing text for ${item.ticker}: ${item.title} — ${failureMessage}`);
-    await escalateToReview(item, failureMessage, suppressTelegram);
+    // A scanned investor presentation or press release of a stock whose results were already alerted is not worth a failure
+    // alert of its own (SBCL 2026-11-04): the numbers are in the results note; the filing stays in the dead-letter queue.
+    const deckLike = /presentation|investor\s+deck|press\s+release|media\s+release/i.test(item.title || "");
+    const quiet = deckLike && !classification.isTranscript && await recentResultsAlertSent(item);
+    await escalateToReview(item, failureMessage, suppressTelegram, { quiet });
     return { success: false, skipped: true };
   }
 
   // ── 3. Audio concall ──
   if (classification.audioCandidate && !classification.audioUrl && item.deep_dive_status === "pending_audio") {
-    // Recording announced but no parseable media link: tell the user instead of silently dropping the concall.
-    const msg = `🏢 *${item.ticker.toUpperCase()}* | ${cleanCompanyForAlert(item)}\n🎙️ *Event:* Concall audio recording published\n──────────────────────────────\n• The company filed the call recording, but the media link could not be extracted automatically.\n• Transcript analysis will follow when the written transcript is filed.\n──────────────────────────────${item.attachment_url ? `\n📄 [View Official Filing →](${item.attachment_url})` : ""}`;
-    if (suppressTelegram) {
-      await deliverWorkerAlert(item, msg, { suppressTelegram });
-    } else {
-      await queueDigestItem(item, buildDigestItem({
-        kind: "AUDIO",
-        title: item.title,
-        url: item.attachment_url,
-        filedAt: item.filing_date ? new Date(item.filing_date).toISOString() : new Date().toISOString(),
-        verdict: { verdict_summary: "Call recording filed, but the media link could not be extracted; the transcript analysis follows when it is filed." }
-      }));
-    }
+    // Recording announced but no parseable media link. A message that only says "the recording was filed" carries no
+    // information (it used to go out as a full thesis digest of its own), so nothing is sent; the written transcript is
+    // analysed when it is filed. The row is logged and kept for the audit trail.
+    console.warn(`[WORKER AUDIO] ${item.ticker}: recording intimation "${item.title}" has no media link in the letter; nothing to analyse until the written transcript is filed.`);
     await pool.query("UPDATE corporate_announcements SET deep_dive_status = 'completed' WHERE id = $1", [item.id]);
     return { success: true, ticker: item.ticker, stage: "audio-nolink" };
   }
+
+  // Set when Whisper transcribes the recording: the transcript then goes through the SAME flow as a written transcript below.
+  let audioTranscriptDoc = null;
 
   if (classification.isAudio && classification.audioUrl) {
     console.log(`[WORKER AUDIO] Ingesting concall audio for ${item.ticker}...`);
@@ -1214,34 +1635,34 @@ async function processOneDeepDive(item, ctx) {
     const mp3Path = path.resolve(scratchDir, `${item.ticker}_audio_${String(item.id).slice(0, 8)}.mp3`);
 
     try {
+      if (await transcriptAlreadyCoversCall(item)) {
+        console.log(`[WORKER AUDIO] ${item.ticker}: the written transcript of this call is already analysed; the recording is skipped (no second write-up of one call).`);
+        await pool.query("UPDATE corporate_announcements SET deep_dive_status = 'completed' WHERE id = $1", [item.id]);
+        return { success: true, ticker: item.ticker, stage: "audio-covered-by-transcript" };
+      }
       const resolvedMedia = await resolveAudioMediaUrl(classification.audioUrl);
       const isYoutube = resolvedMedia?.type === "YOUTUBE";
       const targetAudioUrl = isYoutube ? null : (resolvedMedia?.url || classification.audioUrl);
 
       if (isYoutube) {
-        console.log(`[WORKER AUDIO] Resolved YouTube recording link for ${item.ticker}: ${resolvedMedia.url}`);
-        const ytMsg = `🏢 *${item.ticker.toUpperCase()}* | ${cleanCompanyForAlert(item)}\n🎙️ *Event:* Concall audio recording published\n──────────────────────────────\n• Audio recording link verified on company investor portal.\n• 📺 [Listen to Concall on YouTube →](${resolvedMedia.url})\n• Transcript analysis will follow when the written transcript is filed.\n──────────────────────────────${item.attachment_url ? `\n📄 [View Official Intimation →](${item.attachment_url})` : ""}`;
-        if (suppressTelegram) {
-          await deliverWorkerAlert(item, ytMsg, { suppressTelegram });
-        } else {
-          await queueDigestItem(item, buildDigestItem({
-            kind: "AUDIO",
-            title: item.title,
-            url: resolvedMedia.url,
-            filedAt: item.filing_date ? new Date(item.filing_date).toISOString() : new Date().toISOString(),
-            verdict: { verdict_summary: `Concall audio recording verified on YouTube: ${resolvedMedia.url}. Written transcript analysis follows when filed.` }
-          }));
-        }
+        // A YouTube recording cannot be downloaded here; a link on its own is not analysis, so nothing is sent.
+        console.warn(`[WORKER AUDIO] ${item.ticker}: the recording is a YouTube link (${resolvedMedia.url}); the written transcript will be analysed when filed.`);
         await pool.query("UPDATE corporate_announcements SET deep_dive_status = 'completed' WHERE id = $1", [item.id]);
         return { success: true, ticker: item.ticker, stage: "audio-youtube" };
       }
 
+      if (await audioHandledByEarlierTwin(item, targetAudioUrl)) {
+        console.log(`[WORKER AUDIO] ${item.ticker}: this recording is already being handled through its other exchange copy; skipping the duplicate.`);
+        await pool.query("UPDATE corporate_announcements SET deep_dive_status = 'completed' WHERE id = $1", [item.id]);
+        return { success: true, ticker: item.ticker, stage: "audio-duplicate" };
+      }
+
       await downloadAndExtractMp3(targetAudioUrl, mp3Path);
 
-      let audioAudit;
+      let audioAudit = null;
       let transcriptText = null;
       try {
-        if (process.env.GROK_API_KEY) {
+        if (getWhisperApiKey()) {
           console.log(`[WORKER AUDIO] Transcribing with Groq Whisper Large v3 Turbo...`);
           transcriptText = await transcribeAudioWithGroqWhisper(mp3Path);
           console.log(`[WORKER AUDIO] Whisper completed: ${transcriptText.length} characters.`);
@@ -1250,12 +1671,18 @@ async function processOneDeepDive(item, ctx) {
         console.warn(`[WORKER AUDIO] Whisper transcription failed, falling back to Gemini audio analysis:`, whisperErr.message);
       }
 
-      if (transcriptText && transcriptText.length > 200) {
-        audioAudit = await analyzeTranscriptWithGemini(transcriptText, item.ticker, item.company_name, item.investment_thesis);
+      if (transcriptText && transcriptText.length > 1500) {
+        // The recording was transcribed: the transcript goes through the SAME flow as a written one below (verdict against the
+        // thesis drivers, structured call highlights, the per-stock digest). The old branch here produced only a one-paragraph
+        // summary and catalysts, so a guidance cut announced on the call never reached the alert.
+        audioTranscriptDoc = transcriptText;
+        try { fs.unlinkSync(mp3Path); } catch (_) { /* scratch cleanup is best-effort */ }
       } else {
+        // No transcript (no key, quota, a recording too short to be a call): the Gemini audio analysis is the thinner fallback.
         audioAudit = await analyzeAudioWithGemini(mp3Path, item.ticker, item.company_name, item.investment_thesis);
       }
 
+      if (!audioTranscriptDoc) {
       const eventAnalysisObj = {
         audio_analysis: audioAudit,
         investment_memo: audioAudit.investment_memo_markdown || null,
@@ -1307,20 +1734,25 @@ async function processOneDeepDive(item, ctx) {
           title: item.title,
           url: item.attachment_url,
           filedAt: item.filing_date ? new Date(item.filing_date).toISOString() : new Date().toISOString(),
-          verdict: { verdict_summary: audioAudit.executive_summary, key_positives: audioAudit.catalysts, commitments: audioAudit.commitments }
+          verdict: { verdict_summary: audioAudit.executive_summary, key_positives: audioAudit.catalysts, commitments: audioAudit.commitments },
+          source: "audio",
+          analysed: true
         }));
       }
       await pool.query("UPDATE corporate_announcements SET deep_dive_status = 'completed' WHERE id = $1", [item.id]);
       return { success: true, ticker: item.ticker, stage: "audio" };
+      }
     } catch (audioErr) {
       console.error(`[WORKER AUDIO ERROR] Failed for ${item.ticker}:`, audioErr.message);
-      // A recording that is not published yet (404) or a transient download error is retried with backoff for about two
-      // hours before a person is told; it used to be dead-lettered after three back-to-back cycles (about 15 minutes).
+      // A recording that is not published yet (404) or a transient download error is retried with a growing delay for about 29
+      // hours (a company has up to 24 h to publish the audio); it used to be given up after about two hours.
       const attempts = await recordDeepDiveAttempt(item.id, `Audio ingestion failed: ${audioErr.message}`, "audio");
       if (attempts >= MAX_AUDIO_ATTEMPTS) {
-        await escalateToReview(item, `Audio ingestion failed: ${audioErr.message}`, suppressTelegram);
+        // No failure alert for a recording: the written transcript is filed within days and is analysed then (a call is never
+        // lost), while an alert per unreachable recording was noise (QPOWER 404, INOXINDIA fetch failed). The row is still recorded.
+        await escalateToReview(item, `Audio ingestion failed: ${audioErr.message}`, suppressTelegram, { quiet: true, quietReason: "the written transcript will cover this call" });
       } else {
-        await deferRetry(item.id, backoffDelayMs(attempts));
+        await deferRetry(item.id, audioBackoffDelayMs(attempts));
       }
       return { success: false, error: audioErr.message };
     }
@@ -1329,22 +1761,29 @@ async function processOneDeepDive(item, ctx) {
   // A results STATEMENT is the filing that carries the statement tables. Decks and press releases quote results but are not
   // statements (an investor presentation was retried for hours and then dead-lettered with a false "statements could not be
   // machine-read" alert); they go to the thesis-status digest and are judged against the verified results of the same quarter.
-  const isDeckOrPressRelease = /presentation|investor\s+deck|press\s+release|media\s+release/i.test(`${item.title} ${item.attachment_url || ""}`);
-  const hasStatementWords = /revenue\s+from\s+operations|total\s+income|profit\s+before\s+tax/i.test(docText);
-  const mentionsFinancialResults = /financial\s+results?|un-?audited|audited\s+financial/i.test(`${item.title} ${docText.slice(0, 6000)}`);
-  // A results filing (flagged as an earnings release or QUARTERLY_EARNINGS category) whose text layer has NO statement
-  // rows at all: the statement pages are images or kerning-fragmented (e.g. SKIPPER: 57,366 characters of cover letter
-  // and auditor's report, zero statement rows). It is still a statement filing, so it must be OCR-read.
-  const isEarningsRelease = item.is_earnings_release === true || item.filing_category === "QUARTERLY_EARNINGS";
-  const statementPagesAreImages = isEarningsRelease && mentionsFinancialResults && !hasStatementWords;
-  const looksLikeStatementDoc =
-    !classification.isTranscript &&
-    !classification.isAudio &&
-    !isDeckOrPressRelease &&
-    ((mentionsFinancialResults && hasStatementWords) || statementPagesAreImages);
+  if (audioTranscriptDoc) {
+    // The call recording was transcribed: from here on it is a concall transcript (same verdict, drivers, highlights, digest).
+    console.log(`[WORKER AUDIO] ${item.ticker}: ${audioTranscriptDoc.length}-character transcript of the recording enters the concall flow.`);
+    docText = audioTranscriptDoc;
+    classification = { ...classification, isTranscript: true, isAudio: false };
+  }
+
+  // A results filing whose text layer has NO statement rows (SKIPPER: 57,366 characters of cover letter and auditor's report) is
+  // still a statement filing and is OCR-read; a short intimation that merely mentions results is not (see looksLikeStatementFiling).
+  const looksLikeStatementDoc = looksLikeStatementFiling({
+    title: item.title,
+    attachmentUrl: item.attachment_url,
+    docText,
+    isEarningsRelease: item.is_earnings_release === true || item.filing_category === "QUARTERLY_EARNINGS",
+    isTranscript: classification.isTranscript,
+    isAudio: classification.isAudio
+  });
 
   // ── 4. Verified numbers + reporting period (deterministic, from THIS filing) ──
-  let extractedFin = extractDeterministicFinancials(docText);
+  // The filing date tells which quarter this is when the statement's own header dates are unreadable (needed for the cumulative columns).
+  const periodEndHint = quarterEndBefore(item.filing_date);
+  let extractedFin = extractDeterministicFinancials(docText, { periodEndHint });
+  let figuresFromOcr = false; // the statements were read from a scanned PDF by vision OCR (a misread digit is possible)
 
   // Scanned statements often carry a noisy embedded OCR text layer ("Revenue o aperstans", "Soptember") that the parser
   // rightly refuses. Re-read the pages with vision OCR and parse that instead, so the numbers stay VERIFIED.
@@ -1357,15 +1796,16 @@ async function processOneDeepDive(item, ctx) {
     // A transcription only counts when it parses into the statements we need; otherwise the next OCR model is tried.
     const ocr = await extractPdfTextDetailed(item.attachment_url, {
       forceOcr: true,
-      acceptOcr: (t) => usable(extractDeterministicFinancials(t))
+      acceptOcr: (t) => usable(extractDeterministicFinancials(t, { periodEndHint }))
     });
     if (ocr.text && ocr.text.trim().length >= 200 && ocr.text !== docText) {
-      const ocrFin = extractDeterministicFinancials(ocr.text);
+      const ocrFin = extractDeterministicFinancials(ocr.text, { periodEndHint });
       if (usable(ocrFin)) {
         console.log(`[PDF OCR] ${item.ticker}: embedded text layer was unreadable; vision-OCR text parsed into verified financials.`);
         // Clean statements first (they are what the verdict and the gate read), the embedded text layer after them.
         docText = `${ocr.text}\n\n${docText}`;
         extractedFin = ocrFin;
+        figuresFromOcr = true;
       }
     }
   }
@@ -1561,8 +2001,11 @@ async function processOneDeepDive(item, ctx) {
   verdict.thesis_gate_result = gateResult;
   verdict.reporting_period = periodLabel;
   if (activeFin && finSource === "THIS_FILING") verdict.verified_financials = activeFin;
+  if (figuresFromOcr && finSource === "THIS_FILING") {
+    degradedNote += "\n🔍 _These figures were read from a scanned PDF by OCR (a misread digit is possible). Check the filing before acting on a red signal._\n";
+  }
   if (finSource === "LLM_GROUNDED") {
-    degradedNote += "\n⚠️ _Figures below were located by AI (every number was found in the filing text) but the table layout could not be machine-verified — no buy is authorised on them. Check the filing._\n";
+    degradedNote +="\n⚠️ _Figures below were located by AI (every number was found in the filing text) but the table layout could not be machine-verified — no buy is authorised on them. Check the filing._\n";
   }
   if (looksLikeStatementDoc && !activeFin) {
     degradedNote += "\n⚠️ _Could not machine-verify the financial tables in this PDF — figures not shown; open the filing._\n";
@@ -1651,28 +2094,84 @@ async function processOneDeepDive(item, ctx) {
   }
 
   // ── 9. Build + send the alert (BEFORE any slow optional work) ──
-  const guidanceComp = activeFin ? await reconcilePriorGuidanceVsActual(item.ticker, quarter, activeFin) : null;
+  // Guidance PACING: the year to date (half-year / nine-month, from the verified statement) against the full-year guide, and what the
+  // rest of the year must deliver. Stored on the verdict so the next filing can say whether the pacing changed.
+  let pacingResult = { items: [], mode: "PACING" };
+  if (gateFin && (gateFin.ytdMonths || gateFin.fyEnded)) {
+    pacingResult = computeGuidancePacing({ commitments: await loadGuidanceCommitments(item.ticker), fin: gateFin });
+  }
+  const pacingItems = pacingResult.items;
+  verdict.guidance_pacing = compactPacing(pacingItems);
+  await recordGuidanceTracking(item.ticker, gateFin, pacingResult);
+  const trackRecord = formatTrackRecord(await loadGuidanceTrackRecord(item.ticker));
+  verdict.guidance_track_record = trackRecord;
+  const guidanceComp = activeFin ? await reconcilePriorGuidanceVsActual(item.ticker, quarter, activeFin, { omitAnnualPacing: pacingItems.length > 0 }) : null;
   let guidanceSection = "";
   if (guidanceComp) {
     guidanceSection = guidanceComp.formattedSection || `\n🎯 *PREVIOUS GUIDANCE VS. ACTUAL DELIVERY:*\n• *Prior Guided Target:* ${guidanceComp.guidedValue} _(from ${guidanceComp.priorQuarter})_\n• *Actual Delivered:* ${guidanceComp.actualValue}\n• *Delivery Verdict:* ${guidanceComp.verdictBadge}\n`;
   }
+  if (pacingItems.length || trackRecord) guidanceSection = `${guidanceSection || ""}${formatPacingSection(pacingItems)}${trackRecord}`;
   const commText = buildCommitmentsSection(verdict.commitments);
   const stageInfo = getFilingStageDetails(item.deep_dive_status, item.title, docText);
   const isTranscriptDoc = classification.isTranscript || item.deep_dive_status === "pending_stage2";
 
-  if (isTranscriptDoc) {
-    console.log(`[WORKER] Generating concall highlights for ${item.ticker}...`);
-    const ch = sanitizeConcallHighlights(await generateStructuredConcallHighlights(item.ticker, item.company_name, docText), docText);
+  // A deck or press release is written up in the same structure as a call (what changed in guidance first, capex, initiatives,
+  // risks), from its own text. It goes to the digest, not straight to Telegram, so the extra model call never delays an alert;
+  // it is skipped when the run is nearly out of time, and the filing then keeps its ordinary verdict.
+  const isDeckDoc = !isTranscriptDoc && !looksLikeStatementDoc && !classification.isAudio && hasDocText && docText.length >= 600 &&
+    digestKindFor(item.title) !== "OTHER" && (!deadlineAt || deadlineAt - Date.now() > 60000);
+
+  if (isTranscriptDoc || isDeckDoc) {
+    console.log(`[WORKER] Generating ${isDeckDoc ? "presentation" : "concall"} highlights for ${item.ticker}...`);
+    const rawCh = await generateStructuredConcallHighlights(item.ticker, item.company_name, docText, { docKind: isDeckDoc ? "presentation" : "call" });
+    const ch = sanitizeConcallHighlights(rawCh, docText, gateFin);
     const hasHighlightContent = ch && [
       "segment_highlights", "business_performance", "financial_performance", "operational_highlights", "growth_initiatives",
       "quarterly_guidance", "annual_guidance", "multi_year_targets", "key_positives", "key_challenges"
     ].some(k => Array.isArray(ch[k]) && ch[k].length > 0);
     if (hasHighlightContent) {
       verdict.concall_highlights = ch;
+      // A guidance CUT announced on the call is a veto on a buy (AGENTS.md I7: numbers authorise, vetoes win). The call's own
+      // statement is not a model opinion: it is grounded against the transcript like every other highlight.
+      const cuts = guidanceCutsOf(ch);
+      if (cuts.length && /BUY|ADD/i.test(String(verdict.final_action || verdict.action_signal || ""))) {
+        verdict.final_action = "HOLD / MONITOR";
+        verdict.action_signal = "HOLD / MONITOR";
+        verdict.conviction_score = Math.min(Number(verdict.conviction_score) || 5, 5);
+        if (verdict.thesis_gate_result) {
+          verdict.thesis_gate_result = { ...verdict.thesis_gate_result, decisionExplanation: `Management cut guidance on the call (${cuts[0].slice(0, 140)}), so no buy is authorised. ${verdict.thesis_gate_result.decisionExplanation || ""}`.trim() };
+        }
+      }
     }
   }
 
-  const msgCtx = { item, verdict, activeFin: gateFin, finSource: gateSource, carried, stageName: stageInfo.stageName, periodLabel, guidanceSection, commText, degradedNote };
+  // Allocation gate for a results statement: does this change how much of the stock is held? (Decks, calls and recordings are
+  // judged in the digest.) Results whose numbers could not be verified are always pushed: relevance cannot be judged.
+  const routeForGate = routeAlert({ isStatementFiling: looksLikeStatementDoc, isTranscript: isTranscriptDoc, isAudio: false });
+  let allocation = null;
+  if (routeForGate === "immediate" && allocationGateEnabled() && !suppressTelegram) {
+    const previousView = await loadPreviousView(item.ticker, [item.id]);
+    const unverifiedResults = !gateFin || gateSource !== "THIS_FILING" || gateFin.verification === "LLM_LOCATED_TEXT_GROUNDED" || Boolean(degradedNote?.trim());
+    const current = {
+      action: verdict.final_action || verdict.action_signal,
+      conviction: verdict.conviction_score,
+      hurdleStatus: verdict.thesis_gate_result?.thesisGate?.status || null,
+      assessment: verdict.thesis_driver_assessment || [],
+      guidanceChanges: verdict.concall_highlights?.guidance_changes || [],
+      pacing: verdict.guidance_pacing || [],
+      llmFailed: Boolean(verdict._llm_failed),
+      unverifiedResults,
+      stanceAuthoritative: !unverifiedResults,
+      numbersComplete: Boolean(gateFin) && gateFin.revenueYoYGrowthPct != null && gateFin.patYoYGrowthPct != null
+    };
+    // previousView === undefined means the lookup failed: unknown relevance is pushed, never hidden.
+    const cls = previousView === undefined
+      ? { push: true, reasons: ["the previous view of this stock could not be loaded; open the filing"] }
+      : classifyAllocationRelevance({ current, previous: previousView, fin: unverifiedResults ? null : gateFin });
+    allocation = { ...cls, line: cls.push ? buildAllocationLine({ reasons: cls.reasons, current, previous: previousView || null }) : "", current };
+  }
+
+  const msgCtx = { item, verdict, activeFin: gateFin, finSource: gateSource, carried, stageName: stageInfo.stageName, periodLabel, guidanceSection, commText, degradedNote, allocationLine: allocation?.line || "" };
   const alertText = isTranscriptDoc ? buildConcallMessage(msgCtx) : buildStage1Message(msgCtx);
 
   // Persist the full verdict first (without the bulky raw text), then send, then mark completed.
@@ -1682,13 +2181,24 @@ async function processOneDeepDive(item, ctx) {
     `UPDATE corporate_announcements
      SET event_analysis = COALESCE(event_analysis, '{}'::jsonb) || $2::jsonb
      WHERE id = $1`,
-    [item.id, JSON.stringify({ institutional_verdict: storableVerdict })]
+    [item.id, JSON.stringify({
+      institutional_verdict: storableVerdict,
+      // Kept so the later written transcript can still be compared with what was said on the recording (discrepancy audit).
+      ...(audioTranscriptDoc ? { audio_analysis: { source: "whisper-transcript", transcript_chars: audioTranscriptDoc.length, executive_summary: verdict.verdict_summary || null, guidance_changes: verdict.concall_highlights?.guidance_changes || [], guidance_numbers: { quarterly_guidance: (verdict.concall_highlights?.quarterly_guidance || []).join("; ") || "None", annual_guidance: (verdict.concall_highlights?.annual_guidance || []).join("; ") || "None", multi_year_targets: (verdict.concall_highlights?.multi_year_targets || []).join("; ") || "None" }, commitments: verdict.commitments || [] }, processed_stage: "audio" } : {})
+    })]
   );
 
   // Verified statement filings alert immediately. Transcripts / decks / press releases are queued for ONE per-stock
   // thesis-status digest (sent in this same cycle unless a sibling filing of the stock is still being processed).
   const route = routeAlert({ isStatementFiling: looksLikeStatementDoc, isTranscript: isTranscriptDoc, isAudio: false });
-  if (route === "immediate" || suppressTelegram) {
+  if (route === "immediate" && allocation && !allocation.push) {
+    // Nothing here changes the view: recorded on the row and listed on the end-of-day allocation board.
+    await storeBoardItem([item.id], boardEntryFrom({
+      ticker: item.ticker, kinds: ["RESULTS"], action: allocation.current.action, conviction: allocation.current.conviction,
+      gist: firstSentence(verdict.verdict_summary) || "Results filed; the view is unchanged."
+    }));
+    console.log(`[WORKER BOARD] ${item.ticker}: results do not change the view (${allocation.stanceNow}); listed on the allocation board, not pushed.`);
+  } else if (route === "immediate" || suppressTelegram) {
     await deliverWorkerAlert(item, alertText, { suppressTelegram });
   } else {
     const digestItem = buildDigestItem({
@@ -1696,7 +2206,9 @@ async function processOneDeepDive(item, ctx) {
       title: item.title,
       url: item.attachment_url,
       filedAt: item.filing_date ? new Date(item.filing_date).toISOString() : new Date().toISOString(),
-      verdict
+      verdict,
+      source: audioTranscriptDoc ? "audio" : null,
+      analysed: isTranscriptDoc
     });
     if (isContentFreeDigestItem(digestItem)) {
       // e.g. a call-recording intimation: nothing to judge, so no "No driver evidence yet" message
@@ -1863,7 +2375,58 @@ async function flushThesisDigestsOnce({ now = Date.now() } = {}) {
 
     for (const [ticker, group] of byTicker) {
       const items = group.map(r => ({ ...r.digest_item, filedAt: r.digest_item.filedAt || new Date(r.filing_date).toISOString() }));
-      if (!shouldSendDigest({ queuedAt: items.map(i => i.queuedAt), otherPending: otherPending.get(ticker) || 0, now })) continue;
+      // Allocation gate: a deck / call / recording is pushed only if it changes the view (guidance, a worse driver, a flipped
+      // hurdle, a failed AI read); otherwise it goes to the end-of-day board right away (nothing waits for a hold window).
+      let allocationLine = "";
+      let allocationPush = false;
+      if (allocationGateEnabled()) {
+        const ids = group.map(r => r.id);
+        const previousView = await loadPreviousView(ticker, ids);
+        const lead = [...items].filter(i => i.action).sort((x, y) => (Date.parse(y.filedAt) || 0) - (Date.parse(x.filedAt) || 0))[0];
+        const current = {
+          action: lead?.action || previousView?.action,
+          conviction: lead?.conviction ?? previousView?.conviction ?? null,
+          hurdleStatus: lead?.gate?.hurdleStatus || null,
+          assessment: items.flatMap(i => i.assessment || []),
+          guidanceChanges: items.flatMap(i => i.highlights?.guidance_changes || []),
+          pacing: [...new Map(items.flatMap(i => i.pacing || []).map(p => [p.key, p])).values()],
+          llmFailed: items.some(i => i.llmFailed),
+          stanceAuthoritative: false,   // a deck / call carries forward the results' numbers: it cannot re-grade the stock by itself
+          numbersComplete: true
+        };
+        const cls = previousView === undefined
+          ? { push: true, reasons: ["the previous view of this stock could not be loaded; open the filing"] }
+          : classifyAllocationRelevance({ current, previous: previousView });
+        if (!cls.push) {
+          const gist = items.map(i => firstSentence(i.highlights?.key_takeaway) || firstSentence(i.summary)).find(Boolean) || "Filed; nothing changes the view.";
+          await storeBoardItem(ids, boardEntryFrom({ ticker, kinds: items.map(i => i.kind), action: current.action, conviction: current.conviction, gist }));
+          console.log(`[WORKER BOARD] ${ticker}: ${items.length} filing(s) do not change the view; listed on the allocation board, not pushed.`);
+          continue;
+        }
+        allocationPush = true;
+        allocationLine = buildAllocationLine({ reasons: cls.reasons, current, previous: previousView || null });
+      }
+
+      const resultsAlerted = await resultsStatementAlertedRecently(ticker, group.map(r => r.id));
+      if (!shouldSendDigest({ queuedAt: items.map(i => i.queuedAt), otherPending: otherPending.get(ticker) || 0, now, kinds: items.map(i => i.kind), resultsAlerted, urgent: allocationPush || hasUrgentDigestItem(items) })) continue;
+
+      // Volume: a batch that adds nothing to what the user already has is recorded, not sent. The reason is kept on the row
+      // (event_analysis.digest_folded) and logged, so "why did I not get X" has an answer (AGENTS.md section 11).
+      const foldReason = allocationPush ? null : quietBatchReason({ items, resultsAlerted }) ||
+        (items.some(i => i.kind === "CONCALL" && i.source !== "audio") && repeatsEarlierCallWriteup({ items, earlierItems: await loadEarlierRecordingWriteups(ticker) })
+          ? "the written transcript repeats the recording write-up already sent for this call (no new figure)"
+          : null);
+      if (foldReason) {
+        await pool.query(
+          `UPDATE corporate_announcements
+           SET event_analysis = (COALESCE(event_analysis, '{}'::jsonb) - 'digest_pending')
+                                || jsonb_build_object('digest_folded', $1::text, 'digest_folded_at', NOW())
+           WHERE id = ANY($2)`,
+          [foldReason, group.map(r => r.id)]
+        );
+        console.log(`[WORKER DIGEST] Folded ${items.length} filing(s) of ${ticker} into the record, no message: ${foldReason}.`);
+        continue;
+      }
 
       const drivers = getThesisContract(ticker)?.drivers || [];
       let history = [];
@@ -1880,11 +2443,13 @@ async function flushThesisDigestsOnce({ now = Date.now() } = {}) {
       const financialsBlock = carried
         ? buildVerifiedFinancialsBlock(carried.fin, { carried: true, periodLabel: carriedPeriod })
         : "";
-      const concall = { status: items.some(i => i.kind === "CONCALL") || await hasAnalysedConcall(ticker) ? "ANALYSED" : "PENDING" };
+      const concall = { status: hasAnalysedConcallItem(items) || await hasAnalysedConcall(ticker) ? "ANALYSED" : "PENDING" };
 
       const message = formatThesisDigestMessage({
         ticker, companyName: group[0].company_name, items, board, overall: overallThesisStatus(board), financialsBlock,
-        fin: carried?.fin || null, periodLabel: carriedPeriod, concall
+        fin: carried?.fin || null, periodLabel: carriedPeriod, concall,
+        priceLine: buildPriceContextLine(await loadPriceSnapshot(ticker), now),
+        allocationLine
       });
       try {
         await sendTelegramMessage(message);
@@ -1952,6 +2517,8 @@ export async function processPendingDeepDives(options = {}) {
   // Queued thesis digests whose sibling filings have finished since the last cycle (or whose send failed) go out now
   if (!suppressTelegram) {
     await flushThesisDigests();
+    await flushAllocationBoard();
+    if (!announcementIds) await flushHealthReport();
   }
 
   // A running quota pause keeps the queue idle (everything below needs the AI): nothing is lost, filings stay queued.
@@ -1971,7 +2538,7 @@ export async function processPendingDeepDives(options = {}) {
   let queryParams = [];
 
   const selectCols = `ca.id, ca.stock_id, ca.ticker, ca.title, ca.attachment_url, ca.filing_date, ca.deep_dive_status, ca.filing_category, ca.is_earnings_release,
-             s.investment_thesis, s.company_name`;
+             s.investment_thesis, s.company_name, s.nse_symbol`;
 
   if (announcementIds && announcementIds.length > 0) {
     queryText = `SELECT ${selectCols}
@@ -2057,7 +2624,6 @@ export async function processPendingDeepDives(options = {}) {
 
 
 // Run directly if invoked from CLI
-import { fileURLToPath } from 'url';
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   processPendingDeepDives().then(res => {
     console.log(`[WORKER] Finished processing ${res.processed} deep-dives.`);
@@ -2469,7 +3035,7 @@ YOU MUST CORRECTION THESE ERRORS IN THIS RE-PROMPT:
 /**
  * Generates structured, segment-by-segment institutional concall highlights for Telegram.
  */
-export async function generateStructuredConcallHighlights(ticker, companyName, docText) {
+export async function generateStructuredConcallHighlights(ticker, companyName, docText, { docKind = "call" } = {}) {
   if (!docText || docText.length < 300) return null;
 
   // Clean boilerplate cover letters
@@ -2478,66 +3044,20 @@ export async function generateStructuredConcallHighlights(ticker, companyName, d
   if (concallStart !== -1 && concallStart < 5000) {
     cleanText = docText.substring(concallStart);
   }
-  cleanText = capContext(cleanText, 24000);
 
-  const systemPrompt = `You are a Senior Managing Director & Chief Equity Strategist at a top-tier institutional research firm. Extract a structured concall highlight report from the earnings conference call transcript. You report ONLY what the transcript explicitly states: every figure you write must be printed in the transcript, with its unit and comparison as spoken. If the call does not give a figure or topic, return an empty list for that section. Never estimate, round up, infer, or reuse any number or name from these instructions.`;
-  const userPrompt = `
-Company: ${companyName} (${ticker})
-Concall Transcript Content:
-${cleanText}
-
-Extract the following structured sections from the transcript above (and nothing else):
-1. "financial_performance": the revenue/income, EBITDA and margin, PAT, order book, export order book, cash position and order inflow figures management stated for the period, each with the comparison management gave.
-2. "business_performance": contract wins, customer orders and segment or division performance management described, with the order sizes they stated.
-3. "growth_initiatives": new product rollouts, brand targets/extensions, pilot categories, retail distribution deals, turnaround initiatives, technology partnerships and new certifications announced.
-4. "operational_highlights": plant commissioning status, facility expansions, capacity and utilisation figures, network growth and execution timelines management stated.
-5. "quarterly_guidance": explicit guidance for the next quarter only. Return [] if none was given.
-6. "annual_guidance": explicit guidance for the full fiscal year. Return [] if none was given.
-7. "multi_year_targets": explicit 3-5 year roadmap or long-term targets. Return [] if none were given.
-8. "key_positives": the main positive execution points made on the call (at most 5).
-9. "key_challenges": the main risks or headwinds management or analysts raised (at most 4).
-10. "management_tone": the tone of management in 2-3 words.
-11. "key_takeaway": one sentence bottom line that uses only facts stated on the call.
-
-Rules: no placeholders (never write X, Y, Z or "details"); no figure that is not in the transcript; an empty list is the correct answer when the call is silent on a section.
-
-Return ONLY a valid JSON object with exactly these keys:
-{
-  "financial_performance": ["<metric name>: <figure with unit and comparison as stated on the call>"],
-  "business_performance": ["<order or segment item as stated on the call>"],
-  "growth_initiatives": ["<initiative as stated on the call>"],
-  "operational_highlights": ["<operational item as stated on the call>"],
-  "quarterly_guidance": ["<next-quarter guidance as stated on the call>"],
-  "annual_guidance": ["<full-year guidance as stated on the call>"],
-  "multi_year_targets": ["<long-term target as stated on the call>"],
-  "key_positives": ["<positive point from the call>"],
-  "key_challenges": ["<risk or headwind from the call>"],
-  "management_tone": "<2-3 words>",
-  "key_takeaway": "<one sentence>"
-}
-`;
-
-  try {
-    const resText = await runNimPrompt(systemPrompt, userPrompt, 0.05);
-    if (!resText) return null;
-    let cleaned = resText.replace(/```json/gi, "").replace(/```/g, "").trim();
-    const firstBrace = cleaned.indexOf("{");
-    const lastBrace = cleaned.lastIndexOf("}");
-    if (firstBrace !== -1 && lastBrace !== -1) {
-      cleaned = cleaned.substring(firstBrace, lastBrace + 1);
-      const parsed = JSON.parse(cleaned);
-      if (!parsed.management_guidance) {
-        parsed.management_guidance = [
-          ...(parsed.quarterly_guidance || []),
-          ...(parsed.annual_guidance || []),
-          ...(parsed.multi_year_targets || [])
-        ];
-      }
-      return parsed;
+  // A call is read in up to three parts, so guidance changes explained in the Q&A are not cut off (the old single 24k-character
+  // read saw roughly the first 40% of an hour-long call).
+  const parts = splitTranscript(cleanText);
+  const results = [];
+  for (let i = 0; i < parts.length; i++) {
+    const { system, user } = buildHighlightPrompts({ ticker, companyName, text: parts[i], partIndex: i, partCount: parts.length, docKind });
+    try {
+      const parsed = parseHighlightReply(await runNimPrompt(system, user, 0.05));
+      if (parsed) results.push(parsed);
+    } catch (err) {
+      console.warn(`[CONCALL HIGHLIGHTS WARN] Part ${i + 1}/${parts.length} failed for ${ticker}:`, err.message);
     }
-  } catch (err) {
-    console.warn(`[CONCALL HIGHLIGHTS WARN] Failed for ${ticker}:`, err.message);
   }
-  return null;
+  return mergeConcallHighlights(results);
 }
 

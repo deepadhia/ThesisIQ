@@ -11,6 +11,7 @@ import {
   shouldSendDigest,
   buildDigestItem,
   isContentFreeDigestItem,
+  filingLinkText,
   formatThesisDigestMessage
 } from '../services/thesis-digest.service.js';
 
@@ -264,8 +265,133 @@ describe('signal rationale: the digest says HOW the signal was reached (results 
     expect(detail).toContain('Working capital days stood at 82 days');
   });
 
+  it('operations / business bullets sit under neutral headings, never "Capex & Plant" or "Order Book" (POLICYBZR 2026-11-04 showed claims data under both)', () => {
+    const fin = { ...item, operations: ['Claims settled in the quarter rose 18% YoY.'], businessExecution: ['Online premium of Rs. 4,200 Cr, up 31%.'] };
+    const msg = formatThesisDigestMessage({ ...base, items: [fin] });
+    expect(msg).toContain('Claims settled in the quarter');
+    expect(msg).toContain('Online premium of Rs. 4,200 Cr');
+    expect(msg).not.toMatch(/Capex & Plant Commissioning/);
+    expect(msg).not.toMatch(/Order Book Execution/);
+  });
+
   it('stays within Telegram limits with the extra block', () => {
     expect(formatThesisDigestMessage({ ...base, concall: { status: 'PENDING' } }).length).toBeLessThan(3500);
+  });
+});
+
+describe('investor presentations get the call write-up structure; verified numbers are printed once', () => {
+  const hl = { guidance_changes: ['EBITDA margin guidance: raised to 29-30% (raised)'], financial_performance: ['Revenue of 282.7 Cr, up 16.9%'], business_performance: ['Passenger vehicle segment grew strongly'], operational_highlights: ['Display plant commissioning by Q2 FY28'], growth_initiatives: [], key_challenges: ['Global macro environment'], key_positives: [], key_monitorables: [], annual_guidance: [], quarterly_guidance: [], multi_year_targets: [] };
+  const deck = { kind: 'DECK', title: 'Investor Presentation', highlights: hl };
+
+  it('a deck with highlights is rendered in numbered sections with its own label, guidance first', async () => {
+    const { formatConcallHighlightsBlock } = await import('../services/thesis-digest.service.js');
+    const out = formatConcallHighlightsBlock(deck, 'Deck link');
+    expect(out).toContain('📑 Investor presentation');
+    expect(out.indexOf('GUIDANCE & OUTLOOK')).toBeLessThan(out.indexOf('CAPACITY & CAPEX'));
+    expect(out).toContain('🔺');
+  });
+
+  it('when verified results exist, the deck\'s own QUARTERLY NUMBERS section is omitted (the numbers are printed once, from the parser); a call keeps it', async () => {
+    const { formatConcallHighlightsBlock } = await import('../services/thesis-digest.service.js');
+    const fin = { revenue: 282.7, ebitda: 87.6 };
+    expect(formatConcallHighlightsBlock(deck, '', (l) => l, fin)).not.toContain('QUARTERLY NUMBERS');
+    expect(formatConcallHighlightsBlock(deck, '', (l) => l, null)).toContain('QUARTERLY NUMBERS');
+    expect(formatConcallHighlightsBlock({ ...deck, kind: 'CONCALL' }, '', (l) => l, fin)).toContain('QUARTERLY NUMBERS');
+  });
+});
+
+describe('alert volume: fewer, fuller messages (user: "I get overwhelmed with alerts")', () => {
+  const NOW = Date.parse('2026-11-04T10:00:00Z');
+  const ago = (min) => new Date(NOW - min * 60_000).toISOString();
+
+  const HOUR = 60;
+  it('a deck / press release that follows an alerted results statement is held up to 24 h so it can go out WITH the call (one message per stock per 24 h; SJS 2026-11-04 got press release, deck and call as separate messages)', async () => {
+    const { shouldSendDigest, EARNINGS_HOLD_MS } = await import('../services/thesis-digest.service.js');
+    expect(EARNINGS_HOLD_MS).toBe(24 * 60 * 60 * 1000);
+    expect(shouldSendDigest({ queuedAt: [ago(10)], otherPending: 0, now: NOW, kinds: ['PRESS'], resultsAlerted: true })).toBe(false);
+    expect(shouldSendDigest({ queuedAt: [ago(10 * HOUR), ago(2 * HOUR)], otherPending: 0, now: NOW, kinds: ['PRESS', 'DECK'], resultsAlerted: true })).toBe(false);
+    expect(shouldSendDigest({ queuedAt: [ago(23 * HOUR)], otherPending: 0, now: NOW, kinds: ['DECK'], resultsAlerted: true })).toBe(false);
+    expect(shouldSendDigest({ queuedAt: [ago(24 * HOUR + 1)], otherPending: 0, now: NOW, kinds: ['DECK'], resultsAlerted: true })).toBe(true);
+  });
+
+  it('the hold ends as soon as the call arrives (it goes out together with the deck), and never applies without an alerted results statement', async () => {
+    const { shouldSendDigest } = await import('../services/thesis-digest.service.js');
+    expect(shouldSendDigest({ queuedAt: [ago(2 * HOUR), ago(1)], otherPending: 0, now: NOW, kinds: ['DECK', 'CONCALL'], resultsAlerted: true })).toBe(true);
+    expect(shouldSendDigest({ queuedAt: [ago(1)], otherPending: 0, now: NOW, kinds: ['AUDIO'], resultsAlerted: true })).toBe(true);
+    expect(shouldSendDigest({ queuedAt: [ago(1)], otherPending: 0, now: NOW, kinds: ['DECK'], resultsAlerted: false })).toBe(true);
+    expect(shouldSendDigest({ queuedAt: [ago(1)], otherPending: 0, now: NOW })).toBe(true); // old call signature
+  });
+
+  it('urgent news is never held: a guidance cut, a driver at risk / broken, a delayed or missed commitment, or a failed AI read goes out at once', async () => {
+    const { shouldSendDigest, hasUrgentDigestItem } = await import('../services/thesis-digest.service.js');
+    const base = { kind: 'DECK', guidanceCuts: [], assessment: [], commitmentFlags: [], llmFailed: false };
+    expect(hasUrgentDigestItem([base])).toBe(false);
+    expect(hasUrgentDigestItem([{ ...base, guidanceCuts: ['Revenue growth outlook 1.5-2x -> 1.2-1.5x (cut)'] }])).toBe(true);
+    expect(hasUrgentDigestItem([{ ...base, assessment: [{ driver: 'D', status: 'BROKEN', evidence: 'x' }] }])).toBe(true);
+    expect(hasUrgentDigestItem([{ ...base, assessment: [{ driver: 'D', status: 'AT_RISK', evidence: 'x' }] }])).toBe(true);
+    expect(hasUrgentDigestItem([{ ...base, commitmentFlags: [{ statement: 's', status: 'Missed' }] }])).toBe(true);
+    expect(hasUrgentDigestItem([{ ...base, llmFailed: true }])).toBe(true);
+    expect(hasUrgentDigestItem([base, { ...base, kind: 'PRESS', guidanceCuts: ['cut'] }])).toBe(true);
+    expect(shouldSendDigest({ queuedAt: [ago(5)], otherPending: 0, now: NOW, kinds: ['DECK'], resultsAlerted: true, urgent: true })).toBe(true);
+  });
+
+  const quiet = { kind: 'PRESS', summary: 'Revenue up 16.9%.', positives: ['PAT up 34.8%'], concerns: [], guidance: [], growthInitiatives: [], operations: [], businessExecution: [], commitmentFlags: [], assessment: [], highlights: null, guidanceCuts: [], llmFailed: false };
+
+  it('a press release that only restates results is folded (not sent) once the results were alerted; the reason is stated', async () => {
+    const { quietBatchReason } = await import('../services/thesis-digest.service.js');
+    expect(quietBatchReason({ items: [quiet], resultsAlerted: true })).toMatch(/press release|restat|nothing new/i);
+  });
+
+  it('nothing is folded when it could carry news: a deck, guidance, a flagged commitment, a driver at risk, a new initiative, a failed AI read, or no alerted results', async () => {
+    const { quietBatchReason } = await import('../services/thesis-digest.service.js');
+    expect(quietBatchReason({ items: [{ ...quiet, kind: 'DECK' }], resultsAlerted: true })).toBeNull();
+    expect(quietBatchReason({ items: [{ ...quiet, guidance: ['FY27 revenue growth 13-14%'] }], resultsAlerted: true })).toBeNull();
+    expect(quietBatchReason({ items: [{ ...quiet, commitmentFlags: [{ statement: 'x', status: 'Delayed' }] }], resultsAlerted: true })).toBeNull();
+    expect(quietBatchReason({ items: [{ ...quiet, assessment: [{ driver: 'D', status: 'AT_RISK', evidence: 'margin fell 200 bps' }] }], resultsAlerted: true })).toBeNull();
+    expect(quietBatchReason({ items: [{ ...quiet, growthInitiatives: ['New plant announced'] }], resultsAlerted: true })).toBeNull();
+    expect(quietBatchReason({ items: [{ ...quiet, llmFailed: true }], resultsAlerted: true })).toBeNull();
+    expect(quietBatchReason({ items: [quiet], resultsAlerted: false })).toBeNull();
+    expect(quietBatchReason({ items: [quiet, { ...quiet, kind: 'CONCALL' }], resultsAlerted: true })).toBeNull();
+  });
+
+  const audio = { kind: 'CONCALL', source: 'audio', highlights: { guidance_changes: ['Revenue growth outlook: 1.5-2x -> 1.2-1.5x (cut)', 'EBITDA margin guide: 27-28% -> 29-30% (raised)'], financial_performance: ['Revenue Rs 2,827.3 mn, up 16.9%'], operational_highlights: ['Capex Rs 2,700-2,850 mn'] } };
+  const transcript = (h) => ({ kind: 'CONCALL', source: null, highlights: h });
+
+  it('the written transcript of a call whose recording was already written up is folded when it adds no figure the write-up lacked (SJS: the same call twice)', async () => {
+    const { repeatsEarlierCallWriteup } = await import('../services/thesis-digest.service.js');
+    const same = transcript({ guidance_changes: ['Revenue growth guidance lowered to 1.2-1.5x from 1.5-2x'], financial_performance: ['Revenue of 2,827.3 million, growth 16.9%'] });
+    expect(repeatsEarlierCallWriteup({ items: [same], earlierItems: [audio] })).toBe(true);
+  });
+
+  it('but a transcript carrying a new figure, a different kind of item, or no earlier write-up is NOT folded', async () => {
+    const { repeatsEarlierCallWriteup } = await import('../services/thesis-digest.service.js');
+    const newFigure = transcript({ guidance_changes: ['Export share targeted at 18% by FY28'] });
+    expect(repeatsEarlierCallWriteup({ items: [newFigure], earlierItems: [audio] })).toBe(false);
+    expect(repeatsEarlierCallWriteup({ items: [transcript(audio.highlights)], earlierItems: [] })).toBe(false);
+    expect(repeatsEarlierCallWriteup({ items: [{ ...transcript(audio.highlights), kind: 'DECK' }], earlierItems: [audio] })).toBe(false);
+    expect(repeatsEarlierCallWriteup({ items: [{ ...transcript(audio.highlights), source: 'audio' }], earlierItems: [audio] })).toBe(false);
+    expect(repeatsEarlierCallWriteup({ items: [{ kind: 'CONCALL', source: null, highlights: null }], earlierItems: [audio] })).toBe(false);
+  });
+
+  it('the digest header carries the live price context with its date, and says so when it is stale', async () => {
+    const { buildPriceContextLine } = await import('../services/thesis-digest.service.js');
+    const md = { share_price: '2222', pe_ratio: '37.5', market_cap: '7164', market_data_as_of: '2026-11-04T00:00:00.000Z' };
+    const line = buildPriceContextLine(md, Date.parse('2026-11-05T06:00:00Z'));
+    expect(line).toContain('₹2,222');
+    expect(line).toContain('P/E 37.5');
+    expect(line).toContain('7,164');
+    expect(line).not.toMatch(/stale/i);
+    expect(buildPriceContextLine(md, Date.parse('2026-11-20T06:00:00Z'))).toMatch(/stale/i);
+    expect(buildPriceContextLine(null, NOW)).toBe('');
+    expect(buildPriceContextLine({ share_price: null, pe_ratio: null, market_cap: null }, NOW)).toBe('');
+  });
+
+  it('the price line appears in the message under the company line', async () => {
+    const { formatThesisDigestMessage, overallThesisStatus } = await import('../services/thesis-digest.service.js');
+    const msg = formatThesisDigestMessage({ ticker: 'SJS', companyName: 'SJS Enterprises', items: [], board: [], overall: overallThesisStatus([]), priceLine: '💹 CMP ₹2,222 · P/E 37.5 (as of 04 Nov)' });
+    expect(msg).toContain('💹 CMP ₹2,222');
+    expect(msg.indexOf('💹')).toBeGreaterThan(msg.indexOf('SJS'));
+    expect(msg.indexOf('💹')).toBeLessThan(msg.indexOf('THESIS STATUS'));
   });
 });
 
@@ -281,6 +407,33 @@ describe('driver evidence that admits there is no evidence is not evidence', () 
     expect(out.find(o => o.driver === 'Subsidiary turnaround').status).toBe('NO_EVIDENCE');
     expect(out.find(o => o.driver === 'Order book').status).toBe('CONFIRMED');
     expect(out.find(o => o.driver === 'Margins').status).toBe('AT_RISK');   // a risk flag is never erased by this rule
+  });
+
+  it('a driver marked ON_TRACK / CONFIRMED whose evidence is "no new evidence" is NOT shown green (TIMETECHNO / JYOTICNC flash 2026-11-04)', async () => {
+    const { normalizeDriverAssessment, formatDriverAssessmentSection } = await import('../services/thesis-driver-context.service.js');
+    const ds = [{ name: 'Driver A', materiality: 'HIGH' }, { name: 'Driver B', materiality: 'HIGH' }, { name: 'Driver C', materiality: 'MEDIUM' }];
+    const out = normalizeDriverAssessment([
+      { driver: 'Driver A', status: 'ON_TRACK', evidence: 'No new evidence in this filing' },
+      { driver: 'Driver B', status: 'CONFIRMED', evidence: 'No further information on this driver was provided.' },
+      { driver: 'Driver C', status: 'ON_TRACK', evidence: 'Not addressed in this presentation.' }
+    ], ds);
+    expect(out.map(o => o.status)).toEqual(['NO_EVIDENCE', 'NO_EVIDENCE', 'NO_EVIDENCE']);
+    const text = formatDriverAssessmentSection(out);
+    expect(text).not.toContain('🟢');
+    expect(text).not.toContain('✅');
+  });
+
+  it('CONFIRMED needs a figure or a stated completion; "steady positive operating cash flow" is ON_TRACK at best (TIMETECHNO digest 2026-11-04)', async () => {
+    const { normalizeDriverAssessment } = await import('../services/thesis-driver-context.service.js');
+    const ds = [{ name: 'Cash flow', materiality: 'HIGH' }, { name: 'Plant', materiality: 'HIGH' }, { name: 'Order book', materiality: 'HIGH' }];
+    const out = normalizeDriverAssessment([
+      { driver: 'Cash flow', status: 'CONFIRMED', evidence: 'Steady positive operating cash flow generation.' },
+      { driver: 'Plant', status: 'CONFIRMED', evidence: 'The new plant was commissioned in September and is operational.' },
+      { driver: 'Order book', status: 'CONFIRMED', evidence: 'Order book at Rs. 5,082 Cr.' }
+    ], ds);
+    expect(out.find(o => o.driver === 'Cash flow').status).toBe('ON_TRACK');
+    expect(out.find(o => o.driver === 'Plant').status).toBe('CONFIRMED');
+    expect(out.find(o => o.driver === 'Order book').status).toBe('CONFIRMED');
   });
 });
 
@@ -309,5 +462,71 @@ describe('dropRestatedFigures: bullets that only repeat the verified headline nu
   it('a number that merely equals a headline figure inside an unrelated line is kept (needs the revenue/profit/EBITDA label)', async () => {
     const { dropRestatedFigures } = await import('../services/thesis-digest.service.js');
     expect(dropRestatedFigures(['Order book stands at 2030.22 Cr'], fin)).toEqual(['Order book stands at 2030.22 Cr']);
+  });
+});
+
+describe('results flash: the same labelled figure is never listed twice (JYOTICNC 2026-11-03 printed "Inventory: ₹1,245.90 Cr" and "Inventory: ₹1,440.52 Cr" under one heading; SBCL listed the same dividend as achieved twice)', async () => {
+  const { dedupeByLabel, dedupeNearDuplicates } = await import('../services/thesis-digest.service.js');
+  it('keeps the first value of a repeated "Label: value" bullet and leaves unlabelled bullets alone', () => {
+    const out = dedupeByLabel(['Inventory: ₹1,245.90 Cr', 'Trade Receivables: ₹505.78 Cr', 'Inventory: ₹1,440.52 Cr', 'Trade Receivables: ₹506.00 Cr', 'Order book execution is on track', 'Order book execution is on track']);
+    expect(out).toEqual(['Inventory: ₹1,245.90 Cr', 'Trade Receivables: ₹505.78 Cr', 'Order book execution is on track', 'Order book execution is on track']);
+  });
+  it('commitments that restate the same dividend (Rs. 2 vs ₹2 per equity share) collapse to one', () => {
+    const out = dedupeNearDuplicates(['Interim dividend of ₹2 per equity share', 'Interim dividend of Rs. 2 per equity share']);
+    expect(out).toHaveLength(1);
+  });
+});
+
+describe('guidance pacing in the digest', () => {
+  it('buildDigestItem keeps the compact pacing and the message shows it, worst first, under the verified results', async () => {
+    const { buildDigestItem, formatThesisDigestMessage, overallThesisStatus } = await import('../services/thesis-digest.service.js');
+    const pacing = [
+      { key: 'REVENUE_GROWTH|FY27', kind: 'REVENUE_GROWTH', label: 'Revenue growth', fy: 'FY27', ytdLabel: 'H1', restLabel: 'H2', guidedText: '13–14% growth', status: 'BEHIND', line: '🟠 *BEHIND* — Revenue growth FY27 guide 13–14% growth: H1 +7.0%; H2 needs +17.9% to +19.7% YoY' },
+      { key: 'EBITDA_MARGIN|FY27', kind: 'EBITDA_MARGIN', label: 'EBITDA margin', fy: 'FY27', ytdLabel: 'H1', restLabel: 'H2', guidedText: '10–11%', status: 'ON_TRACK', line: '✅ *ON TRACK* — EBITDA margin FY27 guide 10–11%: H1 10.4%' }
+    ];
+    const item = buildDigestItem({ kind: 'CONCALL', title: 'Transcript', filedAt: '2026-11-05T10:00:00Z', verdict: { guidance_pacing: pacing, verdict_summary: 'x' } });
+    expect(item.pacing).toHaveLength(2);
+    const msg = formatThesisDigestMessage({ ticker: 'SKIPPER', items: [item], board: [], overall: overallThesisStatus([]) });
+    expect(msg).toContain('GUIDANCE PACING (FY27, H1 done)');
+    expect(msg).toContain('H2 needs +17.9%');
+    expect(msg.indexOf('BEHIND')).toBeLessThan(msg.indexOf('ON TRACK'));
+  });
+  it('no pacing, no block', async () => {
+    const { buildDigestItem, formatThesisDigestMessage, overallThesisStatus } = await import('../services/thesis-digest.service.js');
+    const item = buildDigestItem({ kind: 'DECK', title: 'Deck', filedAt: '2026-11-05T10:00:00Z', verdict: { verdict_summary: 'x' } });
+    expect(item.pacing).toEqual([]);
+    expect(formatThesisDigestMessage({ ticker: 'X', items: [item], board: [], overall: overallThesisStatus([]) })).not.toContain('GUIDANCE PACING');
+  });
+});
+
+describe('filingLinkText: a link says what the filing IS, not the exchange generic subject', () => {
+  const item = (kind, title, extra = {}) => ({ kind, title, filedAt: '2026-11-05T10:30:00Z', ...extra });
+  it('replaces the generic exchange subjects ("General Updates", "Updates", the Con. Call Updates subject) with the kind and the date', () => {
+    expect(filingLinkText(item('OTHER', 'General Updates'))).toBe('Exchange filing, 5 Nov');
+    expect(filingLinkText(item('OTHER', 'Updates'))).toBe('Exchange filing, 5 Nov');
+    expect(filingLinkText(item('CONCALL', 'Analysts/Institutional Investor Meet/Con. Call Updates'))).toBe('Call transcript, 5 Nov');
+    expect(filingLinkText(item('AUDIO', 'Analysts/Institutional Investor Meet/Con. Call Updates'))).toBe('Call recording, 5 Nov');
+    expect(filingLinkText(item('CONCALL', 'Analysts/Institutional Investor Meet/Con. Call Updates', { source: 'audio' }))).toBe('Call recording, 5 Nov');
+    expect(filingLinkText(item('DECK', 'Updates'))).toBe('Investor presentation, 5 Nov');
+    expect(filingLinkText(item('PRESS', 'Announcement under Regulation 30 (LODR)-Press Release / Media Release'))).toBe('Press release, 5 Nov');
+  });
+  it('keeps a title that already says something', () => {
+    expect(filingLinkText(item('OTHER', 'Outcome of Board Meeting'))).toBe('Outcome of Board Meeting');
+    expect(filingLinkText(item('DECK', 'Investor Presentation Q2 FY27'))).toBe('Investor Presentation Q2 FY27');
+  });
+  it('falls back safely: no title, no date', () => {
+    expect(filingLinkText({ kind: 'OTHER', title: '' })).toBe('Exchange filing');
+    expect(filingLinkText({ kind: 'CONCALL', title: 'Updates', filedAt: 'garbage' })).toBe('Call transcript');
+  });
+  it('is Markdown-safe (no stray * _ [ ])', () => {
+    expect(filingLinkText(item('OTHER', 'Notice [of] *Meeting*'))).toBe('Notice of Meeting');
+  });
+  it('the digest message uses it in the link', () => {
+    const msg = formatThesisDigestMessage({
+      ticker: 'JSLL', companyName: 'Jeena Sikho', board: [], overall: null,
+      items: [{ ...buildDigestItem({ kind: 'OTHER', title: 'General Updates', url: 'https://x.test/a.pdf', filedAt: '2026-11-05T10:30:00Z', verdict: { verdict_summary: 'Subsidiary formed for a pharmacy chain.' } }) }]
+    });
+    expect(msg).toContain('[Exchange filing, 5 Nov](https://x.test/a.pdf)');
+    expect(msg).not.toContain('[General Updates]');
   });
 });

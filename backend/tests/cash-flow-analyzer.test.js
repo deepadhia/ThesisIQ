@@ -117,6 +117,8 @@ Note: Gross up effect of Hyper Inflation of Step Down Subsidiary 220.07 Millions
 
   it("formats a high-impact alert section with cash conversion % and working capital warnings", () => {
     const cf = {
+      periodMonths: 6,
+      pbtPeriodCr: 110.0,
       operatingCashFlowCr: 7.08,
       operatingCashFlowPriorCr: -11.96,
       inventoryChangeCr: -103.2,
@@ -167,5 +169,53 @@ Note: Gross up effect of Hyper Inflation of Step Down Subsidiary 220.07 Millions
     const guardedGood = applyInstitutionalGuard(goodVerdict, fin, "Outcome of Board Meeting", "QPOWER");
     expect(guardedGood.summary).toContain("₹293.6 Cr");
     expect(guardedGood.verdict_summary).toContain("₹293.6 Cr");
+  });
+});
+
+describe("an operating cash flow that cannot be right is not shown (SJS 2026-11-04: ₹10,728.1 Cr OCF against ₹58 Cr profit = '18487% cash conversion', 'FCF ₹10,679 Cr')", () => {
+  const cf = { operatingCashFlowCr: 10728.1, operatingCashFlowPriorCr: 107.65, capexCr: 48.86, freeCashFlowCr: 10679.24, inventoryChangeCr: null };
+  it("withholds the OCF, the conversion and the free cash flow, and says why", () => {
+    const out = formatCashFlowAndQualitySection(cf, null, 58.03);
+    expect(out).not.toContain("10728.1");
+    expect(out).not.toContain("18487");
+    expect(out).not.toContain("10679");
+    expect(out).toMatch(/cash flow.*could not be verified|looks mis-read/i);
+  });
+  it("a conversion above 100% that is still plausible (a strong working-capital release) is shown", () => {
+    const out = formatCashFlowAndQualitySection({ periodMonths: 6, pbtPeriodCr: 100, operatingCashFlowCr: 150, operatingCashFlowPriorCr: 90, capexCr: 40, freeCashFlowCr: 110, inventoryChangeCr: null }, null, 100);
+    expect(out).toContain("150% of Profit");
+    expect(out).toContain("Free Cash Flow");
+  });
+  it("a plausible OCF is untouched", () => {
+    const out = formatCashFlowAndQualitySection({ periodMonths: 6, pbtPeriodCr: 58, operatingCashFlowCr: 40, operatingCashFlowPriorCr: 30, capexCr: 10, freeCashFlowCr: 30, inventoryChangeCr: null }, null, 58);
+    expect(out).toContain("68.97% of Profit");
+  });
+});
+
+describe("cash conversion compares a cash flow with the profit of the SAME period (handoff 11-06 item 5: H1 operating cash flow was divided by ONE quarter's PAT)", () => {
+  it("reads the period and the statement's own pre-tax profit from the cash flow statement", () => {
+    const cf = extractDeterministicCashFlow(QPOWER_CF_SAMPLE);
+    expect(cf.periodMonths).toBe(6);
+    // 1,366.16 Millions = 136.62 Cr, the first row of the printed statement (half-year profit before tax)
+    expect(cf.pbtPeriodCr).toBe(136.62);
+    expect(extractDeterministicCashFlow(CRORES_CF_SAMPLE).pbtPeriodCr).toBe(450.5);
+  });
+  it("a full-year statement is labelled FY, not H1", () => {
+    const text = QPOWER_CF_SAMPLE.replace("FOR THE HALF YEAR ENDED 30TH SEPTEMBER 2026", "FOR THE YEAR ENDED 31ST MARCH 2027");
+    expect(extractDeterministicCashFlow(text).periodMonths).toBe(12);
+  });
+  it("sets a half-year cash flow against the half-year profit, and names that base in the line", () => {
+    const cf = extractDeterministicCashFlow(CRORES_CF_SAMPLE);
+    // a quarter's PAT (here 60 Cr) would give 583%: it must not be used
+    const out = formatCashFlowAndQualitySection(cf, null, 60);
+    expect(out).toContain("Net Operating Cash Flow (H1)");
+    expect(out).toContain("77.67% of Profit"); // 349.9 / 450.5
+    expect(out).toContain("H1 pre-tax profit");
+    expect(out).not.toContain("583");
+  });
+  it("with no same-period profit it shows NO ratio rather than a mismatched one, and does not withhold a plausible OCF", () => {
+    const out = formatCashFlowAndQualitySection({ periodMonths: 6, pbtPeriodCr: null, operatingCashFlowCr: 150, operatingCashFlowPriorCr: 90, capexCr: 40, freeCashFlowCr: 110, inventoryChangeCr: null }, null, 40);
+    expect(out).toContain("₹150 Cr");
+    expect(out).not.toContain("Cash Conversion");
   });
 });

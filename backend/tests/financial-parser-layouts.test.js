@@ -297,3 +297,49 @@ describe('period label when the column header is garbled and names several dates
     expect(f.quarterEnded).toBe('2026-09-30');
   });
 });
+
+describe('SBCL Q2 FY27 (split label "Depreciati on", share of profit of an associate between PBT lines): EBITDA is read, operating only', () => {
+  const f = extractDeterministicFinancials(doc('SBCL_2026-11-04'));
+  it('reads the consolidated statement in lakhs: revenue 197.79 Cr, up 43.95% on the year-ago quarter', () => {
+    expect(f.statementScope).toBe('CONSOLIDATED');
+    expect(f.revenue).toBeCloseTo(197.79, 2);
+    expect(f.revenueYoYGrowthPct).toBeCloseTo(43.95, 1);
+  });
+  it('EBITDA = 4,566.10 (profit before the associate) + 210.52 + 540.94 - 297.12 other income = 5,020.44 lakh = 50.20 Cr (25.38% margin)', () => {
+    expect(f.ebitda).toBeCloseTo(50.20, 2);
+    expect(f.ebitdaMarginPct).toBeCloseTo(25.38, 1);
+  });
+  it('year-ago EBITDA is 3,016.55 + 114.23 + 336.28 - 359.66 = 3,107.40 lakh: +61.6% (the company reports +62%), margin +276 bps', () => {
+    expect(f.ebitdaYoYGrowthPct).toBeCloseTo(61.6, 1);
+    expect(f.ebitdaMarginBpsDelta).toBeGreaterThan(270);
+    expect(f.ebitdaMarginBpsDelta).toBeLessThan(282);
+  });
+  it('the share of profit of the associate (114.36 lakh) is NOT operating profit: leaving it in would give 51.35 Cr', () => {
+    expect(f.ebitda).toBeLessThan(51);
+  });
+});
+
+describe('income identity: revenue + other income must equal total income in the same column (SJS: a vision-OCR misread of 2,827 as 2,327 produced "revenue -3.7%" and a red alert)', () => {
+  const stmt = (rev0) => `
+STATEMENT OF UNAUDITED CONSOLIDATED FINANCIAL RESULTS FOR THE QUARTER ENDED 30 SEPTEMBER 2026
+(Rs. in Crores)
+Particulars | Quarter Ended 30-09-2026 | Quarter Ended 30-06-2026 | Quarter Ended 30-09-2025
+Revenue from operations ${rev0} 261.00 241.76
+Other income 5.28 9.14 11.47
+Total income 288.00 270.14 253.23
+Finance costs 5.51 9.60 10.98
+Depreciation and amortisation expense 17.53 18.83 26.50
+Total expenses 210.00 198.00 190.00
+Profit before tax 78.00 72.14 63.23
+Net profit for the period 58.30 54.00 43.00
+`;
+  it('a consistent statement is read (282.72 + 5.28 = 288.00)', () => {
+    const r = extractDeterministicFinancials(stmt('282.72'));
+    expect(r).not.toBeNull();
+    expect(r.revenue).toBeCloseTo(282.72, 2);
+  });
+  it('a revenue cell that does not add up with other income to total income is not shown as verified (232.73 + 5.28 != 288.00)', () => {
+    const r = extractDeterministicFinancials(stmt('232.73'));
+    expect(r).toBeNull();
+  });
+});

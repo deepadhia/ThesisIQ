@@ -75,6 +75,29 @@ export function splitTelegramText(text, limit = TELEGRAM_MAX_CHARS) {
     rest = rest.slice(cut).trim();
   }
   if (rest) chunks.push(rest);
+
+  // A tail of a few lines (the signal footer, one last metric) arriving as its own message reads as noise. When the last piece is
+  // small, re-cut the last two pieces together at the paragraph / line break nearest their middle so both are substantial.
+  if (chunks.length >= 2 && chunks[chunks.length - 1].length < limit * 0.25) {
+    const tail = chunks.pop();
+    const head = chunks.pop();
+    const joined = `${head}\n\n${tail}`;
+    const mid = Math.floor(joined.length / 2);
+    const breaks = [];
+    for (const sep of ["\n\n", "\n"]) {
+      let at = joined.indexOf(sep);
+      while (at !== -1) { breaks.push({ at, sep }); at = joined.indexOf(sep, at + sep.length); }
+      if (breaks.length) break; // prefer paragraph breaks; fall back to single line breaks only when there are none
+    }
+    const usable = breaks.filter(b => b.at <= limit && joined.length - b.at - b.sep.length <= limit);
+    if (usable.length) {
+      usable.sort((a, b) => Math.abs(a.at - mid) - Math.abs(b.at - mid));
+      const best = usable[0];
+      chunks.push(joined.slice(0, best.at).trim(), joined.slice(best.at + best.sep.length).trim());
+    } else {
+      chunks.push(head, tail);
+    }
+  }
   return chunks;
 }
 

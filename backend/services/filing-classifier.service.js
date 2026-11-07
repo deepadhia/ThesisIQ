@@ -11,6 +11,50 @@ import { extractAudioUrlFromFiling } from "./audio-transcript-analyzer.service.j
  * Newspaper publications (SEBI LODR Reg 47) are statutory extracts of results that were already filed in full.
  * They must never raise a thin stand-alone alert of their own.
  */
+/**
+ * True when a filing is the OUTCOME of a results board meeting (or the results statement itself), judged from its own title and
+ * letter, whatever category the AI classifier chose. MOREPENLAB's Q2 results were filed four times and classified
+ * GOVERNANCE_RISK / GENERAL, LUMAXTECH's as RESTRUCTURING and QPOWER's as CAPITAL_RAISE: each was marked `not_required`, so the
+ * results were never read. Intimations (a meeting date), newspaper copies, presentations, press releases, call notices, AGM and
+ * voting filings have their own routes and are not matched; a board outcome about something else (a fund raise, a director) is
+ * not matched because its letter does not say results were approved or enclosed.
+ */
+export function isResultsOutcomeFiling({ title = "", text = "" } = {}) {
+  const t = String(title || "").toLowerCase();
+  if (/intimation|schedule\s+of|notice\s+of|trading\s+window|closure\s+of|invit|newspaper|publication|press\s+release|media\s+release|presentation|transcript|audio|recording|con\.?\s*call|analyst|investor\s+meet|voting|postal\s+ballot|\bagm\b|\begm\b/.test(t)) return false;
+  const titleSignal = /financial\s+results?|un-?audited|\baudited\b|quarterly\s+results?|results?\s+for\s+the\s+(?:quarter|half|year)|outcome\s+of\s+(?:the\s+)?(?:meeting\s+of\s+the\s+)?board|board\s+meeting\s+outcome/.test(t);
+  if (!titleSignal) return false;
+  const head = String(text || "").slice(0, 12000).replace(/\s+/g, " ").toLowerCase();
+  if (!head) return false;
+  // a letter that only gives the date of a coming meeting is an intimation whatever it is titled
+  if (/notice\s+is\s+hereby\s+given[^.]{0,200}(?:meeting|scheduled)/.test(head) && !/(?:considered\s+and\s+approved|have\s+approved|approved\s+the)/.test(head)) return false;
+  const approved = /(?:approved|considered|took\s+on\s+record|adopted)[^.]{0,220}(?:un-?audited|audited)[^.]{0,140}results?/.test(head);
+  const statement = /statement\s+of\s+(?:un-?audited|audited)[^.]{0,100}(?:financial\s+results|profit)/.test(head) ||
+    (/revenue\s+from\s+operations/.test(head) && /profit/.test(head));
+  const titleIsResults = /financial\s+results?|un-?audited|quarterly\s+results?/.test(t);
+  return approved || statement || (titleIsResults && /(?:quarter|half[\s-]year)\s+ended/.test(head) && /results?/.test(head) && /approved|enclosed|considered/.test(head));
+}
+
+/**
+ * Is this filing a results STATEMENT (numbers to verify, immediate flash), or something else that merely mentions results?
+ * Statement rows in the text, or an earnings-flagged filing whose statement pages are images: then the document is long (a cover
+ * letter plus the auditor's report) or its letter says the results were approved / enclosed. A short intimation (a meeting date, a
+ * call invitation) has neither: it used to be sent down the statement path (OCR for pages that do not exist, a failure alert).
+ */
+export function looksLikeStatementFiling({ title = "", attachmentUrl = "", docText = "", isEarningsRelease = false, isTranscript = false, isAudio = false } = {}) {
+  if (isTranscript || isAudio) return false;
+  if (/presentation|investor\s+deck|press\s+release|media\s+release/i.test(`${title} ${attachmentUrl || ""}`)) return false;
+  const text = String(docText || "");
+  const hasStatementWords = /revenue\s+from\s+operations|total\s+income|profit\s+before\s+tax/i.test(text);
+  const mentionsResults = /financial\s+results?|un-?audited|audited\s+financial/i.test(`${title} ${text.slice(0, 6000)}`);
+  if (mentionsResults && hasStatementWords) return true;
+  if (!(isEarningsRelease && mentionsResults)) return false;
+  if (text.length >= 8000) return true;
+  const head = text.slice(0, 12000).replace(/\s+/g, " ").toLowerCase();
+  return /(?:approved|considered|took\s+on\s+record|adopted)[^.]{0,220}(?:un-?audited|audited)[^.]{0,140}results?/.test(head) ||
+    /(?:un-?audited|audited)[^.]{0,140}results?[^.]{0,120}(?:enclosed|attached|annexed)/.test(head);
+}
+
 export function isNewspaperPublicationFiling(title = "", attachmentUrl = "") {
   const titleLower = (title || "").toLowerCase();
   const attachLower = (attachmentUrl || "").toLowerCase();

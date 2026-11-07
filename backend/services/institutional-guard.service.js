@@ -597,6 +597,18 @@ const ENTITY_STOPWORDS = new Set([
 function buildEntityCheck(rawDocText) {
   const doc = String(rawDocText || "").toLowerCase();
   const hasDoc = doc.length > 50;
+  // Words of the source, for a spelling-tolerant match: speech-to-text spells a name differently from the model ("Harman" / "Harmon").
+  let docWords = null;
+  const words = () => (docWords ||= new Set(doc.match(/[a-z]{4,}/g) || []));
+  const closeToADocWord = (word) => {
+    const tol = word.length >= 8 ? 2 : word.length >= 5 ? 1 : 0;
+    if (!tol) return false;
+    for (const w of words()) {
+      if (Math.abs(w.length - word.length) > tol) continue;
+      if (editDistanceAtMost(word, w, tol)) return true;
+    }
+    return false;
+  };
   return (sentence) => {
     if (!hasDoc) return true;
     const colon = sentence.indexOf(":");
@@ -607,25 +619,43 @@ function buildEntityCheck(rawDocText) {
       if (atStart) continue; // capitalised only because it starts the sentence
       const word = t[0].toLowerCase();
       if (ENTITY_STOPWORDS.has(word)) continue;
-      if (!doc.includes(word)) return false;
+      if (!doc.includes(word) && !closeToADocWord(word)) return false;
     }
     return true;
   };
+}
+
+/** True when the edit distance between a and b is at most `max` (insert / delete / substitute); cheap for short words. */
+function editDistanceAtMost(a, b, max) {
+  let prev = Array.from({ length: b.length + 1 }, (_, j) => j);
+  for (let i = 1; i <= a.length; i++) {
+    const cur = [i];
+    let rowMin = i;
+    for (let j = 1; j <= b.length; j++) {
+      cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+      if (cur[j] < rowMin) rowMin = cur[j];
+    }
+    if (rowMin > max) return false;
+    prev = cur;
+  }
+  return prev[b.length] <= max;
 }
 
 /**
  * Grounds the structured concall highlight block against the transcript text: unfilled template items, and any
  * figure or name the call never states, are dropped (AGENTS.md rule 6). Empty sections stay empty rather than invented.
  */
-export function sanitizeConcallHighlights(highlights, rawDocText) {
+export function sanitizeConcallHighlights(highlights, rawDocText, financialData = null) {
   if (!highlights || typeof highlights !== "object") return highlights;
   const numbersGrounded = buildGroundingCheck(rawDocText);
   const namesGrounded = buildEntityCheck(rawDocText);
-  const isGrounded = (s) => numbersGrounded(s) && namesGrounded(s);
+  // With verified results (a deck or press release is judged against the parsed statement) a bullet may not hang a verified
+  // percentage on the wrong measure either.
+  const isGrounded = (s) => numbersGrounded(s) && namesGrounded(s) && !mislabelsMarginOrGrowth(s, financialData);
   const out = { ...highlights };
   const LIST_FIELDS = [
     "financial_performance", "business_performance", "growth_initiatives", "operational_highlights",
-    "quarterly_guidance", "annual_guidance", "multi_year_targets", "management_guidance",
+    "quarterly_guidance", "annual_guidance", "multi_year_targets", "management_guidance", "guidance_changes", "key_monitorables",
     "key_positives", "key_challenges", "key_risks", "performance_overview", "segment_highlights"
   ];
   for (const f of LIST_FIELDS) {
@@ -645,6 +675,56 @@ export function sanitizeConcallHighlights(highlights, rawDocText) {
   return out;
 }
 
+const GROWTH_WORDS = /\b(?:growth|grew|growing|increase[ds]?|rose|rise[sn]?|expan(?:sion|ded|ding|ds)|jump(?:ed)?|surg(?:e|ed)|improv(?:ement|ed))\b/i;
+// A margin measured over something other than this quarter's consolidated result, or a statement about the future / a change:
+// the verified quarterly margin says nothing about these.
+const MARGIN_QUALIFIERS = /segment|division|vertical|plant|\bunit\b|subsidiar|standalone|\bh[12]\b|half|nine|\b9m\b|fy\s?\d|full[-\s]?year|annual|target|guid|expect|aim|outlook|\bfrom\b|\bvs\.?\b|versus|compared|peer|industry|sector|bps|basis\s+point|contract|declin|improv|expan|rose|grew|increase/i;
+
+/**
+ * True when a sentence attaches a percentage to the WRONG measure of the parser-verified result: the margin LEVEL called a growth
+ * or an "expansion", a growth figure called the EBITDA margin, or an EBITDA margin far from the verified one with nothing that
+ * explains the difference. The grounding guard only proves the number appears somewhere in the document; this proves the sentence
+ * does not contradict what the number is (handoff 11-06 fix 1: "YoY growth of 13.19% in EBITDA" was the margin; EBITDA grew 18.12%).
+ */
+export function mislabelsMarginOrGrowth(text, financialData) {
+  if (typeof text !== "string" || !financialData || GUARD_INJECTED.test(text)) return false;
+  const n = (v) => (v === null || v === undefined || v === "" || isNaN(v) ? null : Number(v));
+  const margin = n(financialData.ebitdaMarginPct);
+  if (margin === null) return false;
+  const growths = [
+    financialData.revenueYoYGrowthPct, financialData.revenueQoQGrowthPct, financialData.patYoYGrowthPct,
+    financialData.patQoQGrowthPct, financialData.ebitdaYoYGrowthPct, financialData.normalisedPatYoYGrowthPct,
+  ].map(n).filter((v) => v !== null);
+  const near = (a, b) => Math.abs(Math.abs(a) - Math.abs(b)) <= (Number.isInteger(a) ? 0.6 : 0.15);
+
+  for (const m of text.matchAll(/(\d{1,3}(?:\.\d+)?)\s*%/g)) {
+    const p = parseFloat(m[1]);
+    const before = text.slice(Math.max(0, m.index - 45), m.index);
+    const after = text.slice(m.index + m[0].length, m.index + m[0].length + 45);
+    const isMarginLevel = near(p, margin);
+    const isGrowthValue = growths.some((g) => near(p, g));
+
+    if (isMarginLevel && !isGrowthValue) {
+      // "growth of 13.19% in EBITDA" / "EBITDA grew 13.19%": the margin level carried by a growth word, with no mention of margin
+      const near30 = before.slice(-30);
+      if (GROWTH_WORDS.test(near30) && /ebitda|operating\s+profit/i.test(before + after) && !/margin/i.test(before + after)) return true;
+      // "10.5% EBITDA margin expansion" / "margin expansion of 10.5%": a level called a change
+      if (/^\s*(?:ebitda\s+)?margin\s+(?:expansion|improvement|growth|increase|gain)/i.test(after)) return true;
+      if (/margin\s+(?:expansion|improvement|growth|increase|gain)\s*(?:of|by)?\s*$/i.test(before) ||
+          /margin\s+(?:expanded|improved|increased|grew)\s+by\s*$/i.test(before)) return true;
+    }
+    if (isGrowthValue && !isMarginLevel) {
+      // "EBITDA margin of 18.12%" where 18.12% is the EBITDA growth
+      if (/^\s*ebitda\s+margin(?!\s+(?:expansion|improvement|growth|increase|gain))/i.test(after) ||
+          /ebitda\s+margin\s*(?:of|at|was|stood\s+at|came\s+in\s+at|:)\s*$/i.test(before)) return true;
+    }
+    // "a 48% EBITDA margin" when the verified margin is ~25% and the sentence names no segment, period, target or change
+    if (!isMarginLevel && !isGrowthValue && Math.abs(p - margin) > 5 && !MARGIN_QUALIFIERS.test(text) &&
+        (/^\s*ebitda\s+margin\b/i.test(after) || /ebitda\s+margin\s*(?:of|at|was|stood\s+at|came\s+in\s+at|:)\s*$/i.test(before))) return true;
+  }
+  return false;
+}
+
 /**
  * Strips prompt-leak artifacts, ungrounded numbers, and duplicate entries.
  */
@@ -657,7 +737,9 @@ function sanitizeLlmOutput(guarded, title = "", ticker = "", financialData = nul
     financialData.patQoQGrowthPct, financialData.ebitdaYoYGrowthPct, financialData.ebitdaMarginPct,
     financialData.normalisedPatYoYGrowthPct
   ].filter(v => v !== null && v !== undefined && !isNaN(v)).map(Number) : [];
-  const isGrounded = buildGroundingCheck(rawDocText, verifiedPcts, financialData);
+  const numbersGrounded = buildGroundingCheck(rawDocText, verifiedPcts, financialData);
+  // A claim must be in the document AND must not hang a verified percentage on the wrong measure (margin vs growth).
+  const isGrounded = (s) => numbersGrounded(s) && !mislabelsMarginOrGrowth(s, financialData);
   const sanitizeArray = (arr) => (Array.isArray(arr) ? arr.filter(item => isItemAcceptable(item, isGrounded)) : []);
 
   if (guarded.forward_catalysts) {

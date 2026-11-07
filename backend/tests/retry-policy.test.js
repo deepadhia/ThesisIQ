@@ -21,6 +21,7 @@ import {
   isQuotaPaused,
   batchSizeAfterPause,
   backoffDelayMs,
+  audioBackoffDelayMs,
   decideLlmFailureAction
 } from '../services/retry-policy.service.js';
 import { isAnnouncementProcessed, recordClassificationFailure } from '../services/announcement.service.js';
@@ -194,5 +195,17 @@ describe('an exhausted LLM chain is reported on the error of THAT call (not via 
 
   it('errors that are not exhaustion carry no such mark', () => {
     expect(new SyntaxError('bad json').chainExhausted).toBeUndefined();
+  });
+});
+
+describe('recordings: a file the company has not published yet is waited for, not given up on after two hours', () => {
+  it('the audio schedule keeps stretching (5, 10, 20, 30, 60, 120, 180, 240, 360 minutes) and holds at 6 h', () => {
+    expect([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20].map(audioBackoffDelayMs)).toEqual([5, 10, 20, 30, 60, 120, 180, 240, 360, 360, 360].map((m) => m * MIN));
+    for (const n of [0, -1, NaN, undefined]) expect(audioBackoffDelayMs(n)).toBe(5 * MIN);
+  });
+  it('twelve attempts cover more than a day (SEBI allows a company up to 24 h to publish the recording)', () => {
+    let total = 0;
+    for (let n = 1; n <= 11; n++) total += audioBackoffDelayMs(n);   // 11 waits sit between 12 attempts
+    expect(total).toBeGreaterThan(24 * 60 * MIN);
   });
 });

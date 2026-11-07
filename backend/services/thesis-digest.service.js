@@ -10,6 +10,7 @@
  */
 
 import { summarizeDriverAssessment } from "./thesis-driver-context.service.js";
+import { formatPacingSection } from "./guidance-pacing.service.js";
 
 /** A queued item is never held longer than this, even if a sibling filing of the same stock is stuck. */
 export const DIGEST_MAX_WAIT_MS = 30 * 60 * 1000;
@@ -27,6 +28,23 @@ const KIND_ORDER = ["CONCALL", "DECK", "PRESS", "OTHER", "AUDIO"];
 
 /** Telegram legacy Markdown breaks on stray * _ ` [ in model text; strip them from dynamic strings. */
 const plain = (s) => String(s ?? "").replace(/[*_`\[\]]/g, "").replace(/\s+/g, " ").trim();
+
+const GENERIC_SUBJECT = /^(?:general\s+updates?|updates?|corporate\s+announcements?|announcements?|analysts?\s*\/\s*institutional\s+investor\s+meet\s*\/\s*con\.?\s*call\s+updates?|announcement\s+under\s+regulation\s+30.*)$/i;
+const KIND_LINK_NAME = { CONCALL: "Call transcript", AUDIO: "Call recording", DECK: "Investor presentation", PRESS: "Press release", OTHER: "Exchange filing" };
+
+/**
+ * The text of a filing's link. The exchange files most things under generic subjects ("General Updates", "Updates", the Con. Call
+ * Updates subject), which tells the reader nothing; those become what the filing IS plus its date ("Call recording, 5 Nov").
+ * A title that already says something is kept.
+ */
+export function filingLinkText(item = {}) {
+  const title = plain(item.title);
+  if (title && !GENERIC_SUBJECT.test(title)) return title;
+  const name = item.source === "audio" ? KIND_LINK_NAME.AUDIO : (KIND_LINK_NAME[item.kind] || KIND_LINK_NAME.OTHER);
+  const t = Date.parse(item.filedAt);
+  const day = Number.isNaN(t) ? "" : new Date(t).toLocaleDateString("en-GB", { day: "numeric", month: "short", timeZone: "Asia/Kolkata" });
+  return day ? `${name}, ${day}` : name;
+}
 const norm = (s) => String(s ?? "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
 
 function fmtDate(iso) {
@@ -86,11 +104,96 @@ export function overallThesisStatus(board = []) {
  * Send as soon as the stock has no other filing still waiting for the worker (so a deck + transcript that land together
  * go out together), but never hold anything longer than DIGEST_MAX_WAIT_MS.
  */
-export function shouldSendDigest({ queuedAt = [], otherPending = 0, now = Date.now() }) {
-  if (otherPending <= 0) return true;
+export function shouldSendDigest({ queuedAt = [], otherPending = 0, now = Date.now(), kinds = [], resultsAlerted = false, urgent = false }) {
   const times = queuedAt.map((q) => (typeof q === "number" ? q : Date.parse(q))).filter((t) => !Number.isNaN(t));
-  if (times.length < queuedAt.length || times.length === 0) return true; // unparseable: treat as due, never hold forever
+  const parseable = times.length === queuedAt.length && times.length > 0;
+  // One message per stock per earnings cycle: a deck / press release filed after an alerted results statement waits (up to 24 h)
+  // for the call, so deck + press release + call go out as ONE write-up instead of three. The call (a transcript or an analysed
+  // recording) ends the hold at once, and urgent news (a guidance cut, a driver at risk or broken, a delayed or missed commitment,
+  // a failed AI read) is never held.
+  if (!urgent && parseable && resultsAlerted && kinds.length > 0 && kinds.every((k) => SETTLING_KINDS.has(k))) {
+    if (now - Math.min(...times) < EARNINGS_HOLD_MS) return false;
+  }
+  if (otherPending <= 0) return true;
+  if (!parseable) return true; // unparseable: treat as due, never hold forever
   return now - Math.min(...times) >= DIGEST_MAX_WAIT_MS;
+}
+
+/** How long deck / press-release items wait for the call before going out on their own (only after an alerted results statement). */
+export const EARNINGS_HOLD_MS = 24 * 60 * 60 * 1000;
+const SETTLING_KINDS = new Set(["DECK", "PRESS", "OTHER"]);
+
+/** True when any item of a batch is news that must not wait for the call (see shouldSendDigest). */
+export function hasUrgentDigestItem(items = []) {
+  return items.some((i) => i && (
+    i.llmFailed ||
+    i.guidanceCuts?.length ||
+    i.commitmentFlags?.length ||
+    (i.assessment || []).some((a) => a && /AT_RISK|BROKEN/i.test(String(a.status || "")))
+  ));
+}
+
+/**
+ * Why a queued batch is NOT worth a message of its own, or null when it must be sent. Only a batch made purely of press
+ * releases, filed after the results were alerted, with nothing beyond what the results said (no guidance, flagged commitment,
+ * new initiative / capacity / business item, driver at risk or broken, and a successful AI read) is folded. A deck, a call, a
+ * failed read or anything with possible news is always sent: a silent miss is worse than one more message.
+ */
+export function quietBatchReason({ items = [], resultsAlerted = false } = {}) {
+  if (!resultsAlerted || !items.length) return null;
+  if (!items.every((i) => i && i.kind === "PRESS")) return null;
+  for (const i of items) {
+    if (i.llmFailed) return null;
+    if (i.guidance?.length || i.guidanceCuts?.length || i.commitmentFlags?.length || i.growthInitiatives?.length || i.operations?.length || i.businessExecution?.length || i.highlights) return null;
+    if ((i.assessment || []).some((a) => a && /AT_RISK|BROKEN/i.test(String(a.status || "")))) return null;
+  }
+  return "press release only restates the results already alerted; nothing new to report";
+}
+
+const NUMBER_TOKEN = /\d[\d,]*(?:\.\d+)?/g;
+const numbersOf = (text) => new Set([...String(text || "").matchAll(NUMBER_TOKEN)].map((m) => m[0].replace(/,/g, "")).filter((n) => n.length >= 2 || n.includes(".")));
+const CALL_LISTS = ["guidance_changes", "annual_guidance", "quarterly_guidance", "multi_year_targets", "financial_performance", "operational_highlights"];
+
+/**
+ * True when a call's WRITTEN transcript adds nothing the recording write-up (sent earlier for the same call) did not already
+ * say: every figure in its guidance / numbers / capacity bullets already appears in that write-up. The transcript is then
+ * folded instead of sent as a second message about the same call. Any new figure, or a missing write-up, means "send".
+ */
+export function repeatsEarlierCallWriteup({ items = [], earlierItems = [] } = {}) {
+  if (!items.length || !earlierItems.length) return false;
+  if (!items.every((i) => i && i.kind === "CONCALL" && i.source !== "audio" && i.highlights)) return false;
+  const earlier = earlierItems.filter((e) => e && e.highlights);
+  if (!earlier.length) return false;
+  const known = numbersOf(earlier.flatMap((e) => CALL_LISTS.flatMap((k) => asList(e.highlights[k]))).join(" "));
+  if (known.size === 0) return false;
+  let sawFigure = false;
+  for (const i of items) {
+    for (const k of CALL_LISTS) {
+      for (const bullet of asList(i.highlights[k])) {
+        for (const n of numbersOf(bullet)) {
+          sawFigure = true;
+          if (!known.has(n)) return false;
+        }
+      }
+    }
+  }
+  return sawFigure;
+}
+
+/** "💹 CMP ₹2,222 · P/E 37.5 · Mcap ₹7,164 Cr (as of 04 Nov)" from the latest market-data snapshot; "" when there is none. A snapshot older than 3 days says so. */
+export function buildPriceContextLine(md, now = Date.now()) {
+  if (!md || typeof md !== "object") return "";
+  const n = (v) => (v === null || v === undefined || v === "" || Number.isNaN(Number(v)) ? null : Number(v));
+  const price = n(md.share_price);
+  const pe = n(md.pe_ratio);
+  const mcap = n(md.market_cap);
+  if (price === null && pe === null && mcap === null) return "";
+  const fmt = (v) => v.toLocaleString("en-IN", { maximumFractionDigits: 2 });
+  const parts = [price !== null ? `CMP ₹${fmt(price)}` : null, pe !== null ? `P/E ${fmt(pe)}` : null, mcap !== null ? `Mcap ₹${fmt(mcap)} Cr` : null].filter(Boolean);
+  const asOf = Date.parse(md.market_data_as_of);
+  const when = Number.isNaN(asOf) ? "" : fmtDate(md.market_data_as_of);
+  const stale = !Number.isNaN(asOf) && now - asOf > 3 * 86400000;
+  return `💹 ${parts.join(" · ")}${when ? ` (as of ${when}${stale ? ", stale" : ""})` : ""}`;
 }
 
 const asList = (v) => (Array.isArray(v) ? v.filter((x) => typeof x === "string" && x.trim().length > 3) : []);
@@ -111,7 +214,7 @@ function compactGate(g) {
 /**
  * Compact, storable record of one processed filing (never includes _raw_text).
  */
-export function buildDigestItem({ kind, title, url = null, filedAt, queuedAt = new Date().toISOString(), verdict = {} }) {
+export function buildDigestItem({ kind, title, url = null, filedAt, queuedAt = new Date().toISOString(), verdict = {}, source = null, analysed = false }) {
   const ch = verdict.concall_highlights || {};
   const failed = Boolean(verdict._llm_failed);
   const summaryRaw = String(verdict.verdict_summary || verdict.summary || "");
@@ -142,8 +245,53 @@ export function buildDigestItem({ kind, title, url = null, filedAt, queuedAt = n
       .slice(0, 8),
     commitmentFlags: flags.slice(0, 3),
     assessment: Array.isArray(verdict.thesis_driver_assessment) ? verdict.thesis_driver_assessment : [],
+    // The call's own highlights (guidance changes, numbers, segments, capex, initiatives, risks, what to monitor), capped for storage.
+    highlights: compactHighlights(ch),
+    // A guidance CUT is a thesis-relevant fact in itself: it is carried so the signal and its reason can say so.
+    guidanceCuts: guidanceCutsOf(ch),
+    // Where the year to date stands against the full-year guide (guidance-pacing.service.js), compact, so the next filing can say if it changed.
+    pacing: Array.isArray(verdict.guidance_pacing) ? verdict.guidance_pacing.slice(0, 4) : [],
+    trackRecord: typeof verdict.guidance_track_record === "string" ? verdict.guidance_track_record : "",
+    // "audio": the call was heard (transcribed from the company's recording), not read from a filed transcript.
+    source,
+    // True when the item holds real analysis of a call: only then does the digest report the concall as analysed.
+    analysed: Boolean(analysed),
     llmFailed: failed
   };
+}
+
+/** True when any item of the digest is an analysed concall (a filed transcript, or a transcribed / analysed recording). */
+export function hasAnalysedConcallItem(items = []) {
+  return items.some((i) => i && (i.kind === "CONCALL" || (i.kind === "AUDIO" && i.analysed === true)));
+}
+
+const HIGHLIGHT_KEYS = ["guidance_changes", "quarterly_guidance", "annual_guidance", "multi_year_targets", "financial_performance", "business_performance", "operational_highlights", "growth_initiatives", "key_positives", "key_challenges", "key_monitorables"];
+
+/** The highlight lists worth storing: near-duplicates merged, each list capped. Null when the filing has no call highlights. */
+export function compactHighlights(ch = {}) {
+  if (!ch || typeof ch !== "object") return null;
+  const out = {};
+  let any = false;
+  for (const k of HIGHLIGHT_KEYS) {
+    const list = dedupeNearDuplicates(asList(ch[k])).slice(0, 8);
+    out[k] = list;
+    if (list.length) any = true;
+  }
+  out.management_tone = typeof ch.management_tone === "string" ? ch.management_tone : null;
+  out.key_takeaway = typeof ch.key_takeaway === "string" ? ch.key_takeaway : null;
+  return any ? out : null;
+}
+
+const GUIDANCE_CUT = /\b(?:cut|reduc\w*|lower\w*|trim\w*|downgrad\w*|scal\w* back|pared)\b/i;
+
+/** Guidance changes that are reductions (a "-> ... (cut)" revision), as they were stated. */
+export function guidanceCutsOf(ch = {}) {
+  // The model marks each change "(raised)", "(cut)" or "(reaffirmed)": that marker decides; wording elsewhere in the bullet
+  // ("due to increased costs") must not turn a cut into a raise.
+  const marked = (t) => (t.match(/\((?:raised|increas\w*|upgrad\w*|reaffirm\w*|cut|reduc\w*|lower\w*|trimm\w*|downgrad\w*)[^)]*\)/i) || [])[0] || "";
+  return dedupeNearDuplicates(asList(ch?.guidance_changes))
+    .filter((t) => (marked(t) ? GUIDANCE_CUT.test(marked(t)) : GUIDANCE_CUT.test(t) && !/\b(?:raised|upgraded|reaffirm\w*)\b/i.test(t)))
+    .slice(0, 3);
 }
 
 /**
@@ -154,7 +302,7 @@ export function buildDigestItem({ kind, title, url = null, filedAt, queuedAt = n
 export function isContentFreeDigestItem(item = {}) {
   if (item.llmFailed) return false;
   const hasEvidence = Array.isArray(item.assessment) && item.assessment.some((a) => a && !/NO_EVIDENCE/i.test(String(a.status || "")) && String(a.evidence || "").trim());
-  return !(item.positives?.length || item.concerns?.length || item.guidance?.length || item.facts?.length || item.commitmentFlags?.length || hasEvidence);
+  return !(item.positives?.length || item.concerns?.length || item.guidance?.length || item.facts?.length || item.commitmentFlags?.length || item.highlights || hasEvidence);
 }
 
 function signalLabel(action) {
@@ -199,6 +347,27 @@ export function dropRestatedFigures(list = [], fin = null) {
   });
 }
 
+/**
+ * A "Label: value" bullet whose label already appeared keeps only its first value ("Inventory: ₹1,245.90 Cr" then
+ * "Inventory: ₹1,440.52 Cr" under one heading is two sources disagreeing, and the reader cannot tell which is right).
+ * Bullets without a short label before a colon are left alone.
+ */
+export function dedupeByLabel(list = []) {
+  const seen = new Set();
+  const out = [];
+  for (const t of list) {
+    if (typeof t !== "string") continue;
+    const m = t.match(/^\s*•?\s*([^:]{2,40}):\s*\S/);
+    const key = m ? norm(m[1]) : null;
+    if (key) {
+      if (seen.has(key)) continue;
+      seen.add(key);
+    }
+    out.push(t);
+  }
+  return out;
+}
+
 /** Keeps the first of any group of near-identical bullets (a model that is called per document chunk repeats the same fact). */
 export function dedupeNearDuplicates(list = []) {
   const kept = [];
@@ -217,12 +386,13 @@ export function dedupeNearDuplicates(list = []) {
  * The single reason the signal is what it is, in priority order: a broken driver, an at-risk driver, a missed thesis hurdle,
  * missing verified numbers; only then the "all clear" explanations. Pure and deterministic: nothing here is model text.
  */
-function verdictReason({ signal, board, gate }) {
+function verdictReason({ signal, board, gate, cuts = [] }) {
   const names = (st) => board.filter((b) => b.status === st).map((b) => plain(b.driver));
   const broken = names("BROKEN");
   const atRisk = names("AT_RISK");
   if (broken.length) return `thesis driver broken: ${broken.join(", ")}.`;
   if (atRisk.length) return `driver at risk: ${atRisk.join(", ")}.`;
+  if (cuts.length) return `management cut guidance on the call: ${plain(cuts[0]).slice(0, 160)}.`;
   if (gate?.hurdleStatus === "FAIL") {
     return `the drivers are supported but the thesis hurdle was missed (${plain(gate.hurdleReason) || "see results"}), so there is no case to add until it recovers or is explained.`;
   }
@@ -236,7 +406,7 @@ function verdictReason({ signal, board, gate }) {
  * "HOW THIS SIGNAL WAS REACHED": results -> thesis drivers -> this filing -> concall -> verdict, so the reader can see which
  * input produced the signal instead of a bare "HOLD (6/10)".
  */
-export function buildSignalRationale({ lead = null, board = [], fin = null, periodLabel = null, concall = null, itemKinds = [] } = {}) {
+export function buildSignalRationale({ lead = null, board = [], fin = null, periodLabel = null, concall = null, itemKinds = [], cuts = [] } = {}) {
   const lines = ["🧮 *HOW THIS SIGNAL WAS REACHED*"];
   const gate = lead?.gate || null;
   const signal = lead?.action ? signalLabel(lead.action) : null;
@@ -286,8 +456,59 @@ export function buildSignalRationale({ lead = null, board = [], fin = null, peri
       : "4️⃣ *Concall:* ⏳ not analysed yet — the signal is provisional until the transcript is filed");
   }
 
-  if (signal) lines.push(`➡️ *Verdict: ${signal}* — ${verdictReason({ signal, board, gate })}`);
+  if (signal) lines.push(`➡️ *Verdict: ${signal}* — ${verdictReason({ signal, board, gate, cuts })}`);
   return lines.join("\n");
+}
+
+/** Cuts a bullet at a word boundary so no bullet runs on; "…" marks the cut. */
+function clip(text, max = 150) {
+  const t = plain(text);
+  if (t.length <= max) return t;
+  return `${t.slice(0, max).replace(/\s+\S*$/, "").replace(/[,;:\s-]+$/, "")}…`;
+}
+
+/** 🔻 cut / 🔺 raised / ➖ reaffirmed for a "metric: earlier -> now (cut|raised|reaffirmed)" guidance change. */
+function changeMarker(t) {
+  const m = (String(t).match(/\((?:raised|increas\w*|upgrad\w*|reaffirm\w*|cut|reduc\w*|lower\w*|trimm\w*|downgrad\w*)[^)]*\)/i) || [""])[0];
+  if (/cut|reduc|lower|trimm|downgrad/i.test(m)) return "🔻";
+  if (/raised|increas|upgrad/i.test(m)) return "🔺";
+  if (/reaffirm/i.test(m)) return "➖";
+  return "•";
+}
+
+/**
+ * A concall rendered the way an analyst writes it up: guidance & outlook (what CHANGED first), quarterly numbers, business &
+ * segments, capacity & capex, new initiatives, risks & concerns, analyst take (positives, what to monitor, bottom line).
+ * `fresh` filters bullets already printed elsewhere in the message. Pure; every bullet comes from grounded call text.
+ */
+export function formatConcallHighlightsBlock(item = {}, link = "", fresh = (l) => l, fin = null) {
+  const h = item.highlights;
+  if (!h) return "";
+  // A deck or press release restates the quarter's results: when the parser has verified numbers they are printed once (in the
+  // verified block), so this document's own copy of them is not shown (the source of "three different revenues" in one quarter).
+  const hideOwnNumbers = Boolean(fin) && item.kind !== "CONCALL" && item.source !== "audio";
+  const take = (list, n) => fresh(dedupeNearDuplicates(list || [])).slice(0, n);
+  const sections = [];
+  const add = (title, lines) => { if (lines.length) sections.push(`${title}\n${lines.join("\n")}`); };
+
+  const changes = take(h.guidance_changes, 4).map((t) => `${changeMarker(t)} ${clip(t)}`);
+  const rest = take([...(h.annual_guidance || []), ...(h.quarterly_guidance || []), ...(h.multi_year_targets || [])], 5 - Math.min(changes.length, 2)).map((t) => `• ${clip(t)}`);
+  add("1️⃣ *GUIDANCE & OUTLOOK*", [...changes, ...rest]);
+  if (!hideOwnNumbers) add("2️⃣ *QUARTERLY NUMBERS*", take(h.financial_performance, 6).map((t) => `• ${clip(t)}`));
+  add("3️⃣ *BUSINESS & SEGMENTS*", take(h.business_performance, 5).map((t) => `• ${clip(t)}`));
+  add("4️⃣ *CAPACITY & CAPEX*", take(h.operational_highlights, 5).map((t) => `• ${clip(t)}`));
+  add("5️⃣ *NEW INITIATIVES*", take(h.growth_initiatives, 4).map((t) => `• ${clip(t)}`));
+  add("6️⃣ *RISKS & CONCERNS*", take(h.key_challenges, 5).map((t) => `• ${clip(t)}`));
+  const takeLines = [
+    ...take(h.key_positives, 3).map((t) => `✅ ${clip(t)}`),
+    ...take(h.key_monitorables, 3).map((t) => `👀 Monitor: ${clip(t)}`)
+  ];
+  if (h.key_takeaway) takeLines.push(`🔑 ${clip(h.key_takeaway, 220)}`);
+  if (h.management_tone) takeLines.push(`🗣️ Tone: ${clip(h.management_tone, 40)}`);
+  add("7️⃣ *ANALYST TAKE*", takeLines);
+  if (!sections.length) return "";
+  const label = item.source === "audio" ? "🎧 Concall (heard from the company's recording)" : (KIND_LABEL[item.kind] || KIND_LABEL.CONCALL);
+  return `${label} — ${link || plain(item.title) || "Concall"}\n\n${sections.join("\n\n")}`;
 }
 
 /**
@@ -295,7 +516,7 @@ export function buildSignalRationale({ lead = null, board = [], fin = null, peri
  * @param {object} p
  * @param {string} p.financialsBlock pre-built "LATEST VERIFIED RESULTS" block (verified numbers only) or ""
  */
-export function formatThesisDigestMessage({ ticker, companyName, items = [], board = [], overall, financialsBlock = "", fin, periodLabel = null, concall }) {
+export function formatThesisDigestMessage({ ticker, companyName, items = [], board = [], overall, financialsBlock = "", fin, periodLabel = null, concall, priceLine = "", allocationLine = "" }) {
   // The rationale is shown when the caller supplies the evidence it is built from (`fin`, even null, and/or `concall`).
   const wantRationale = fin !== undefined || concall !== undefined;
   const lead = [...items].filter((i) => i.action).sort((x, y) => (Date.parse(y.filedAt) || 0) - (Date.parse(x.filedAt) || 0))[0];
@@ -311,7 +532,28 @@ export function formatThesisDigestMessage({ ticker, companyName, items = [], boa
     c.broken ? `${c.broken} broken` : null
   ].filter(Boolean).join(" · ");
 
-  let msg = `🏢 ${head}\n🧭 *THESIS STATUS:* ${status.emoji} ${status.label}${tally ? `\n_${tally}_` : ""}`;
+  // Bullets already stated by an earlier filing are dropped (shared by the call write-up and the per-filing detail below).
+  const seen = new Set();
+  const seenSets = [];
+  const fresh = (list) => (list || []).filter((t) => {
+    const k = norm(t);
+    if (!k || seen.has(k)) return false;
+    const ts = tokenSet(t);
+    if (seenSets.some((s) => nearDuplicate(ts, s))) return false;
+    seen.add(k);
+    seenSets.push(ts);
+    return true;
+  });
+  const ordered = [...items].sort((x, y) => KIND_ORDER.indexOf(x.kind) - KIND_ORDER.indexOf(y.kind));
+  // A call with highlights is rendered as the analyst write-up (it replaces the generic per-filing bullets) and leads the message.
+  const callBlocks = new Map();
+  for (const it of ordered) {
+    const link = it.url ? `[${filingLinkText(it)}](${it.url})` : filingLinkText(it);
+    const cb = formatConcallHighlightsBlock(it, link, fresh, fin || null);
+    if (cb) callBlocks.set(it, cb);
+  }
+
+  let msg = `🏢 ${head}${priceLine ? `\n${priceLine}` : ""}${allocationLine ? `\n${allocationLine}` : ""}\n🧭 *THESIS STATUS:* ${status.emoji} ${status.label}${tally ? `\n_${tally}_` : ""}`;
   // The signal sits next to the status (with its conviction), so "drivers intact" and "HOLD" are never left to contradict each other unexplained.
   if (wantRationale && lead) {
     const sig = signalLabel(lead.action);
@@ -319,8 +561,14 @@ export function formatThesisDigestMessage({ ticker, companyName, items = [], boa
   }
   msg += "\n──────────────────────────────";
   if (financialsBlock) msg += financialsBlock.replace(/\n$/, "");
+  // Guidance pacing from the newest item that carries it: the year to date against the full-year guide, and what the rest must deliver.
+  const pacingItems = [...items].sort((x, y) => (Date.parse(y.filedAt) || 0) - (Date.parse(x.filedAt) || 0)).map((i) => i.pacing).find((p) => Array.isArray(p) && p.length) || [];
+  if (pacingItems.length) msg += `\n${formatPacingSection(pacingItems).trim()}`;
+  const trackRecord = [...items].sort((x, y) => (Date.parse(y.filedAt) || 0) - (Date.parse(x.filedAt) || 0)).map((i) => i.trackRecord).find((t) => typeof t === "string" && t.trim());
+  if (trackRecord) msg += `\n${trackRecord.trim()}`;
+  if (callBlocks.size) msg += `\n\n${[...callBlocks.values()].join("\n\n")}`;
   if (wantRationale) {
-    msg += `\n\n${buildSignalRationale({ lead, board, fin: fin || null, periodLabel, concall: concall || null, itemKinds: items.map((i) => i.kind) })}`;
+    msg += `\n\n${buildSignalRationale({ lead, board, fin: fin || null, periodLabel, concall: concall || null, itemKinds: items.map((i) => i.kind), cuts: items.flatMap((i) => i.guidanceCuts || []) })}`;
   }
 
   if (board.length) {
@@ -338,22 +586,11 @@ export function formatThesisDigestMessage({ ticker, companyName, items = [], boa
   }
 
   // Per-filing detail: bullets already stated by an earlier filing are dropped; filings left with nothing are collapsed.
-  const seen = new Set();
-  const seenSets = [];
-  const fresh = (list) => (list || []).filter((t) => {
-    const k = norm(t);
-    if (!k || seen.has(k)) return false;
-    const ts = tokenSet(t);
-    if (seenSets.some((s) => nearDuplicate(ts, s))) return false;
-    seen.add(k);
-    seenSets.push(ts);
-    return true;
-  });
-  const ordered = [...items].sort((x, y) => KIND_ORDER.indexOf(x.kind) - KIND_ORDER.indexOf(y.kind));
   const blocks = [];
   const collapsed = [];
   for (const it of ordered) {
-    const link = it.url ? `[${plain(it.title) || "Filing"}](${it.url})` : plain(it.title) || "Filing";
+    const link = it.url ? `[${filingLinkText(it)}](${it.url})` : filingLinkText(it);
+    if (callBlocks.has(it)) continue; // already printed above as the call write-up
     const summary = it.summary && !seen.has(norm(it.summary)) ? (seen.add(norm(it.summary)), plain(it.summary)) : "";
     const pos = fresh(it.positives).map((t) => `  ✅ ${plain(t)}`);
     const con = fresh(it.concerns).map((t) => `  ⚠️ ${plain(t)}`);
@@ -387,11 +624,13 @@ export function formatThesisDigestMessage({ ticker, companyName, items = [], boa
       lines.push(...growth.map(g => `    ${g}`));
     }
     if (ops.length) {
-      lines.push(`  🏭 *Capex & Plant Commissioning:*`);
+      // Neutral headings: the model's operations / business fields hold claims, volumes or premiums for a financial-services
+      // stock just as often as plant news for an industrial one, so a heading that names capex or an order book mislabels them.
+      lines.push(`  🏭 *Operations & Capacity:*`);
       lines.push(...ops.map(o => `    ${o}`));
     }
     if (biz.length) {
-      lines.push(`  📦 *Divisional & Order Book Execution:*`);
+      lines.push(`  📦 *Business & Segment Execution:*`);
       lines.push(...biz.map(b => `    ${b}`));
     }
     if (con.length) {
