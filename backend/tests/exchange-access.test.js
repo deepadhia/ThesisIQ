@@ -10,7 +10,7 @@ vi.mock('../config/env.js', () => ({ NVIDIA_API_KEY: '', GROQ_API_KEY: '', TELEG
 vi.mock('../db/pool.js', () => ({ pool: { query: vi.fn(async () => ({ rows: [] })) } }));
 vi.mock('../services/telegram.service.js', async () => ({ ...(await vi.importActual('../services/telegram.service.js')), sendTelegramMessage: vi.fn(async () => ({ ok: true })) }));
 
-import { fetchBseAnnouncements, resetBseSession } from '../services/announcement.service.js';
+import { fetchBseAnnouncements, resetBseSession, fetchNseAnnouncements, getNseCookies, resetNseCookies } from '../services/announcement.service.js';
 import { evaluateExchangeAccess, alertExchangeAccess, shouldSkipBse } from '../services/exchange-access.service.js';
 
 // Production runs on plain Node (AbortSignal.timeout exists); the jsdom test environment's AbortSignal lacks it.
@@ -147,5 +147,93 @@ describe('BSE-only stocks going blind', () => {
     expect(shouldSkipBse({ blockedInRun: 1, hasNse: true })).toBe(false);
     expect(shouldSkipBse({ blockedInRun: 2, hasNse: true })).toBe(true);
     expect(shouldSkipBse({ blockedInRun: 9, hasNse: false })).toBe(false);
+  });
+});
+
+describe('NSE client', () => {
+  beforeEach(() => {
+    resetNseCookies();
+  });
+  afterEach(() => {
+    resetNseCookies();
+    vi.unstubAllGlobals();
+  });
+
+  it('obtains session cookies from the landing page cascade with modern browser headers', async () => {
+    stubFetch((url) => {
+      if (url.includes('corporate-filings-announcements')) {
+        return {
+          ok: true,
+          status: 200,
+          headers: {
+            getSetCookie: () => ['nsit=test_token_123; Path=/', '_abck=test_abck_456; Path=/'],
+            get: () => 'nsit=test_token_123; Path=/',
+          },
+        };
+      }
+      return blocked(403);
+    });
+
+    const cookies = await getNseCookies();
+    expect(cookies).toContain('nsit=test_token_123');
+    expect(cookies).toContain('_abck=test_abck_456');
+
+    // Headers sent to the landing page must carry Sec-Fetch and modern UA
+    const landingCall = calls.find((c) => c.url.includes('corporate-filings-announcements'));
+    expect(landingCall.opts.headers['Sec-Fetch-Dest']).toBe('document');
+    expect(landingCall.opts.headers['User-Agent']).toContain('Chrome/129');
+  });
+
+  it('passes session cookies and correct Referer to NSE API', async () => {
+    stubFetch((url) => {
+      if (url.includes('corporate-filings-announcements') && !url.includes('api/')) {
+        return {
+          ok: true,
+          status: 200,
+          headers: {
+            getSetCookie: () => ['nsit=session_cookie_789; Path=/'],
+            get: () => 'nsit=session_cookie_789; Path=/',
+          },
+        };
+      }
+      if (url.includes('api/corporate-announcements')) {
+        return json([{ symbol: 'CCL', desc: 'Updates', sort_date: '2026-11-09 10:00:00', seq_id: '1' }]);
+      }
+      return json([]);
+    });
+
+    const rows = await fetchNseAnnouncements('CCL', 7);
+    expect(rows).toHaveLength(1);
+    const apiCall = calls.find((c) => c.url.includes('api/corporate-announcements'));
+    expect(apiCall.opts.headers.Cookie).toContain('nsit=session_cookie_789');
+    expect(apiCall.opts.headers.Referer).toBe('https://www.nseindia.com/companies-listing/corporate-filings-announcements');
+  });
+
+  it('resetNseCookies clears cached cookies for subsequent requests', async () => {
+    stubFetch(() => ({
+      ok: true,
+      status: 200,
+      headers: {
+        getSetCookie: () => ['nsit=initial_cookie; Path=/'],
+        get: () => 'nsit=initial_cookie; Path=/',
+      },
+    }));
+
+    const c1 = await getNseCookies();
+    expect(c1).toContain('initial_cookie');
+
+    resetNseCookies();
+
+    stubFetch(() => ({
+      ok: true,
+      status: 200,
+      headers: {
+        getSetCookie: () => ['nsit=refreshed_cookie; Path=/'],
+        get: () => 'nsit=refreshed_cookie; Path=/',
+      },
+    }));
+
+    const c2 = await getNseCookies();
+    expect(c2).toContain('refreshed_cookie');
   });
 });

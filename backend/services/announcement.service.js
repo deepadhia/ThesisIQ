@@ -1,5 +1,6 @@
 import crypto from "crypto";
 import https from "https";
+import { execFileSync } from "child_process";
 import { pool } from "../db/pool.js";
 import { PDFParse } from "pdf-parse";
 import { sendTelegramMessage } from "./telegram.service.js";
@@ -706,39 +707,114 @@ export async function fetchBseAnnouncements(scripCode, lookbackDays = 7, { retry
   return merged;
 }
 
+const NSE_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36";
+
+const NSE_BROWSER_HEADERS = {
+  "User-Agent": NSE_USER_AGENT,
+  "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+  "Accept-Language": "en-US,en;q=0.9",
+  "Connection": "keep-alive",
+  "Upgrade-Insecure-Requests": "1",
+  "Sec-Fetch-Dest": "document",
+  "Sec-Fetch-Mode": "navigate",
+  "Sec-Fetch-Site": "none",
+  "Sec-Fetch-User": "?1",
+  "Sec-Ch-Ua": '"Chromium";v="129", "Not=A?Brand";v="24", "Google Chrome";v="129"',
+  "Sec-Ch-Ua-Mobile": "?0",
+  "Sec-Ch-Ua-Platform": '"Windows"',
+};
+
+const NSE_LANDING_URLS = [
+  "https://www.nseindia.com/companies-listing/corporate-filings-announcements",
+  "https://www.nseindia.com/companies-listing/corporate-filings-actions",
+  "https://www.nseindia.com/all-reports",
+  "https://www.nseindia.com/",
+];
+
+function extractCookiesFromResponse(res) {
+  const raw = typeof res?.headers?.getSetCookie === "function"
+    ? res.headers.getSetCookie()
+    : [res?.headers?.get ? res.headers.get("set-cookie") : ""].filter(Boolean);
+  const pairs = raw.map((c) => String(c).split(";")[0].trim()).filter(Boolean);
+  return pairs.join("; ");
+}
+
+function fetchCookiesViaCurl(url) {
+  try {
+    const args = [
+      "-s", "-c", "-",
+      "-A", NSE_USER_AGENT,
+      "-H", "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      "-H", "Accept-Language: en-US,en;q=0.9",
+      "-H", "Sec-Fetch-Dest: document",
+      "-H", "Sec-Fetch-Mode: navigate",
+      "-H", "Sec-Fetch-Site: none",
+      url,
+    ];
+    const output = execFileSync("curl", args, { encoding: "utf8", timeout: 15000 });
+    const lines = output.split("\n");
+    const pairs = [];
+    for (const line of lines) {
+      if (!line || line.startsWith("#")) continue;
+      const parts = line.split("\t");
+      if (parts.length >= 7) {
+        pairs.push(`${parts[5]}=${parts[6].trim()}`);
+      }
+    }
+    return pairs.join("; ");
+  } catch {
+    return "";
+  }
+}
+
 /**
- * Fetches NSE session cookies (best-effort — cloud IPs may get 403 on homepage).
- * Returns empty string on failure so the API call is still attempted without cookies.
+ * Fetches NSE session cookies with modern browser headers, multi-landing page cascade,
+ * and curl fallback for datacenter/cloud IPs (e.g. Oracle Cloud VM) where bare homepage returns 403.
  */
 let nseCookies = "";
 let nseCookieFailedAt = 0;
 const NSE_COOKIE_RETRY_MS = 10 * 60 * 1000;
-async function getNseCookies() {
+
+export function resetNseCookies() {
+  nseCookies = "";
+  nseCookieFailedAt = 0;
+}
+
+export async function getNseCookies() {
   if (nseCookies) return nseCookies;
-  // a refused homepage is not asked again for every stock of the same run
+  // a refused cascade is not asked again for every stock of the same run
   if (nseCookieFailedAt && Date.now() - nseCookieFailedAt < NSE_COOKIE_RETRY_MS) return "";
-  try {
-    const res = await fetch("https://www.nseindia.com/", {
-      headers: {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
-      },
-    });
-    if (res.ok || res.status === 200) {
-      const setCookie = res.headers.get("set-cookie");
-      if (setCookie) {
-        nseCookies = setCookie.split(";")[0];
+
+  // 1. Try modern browser fetch across NSE landing pages
+  for (const pageUrl of NSE_LANDING_URLS) {
+    try {
+      const res = await fetch(pageUrl, { headers: NSE_BROWSER_HEADERS });
+      if (res.ok || res.status === 200) {
+        const cookies = extractCookiesFromResponse(res);
+        if (cookies) {
+          nseCookies = cookies;
+          nseCookieFailedAt = 0;
+          return nseCookies;
+        }
       }
-    } else {
-      nseCookieFailedAt = Date.now();
-      console.warn(`[NSE] Homepage returned ${res.status} — proceeding without cookies (cloud IP likely).`);
+    } catch {
+      // ignore and try next page or curl fallback
     }
-  } catch (err) {
-    nseCookieFailedAt = Date.now();
-    console.warn(`[NSE] Cookie fetch failed: ${err.message} — proceeding without cookies.`);
   }
-  return nseCookies;
+
+  // 2. Fallback to curl with cookie-jar (bypasses TLS fingerprint blocks on datacenter/cloud IPs)
+  for (const pageUrl of NSE_LANDING_URLS) {
+    const curlCookies = fetchCookiesViaCurl(pageUrl);
+    if (curlCookies) {
+      nseCookies = curlCookies;
+      nseCookieFailedAt = 0;
+      return nseCookies;
+    }
+  }
+
+  nseCookieFailedAt = Date.now();
+  console.warn("[NSE] Could not obtain session cookies — proceeding without cookies (cloud IP likely).");
+  return "";
 }
 
 /** NSE symbols that were renamed: a filing may carry either one. */
@@ -785,17 +861,53 @@ export async function fetchNseAnnouncements(symbol, lookbackDaysNum = 30) {
   const toDateStr = formatDate(toDateObj);
 
   const getRows = async (url, refererSymbol) => {
-    const res = await fetch(url, {
-      headers: {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "*/*",
-        "Referer": `https://www.nseindia.com/get-quotes/equity?symbol=${refererSymbol}`,
-        "Cookie": cookies
-      },
-    });
-    if (!res.ok) return [];
-    const body = await res.json();
-    return Array.isArray(body) ? body : [];
+    const referer = `https://www.nseindia.com/companies-listing/corporate-filings-announcements`;
+    try {
+      const res = await fetch(url, {
+        headers: {
+          "User-Agent": NSE_USER_AGENT,
+          "Accept": "application/json, text/plain, */*",
+          "Referer": referer,
+          "Cookie": cookies,
+          "Sec-Fetch-Dest": "empty",
+          "Sec-Fetch-Mode": "cors",
+          "Sec-Fetch-Site": "same-origin",
+        },
+      });
+      if (res.status === 401 || res.status === 403) {
+        resetNseCookies();
+      }
+      if (res.ok) {
+        const body = await res.json();
+        return Array.isArray(body) ? body : [];
+      }
+    } catch {
+      // fetch failed (network or timeout)
+    }
+
+    // Resilient fallback: curl with cookies and referer (for datacenter IPs where undici TLS is blocked)
+    if (cookies) {
+      try {
+        const args = [
+          "-s",
+          "-A", NSE_USER_AGENT,
+          "-H", "Accept: application/json, text/plain, */*",
+          "-H", `Referer: ${referer}`,
+          "-H", `Cookie: ${cookies}`,
+          "-H", "Sec-Fetch-Dest: empty",
+          "-H", "Sec-Fetch-Mode: cors",
+          "-H", "Sec-Fetch-Site: same-origin",
+          url,
+        ];
+        const out = execFileSync("curl", args, { encoding: "utf8", timeout: 15000 });
+        const body = JSON.parse(out);
+        return Array.isArray(body) ? body : [];
+      } catch {
+        // curl also failed or output was not json
+      }
+    }
+
+    return [];
   };
 
   try {
