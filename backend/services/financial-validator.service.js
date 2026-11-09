@@ -278,13 +278,24 @@ function periodEndFromHeading(lines, anchorIdx) {
     // "SEPTEMBER 30 , 20 26": the text layer spaces the comma and splits the year
     const text = `${lines[i]} ${lines[i + 1] && i + 1 < anchorIdx ? lines[i + 1] : ""}`
       .replace(/(\d)\s+,/g, "$1,").replace(/\b(20)\s(\d{2})\b/g, "$1$2");
-    const m = text.match(/(?:quarter|three\s+months?)[^.]{0,60}?\bended\s+(.{6,30})/i);
+    const m = text.match(/(?:quarter|three\s+months?|half\s+year)[^.]{0,80}?\bended\s+(.{6,30})/i);
     if (!m) continue;
     const d = parseDatesFromText(m[1])[0];
     const isMonthEnd = d && new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 0)).getUTCDate() === d.getUTCDate();
     if (isMonthEnd) found.push(d);
   }
-  return found.length ? found.reduce((a, b) => (b.getTime() > a.getTime() ? b : a)) : null;
+  if (found.length) return found.reduce((a, b) => (b.getTime() > a.getTime() ? b : a));
+  // Some PDF text layers place the statement title AFTER the table rows (the visual page has it above). Accept only a
+  // nearby financial-results title before the next revenue table, never an auditor paragraph or a later quarter's notes.
+  for (let i = anchorIdx + 1; i < Math.min(lines.length, anchorIdx + 75); i++) {
+    if (/revenue\s+from\s+operations/i.test(lines[i])) break;
+    if (!/statement\s+of.*financial\s+results/i.test(lines[i])) continue;
+    const title = `${lines[i]} ${lines[i + 1] || ''}`;
+    const m = title.match(/(?:quarter|half\s+year)[^.]{0,80}?\bended\s+(.{6,30})/i);
+    const d = m ? parseDatesFromText(m[1])[0] : null;
+    if (d && new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 0)).getUTCDate() === d.getUTCDate()) return d;
+  }
+  return null;
 }
 
 /**
@@ -404,12 +415,35 @@ const HEADING_EXCLUDE = /report|auditor|review|notice|outcome|submission|approve
 function headingScope(line) {
   if (!line || line.length > 190) return null;
   if (HEADING_EXCLUDE.test(line)) return null;
-  const m = line.match(/\b(consolidated|coniol\s*id:?o?\s*ted|standalone|stand-alone)\b/i);
+
+  // Letters-only check: absorbs OCR fragmented spacing ("C ONSOLIDATED STAT EM ENT...", "FINANC IAL")
+  const letters = line.toLowerCase().replace(/[^a-z]/g, "");
+  if (letters.includes("consolidated") || letters.includes("coniol")) {
+    const isHeading =
+      letters.includes("financialresult") ||
+      letters.includes("statementof") ||
+      letters.includes("profitandloss") ||
+      letters.includes("resultsforthequarter") ||
+      letters.includes("segment");
+    if (isHeading) return "CONSOLIDATED";
+  }
+  if (letters.includes("standalone")) {
+    const isHeading =
+      letters.includes("financialresult") ||
+      letters.includes("statementof") ||
+      letters.includes("profitandloss") ||
+      letters.includes("resultsforthequarter") ||
+      letters.includes("segment");
+    if (isHeading) return "STANDALONE";
+  }
+
+  const m = line.match(/\b(consolidated|c\s+onsolidated|coniol\s*id:?o?\s*ted|standalone|stand-alone)\b/i);
   if (!m) return null;
   const looksLikeHeading =
-    /(?:^|\b)(?:statement\s+of\s+)?(?:un-?audited\s+|audited\s+)?(?:consolidated|coniol\s*id:?o?\s*ted|standalone|stand-alone)\b[^.]{0,80}?(?:financial\s+results?|profit\s+and\s+loss|results|revenue|segment)/i.test(line) ||
-    /statement\s+of\s+(?:un-?audited\s+|audited\s+)?(?:consolidated|coniol\s*id:?o?\s*ted|standalone|stand-alone)/i.test(line) ||
-    /(?:financial\s+results?|profit\s+and\s+loss)[^.]{0,40}\((?:consolidated|standalone)\)/i.test(line);
+    /(?:^|\b)(?:statement\s+of\s+)?(?:un-?audited\s+|audited\s+)?(?:consolidated|c\s+onsolidated|coniol\s*id:?o?\s*ted|standalone|stand-alone)\b[^.]{0,80}?(?:financial\s+results?|profit\s+and\s+loss|results|revenue|segment)/i.test(line) ||
+    /statement\s+of\s+(?:un-?audited\s+|audited\s+)?(?:consolidated|c\s+onsolidated|coniol\s*id:?o?\s*ted|standalone|stand-alone)/i.test(line) ||
+    /(?:financial\s+results?|profit\s+and\s+loss)[^.]{0,40}\((?:consolidated|c\s+onsolidated|standalone)\)/i.test(line) ||
+    /(?:financial\s+results?|profit\s+and\s+loss)\s*[-–:]\s*(?:consolidated|c\s+onsolidated|standalone)\b/i.test(line);
   if (!looksLikeHeading) return null;
   return /consolidated|coniol/i.test(m[1]) ? "CONSOLIDATED" : "STANDALONE";
 }
@@ -441,15 +475,8 @@ function locateBlocks(lines, declaredUnit = null) {
       anchors.push(i);
     }
   }
-  // Fallback anchor on "Total income" when no revenue rows exist (financials with only total income)
-  if (anchors.length === 0) {
-    for (let i = 0; i < lines.length; i++) {
-      if (TOTAL_INCOME_ROW.test(lines[i])) {
-        const row = parseRow(lines[i]);
-        if (row && row.values.filter(v => v !== null).length >= 3) anchors.push(i);
-      }
-    }
-  }
+  // Total income includes other income and is not revenue from operations. If OCR damaged the revenue label,
+  // abstain instead of silently promoting a different metric (observed in the local SJS OCR benchmark).
 
   const blocks = [];
   for (let a = 0; a < anchors.length; a++) {
@@ -797,7 +824,8 @@ function buildResult(primary, standalone, lines, { periodEndHint = null } = {}) 
     // Total income can neither be below revenue nor several times it: a total-income cell outside that band is itself damaged
     // text ("total income 6", a stray note number), so it proves nothing about the revenue cell. Unknown, not a failure.
     if (t < r * 0.999 || t > r * 1.5) return null;
-    return Math.abs(r + o - t) <= Math.max(0.015 * t, 0.02);
+    // Printed rows round at cell precision. A 1.5% allowance let ordinary digit errors pass as verified.
+    return Math.abs(r + o - t) <= Math.max(0.0001 * t, 0.03);
   };
   if (incomeIdentity(0) === false) {
     console.warn(`[FINANCIAL VALIDATOR] Rejected block: revenue ${primary.revenue[0]} + other income ${primary.otherIncome[0]} != total income ${primary.totalIncome[0]}. Treating the table as mis-read.`);

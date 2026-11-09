@@ -2,20 +2,15 @@
  * Portfolio Market Valuation Service
  * 
  * Mandate:
- * Programmatic ingestion and mathematical verification of live market valuation metrics.
- * Completely eliminates manual P/E guessing, static hardcoding, and forward vs. trailing conflation.
- * 
- * Core Invariants:
- * 1. Programmatic Math: MCap = SharePrice * SharesOutstanding (within 0.1% tolerance).
- * 2. Trailing P/E Integrity: PE = SharePrice / TTM_EPS (within 0.5% tolerance).
- * 3. Freshness & Lineage: Ingests into `market_data_snapshots` with SHA-256 source hash and provenance.
- * 4. Recent IPO Handling: Uses available post-listing quarters with explicit SEMI_ANNUALISED_TTM provenance.
- * 5. Fail-Closed: Blocks downstream valuation if mathematical invariants fail.
+ * Ingests provider-reported ratios with source date and lineage. Derived shares supply only
+ * a consistency identity; independently verified TTM statements are not available on this path.
+ * Unknown earnings, debt and enterprise value remain null. A schema that forbids unknowns blocks sync.
  */
 
 import crypto from 'crypto';
-import https from 'https';
 import { ingestMarketDataSnapshot } from './market-data-layer.service.js';
+import { assessSnapshotFreshness } from './valuation-inputs.service.js';
+let screenerCooldownUntil = 0;
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -26,10 +21,9 @@ function sleep(ms) {
  */
 async function fetchScreenerHtml(slugOrScrip) {
   if (!slugOrScrip) return null;
+  if (Date.now() < screenerCooldownUntil) throw new Error('Screener provider cooldown after HTTP 429');
 
   const slugsToTry = [slugOrScrip];
-  if (slugOrScrip === 'HBLENGINE') slugsToTry.push('HBLPOWER');
-  if (slugOrScrip === 'ASTRAMICRO') slugsToTry.push('ASTRAMICRO');
 
   for (const slug of slugsToTry) {
     const urls = [
@@ -50,13 +44,24 @@ async function fetchScreenerHtml(slugOrScrip) {
           signal: AbortSignal.timeout(12000)
         });
 
+        if (res.status === 429) {
+          const hint = res.headers?.get('retry-after');
+          const seconds = Number(hint);
+          const delay = hint && Number.isFinite(seconds) ? seconds * 1000 : Date.parse(hint) - Date.now();
+          screenerCooldownUntil = Date.now() + Math.max(60000, Number.isFinite(delay) ? delay : 60000);
+          const error = new Error('Screener HTTP 429; alternate pages and stocks deferred');
+          error.code = 'MARKET_RATE_LIMITED';
+          throw error;
+        }
         if (res.ok) {
           const text = await res.text();
           if (text.includes('top-ratios')) {
-            return text;
+            return { html: text, sourceUrl: url, scope: /data-consolidated="true"/.test(text) ? 'CONSOLIDATED' : 'STANDALONE' };
           }
         }
-      } catch (_) {}
+      } catch (err) {
+        if (err.code === 'MARKET_RATE_LIMITED') throw err;
+      }
     }
   }
 
@@ -66,7 +71,7 @@ async function fetchScreenerHtml(slugOrScrip) {
 /**
  * Parses Screener HTML and extracts verified consolidated metrics.
  */
-export function parseScreenerValuationData(html, fallbackTicker = 'UNKNOWN') {
+export function parseScreenerValuationData(html, fallbackTicker = 'UNKNOWN', { now = new Date() } = {}) {
   if (!html) return null;
 
   const ratios = {};
@@ -87,52 +92,26 @@ export function parseScreenerValuationData(html, fallbackTicker = 'UNKNOWN') {
   const price = ratios['Current Price'];
   const pe = ratios['Stock P/E'];
   const mcap = ratios['Market Cap']; // In ₹ Crores
-  const roce = ratios['ROCE'] || ratios['ROCE %'] || null;
-  const roe = ratios['ROE'] || ratios['ROE %'] || null;
+  const roce = ratios['ROCE'] ?? ratios['ROCE %'] ?? null;
+  const roe = ratios['ROE'] ?? ratios['ROE %'] ?? null;
 
-  if (!price || !mcap) {
+  if (!Number.isFinite(price) || !Number.isFinite(mcap) || price <= 0 || mcap <= 0) {
     return null;
   }
 
   // Programmatic Shares Outstanding (in Crores) = MCap (Cr) / Price (₹)
-  const sharesOutstandingCr = parseFloat((mcap / price).toFixed(4));
+  const sharesOutstandingCr = mcap / price;
 
-  // Consolidated TTM PAT and TTM EPS derived from canonical Stock P/E and Market Cap
-  let ttmEps = null;
-  let ttmPat = null;
-
-  if (pe && pe > 0) {
-    ttmEps = parseFloat((price / pe).toFixed(2));
-    ttmPat = parseFloat((mcap / pe).toFixed(1));
-  } else {
-    // If loss-making or PE missing, extract from Meta Description
-    const metaMatch = html.match(/<meta name="description" content="([^"]+)"/);
-    if (metaMatch) {
-      const patMatch = metaMatch[1].match(/Profit:\s*([\d,]+)\s*Cr/i);
-      if (patMatch) ttmPat = parseFloat(patMatch[1].replace(/,/g, ''));
-    }
-    if (ttmPat && sharesOutstandingCr > 0) {
-      ttmEps = parseFloat((ttmPat / sharesOutstandingCr).toFixed(2));
-    }
-  }
-
-  // Extract TTM Revenue from Meta Description or estimate
-  let ttmRevenue = null;
-  const metaMatch = html.match(/<meta name="description" content="([^"]+)"/);
-  if (metaMatch) {
-    const revMatch = metaMatch[1].match(/Revenue:\s*([\d,]+)\s*Cr/i);
-    if (revMatch) ttmRevenue = parseFloat(revMatch[1].replace(/,/g, ''));
-  }
-  if (!ttmRevenue) {
-    ttmRevenue = ttmPat ? parseFloat((ttmPat / 0.12).toFixed(1)) : parseFloat((mcap * 0.4).toFixed(1));
-  }
-
-  // Programmatic EBITDA & EBIT
-  const ttmEbitda = parseFloat((ttmRevenue * 0.18).toFixed(1));
-  const ttmEbit = parseFloat((ttmEbitda * 0.85).toFixed(1));
-  const netDebt = 0.0;
-  const programmaticEV = parseFloat((mcap + netDebt).toFixed(1));
-  const evEbitdaRatio = parseFloat((programmaticEV / Math.max(1.0, ttmEbitda)).toFixed(1));
+  // Top ratios are provider observations, not independently verified statements.
+  // Neither reverse-engineering a reported P/E nor assuming a profit margin supplies TTM facts.
+  const ttmEps = null;
+  const ttmPat = null;
+  const ttmRevenue = null;
+  const ttmEbitda = null;
+  const ttmEbit = null;
+  const netDebt = null;
+  const programmaticEV = null;
+  const evEbitdaRatio = null;
 
   // Verify Programmatic Invariants
   const calculatedCap = price * sharesOutstandingCr;
@@ -150,6 +129,20 @@ export function parseScreenerValuationData(html, fallbackTicker = 'UNKNOWN') {
 
   const isPeValid = pe ? peVariancePct <= 2.0 : true;
 
+  // A retrieval timestamp cannot make an old quote fresh. Screener omits the year and may show
+  // either a dated closing quote or a dated intraday quote beside the company name.
+  const text = html.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ');
+  const dateMatch = text.match(/\b(\d{1,2})\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)(?:\s+(\d{4}))?\s*-\s*close price\b/i)
+    || text.slice(0, 3500).match(/\b(\d{1,2})\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)(?:\s+(\d{4}))?\s+\d{1,2}:\d{2}\s*[ap]\.?(?:m)\.?\s+Export to Excel\b/i);
+  let quoteAsOfDate = null;
+  if (dateMatch) {
+    const month = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'].indexOf(dateMatch[2].toLowerCase());
+    let year = dateMatch[3] ? Number(dateMatch[3]) : now.getUTCFullYear();
+    let d = new Date(Date.UTC(year, month, Number(dateMatch[1])));
+    if (!dateMatch[3] && d > now) d = new Date(Date.UTC(--year, month, Number(dateMatch[1])));
+    if (d.getUTCMonth() === month && d.getUTCDate() === Number(dateMatch[1])) quoteAsOfDate = d.toISOString().slice(0, 10);
+  }
+
   return {
     ticker: fallbackTicker,
     sharePrice: price,
@@ -158,9 +151,9 @@ export function parseScreenerValuationData(html, fallbackTicker = 'UNKNOWN') {
     ttmRevenue,
     ttmEbitda,
     ttmEbit,
-    ttmPat: ttmPat || parseFloat((mcap / (pe || 25)).toFixed(1)),
-    ttmEps: ttmEps || parseFloat((price / (pe || 25)).toFixed(2)),
-    peRatio: pe || calculatedPE,
+    ttmPat,
+    ttmEps,
+    peRatio: Number.isFinite(pe) && pe > 0 ? pe : null,
     evEbitdaRatio,
     netDebt,
     enterpriseValue: programmaticEV,
@@ -170,6 +163,9 @@ export function parseScreenerValuationData(html, fallbackTicker = 'UNKNOWN') {
     capVariancePct: parseFloat(capVariancePct.toFixed(3)),
     peVariancePct: parseFloat(peVariancePct.toFixed(3)),
     sourceHash: crypto.createHash('sha256').update(html).digest('hex'),
+    // Derived shares make the cap identity a consistency check, not independent verification.
+    verificationBasis: 'PROVIDER_REPORTED_RATIOS_DERIVED_SHARES',
+    quoteAsOfDate,
     sourceDocumentId: `SCREENER_LIVE_${fallbackTicker}_${new Date().toISOString().slice(0, 10)}`
   };
 }
@@ -178,8 +174,8 @@ export function parseScreenerValuationData(html, fallbackTicker = 'UNKNOWN') {
  * Synchronizes and persists market valuation snapshot for a single stock.
  */
 export async function syncStockMarketValuation(stock, pool, options = {}) {
-  const { id: stockId, ticker, company_name, screener_slug, bse_scrip_code } = stock;
-  const period = options.period || 'Q1_FY27';
+  const { ticker, screener_slug, bse_scrip_code } = stock;
+  const period = options.period || 'TTM';
 
   // 1. Try identifier hierarchy: screener_slug -> bse_scrip_code -> ticker
   let html = null;
@@ -203,26 +199,26 @@ export async function syncStockMarketValuation(stock, pool, options = {}) {
   }
 
   // 2. Parse & Verify
-  const parsed = parseScreenerValuationData(html, ticker);
-  if (!parsed || !parsed.isProgrammaticallyValid) {
+  const parsed = parseScreenerValuationData(html.html, ticker);
+  if (!parsed || !parsed.isProgrammaticallyValid || !assessSnapshotFreshness(parsed.quoteAsOfDate).fresh) {
     return {
       success: false,
       ticker,
       status: 'VALUATION_BLOCKED',
-      error: `Programmatic calculation mismatch for ${ticker} (Cap variance: ${parsed?.capVariancePct}%, PE variance: ${parsed?.peVariancePct}%)`
+      error: `Missing/stale source quote date or inconsistent market ratios for ${ticker}`
     };
   }
 
   // 3. Construct Ingestion Payload
-  const asOfDate = new Date();
+  const asOfDate = parsed.quoteAsOfDate;
   const snapshotPayload = {
     ticker,
     period,
     asOfDate,
-    retrievedAt: asOfDate,
-    marketDataSource: 'SCREENER_CONSOLIDATED_LIVE',
-    marketDataVersion: 1,
-    sourceDocumentId: parsed.sourceDocumentId,
+    retrievedAt: new Date(),
+    marketDataSource: `SCREENER_${html.scope}_REPORTED_RATIOS`,
+    marketDataVersion: 2,
+    sourceDocumentId: html.sourceUrl,
     sourceHash: parsed.sourceHash,
     freshnessStatus: 'FRESH',
     sharePrice: parsed.sharePrice,
@@ -242,23 +238,8 @@ export async function syncStockMarketValuation(stock, pool, options = {}) {
 
   // 4. Ingest into database table `market_data_snapshots`
   const ingestResult = await ingestMarketDataSnapshot(snapshotPayload, pool);
-
-  // 5. Update latest price into `prices` table for point-in-time continuity
-  try {
-    await pool.query(
-      `INSERT INTO prices (stock_id, price, date) 
-       VALUES ($1, $2, $3)
-       ON CONFLICT (stock_id, date) DO UPDATE SET price = EXCLUDED.price;`,
-      [stockId, parsed.sharePrice, asOfDate]
-    );
-  } catch {
-    try {
-      await pool.query(
-        `INSERT INTO prices (stock_id, price, date) VALUES ($1, $2, $3);`,
-        [stockId, parsed.sharePrice, asOfDate]
-      );
-    } catch (_) {}
-  }
+  if (!ingestResult.success) return { success: false, ticker, status: 'VALUATION_BLOCKED', error: ingestResult.errorMessage };
+  // The separate price provider owns daily OHLC. Rounded website ratios cannot overwrite its closing history.
 
   return {
     success: true,
@@ -280,6 +261,12 @@ export async function syncStockMarketValuation(stock, pool, options = {}) {
  * Synchronizes all portfolio stocks in database with polite rate-limiting.
  */
 export async function syncAllPortfolioValuations(pool, options = {}) {
+  const optionalFacts = ['enterprise_value', 'net_debt', 'ttm_revenue', 'ttm_ebitda', 'ttm_ebit', 'ttm_pat', 'ttm_eps', 'pe_ratio', 'ev_ebitda_ratio'];
+  const schema = await pool.query(`SELECT column_name FROM information_schema.columns
+    WHERE table_schema = 'public' AND table_name = 'market_data_snapshots'
+      AND column_name = ANY($1::text[]) AND is_nullable = 'NO'`, [optionalFacts]);
+  if (schema.rows.length) return [{ success: false, ticker: 'SCHEMA', status: 'SCHEMA_MIGRATION_REQUIRED',
+    error: `Unknown facts require nullable columns: ${schema.rows.map(r => r.column_name).join(', ')}. Apply 20261108010000_allow_unknown_market_facts.sql before syncing.` }];
   const sRes = await pool.query(`
     SELECT id, ticker, company_name, screener_slug, bse_scrip_code 
     FROM stocks 
@@ -288,8 +275,12 @@ export async function syncAllPortfolioValuations(pool, options = {}) {
 
   const results = [];
   for (const stock of sRes.rows) {
-    const res = await syncStockMarketValuation(stock, pool, options);
-    results.push(res);
+    try {
+      results.push(await syncStockMarketValuation(stock, pool, options));
+    } catch (err) {
+      console.warn(`[MARKET SYNC] ${stock.ticker}: ${err.message}`);
+      results.push({ success: false, ticker: stock.ticker, status: 'VALUATION_BLOCKED', error: err.message });
+    }
     // 600ms delay between fetches to respect exchange/Screener servers
     await sleep(600);
   }

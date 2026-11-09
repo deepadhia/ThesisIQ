@@ -41,7 +41,7 @@ function rotateOldLogs() {
 /**
  * Writes a timestamped log entry to both console stdout and daily log file (logs/scanner-YYYY-MM-DD.log).
  */
-export function writeLog(tag, message) {
+export function writeLog(tag, message, { persist = true } = {}) {
   const now = new Date();
   const dateStr = now.toISOString().split('T')[0]; // YYYY-MM-DD
   const timeStr = now.toISOString().replace('T', ' ').substring(0, 19);
@@ -50,6 +50,7 @@ export function writeLog(tag, message) {
 
   // 1. Log to console stdout
   console.log(`[${timeStr}] [${tag}] ${message}`);
+  if (!persist) return;
 
   // 2. Write to daily log file
   try {

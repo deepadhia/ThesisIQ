@@ -2,6 +2,7 @@
  * Phase 4A: Market Data Foundation Service & Gate 1 Freshness Layer
  * Enforces 100% Programmatic Math, Strict Provenance Lineage, and Gate 1 Freshness Control.
  */
+import { assessSnapshotFreshness } from './valuation-inputs.service.js';
 
 export function validateMarketDataSnapshot(snapshot) {
   if (!snapshot || typeof snapshot !== 'object') {
@@ -40,7 +41,7 @@ export function validateMarketDataSnapshot(snapshot) {
   const shares = parseFloat(sharesOutstanding);
   const cap = parseFloat(marketCap);
 
-  if (isNaN(price) || isNaN(shares) || isNaN(cap) || price <= 0 || shares <= 0) {
+  if (![price, shares, cap].every(Number.isFinite) || price <= 0 || shares <= 0 || cap <= 0) {
     return {
       isValid: false,
       status: "VALUATION_BLOCKED",
@@ -62,6 +63,9 @@ export function validateMarketDataSnapshot(snapshot) {
   }
 
   // 3. Gate 1 Freshness Enforcement
+  if (!assessSnapshotFreshness(asOfDate).fresh || !Number.isFinite(new Date(retrievedAt).getTime()) || new Date(retrievedAt).getTime() > Date.now() + 300000) {
+    return { isValid: false, status: 'VALUATION_BLOCKED', errorCode: 'MARKET_DATA_EXPIRED', errorMessage: 'Market quote date is stale, missing or in the future; freshness labels cannot override its date.' };
+  }
   if (freshnessStatus === "EXPIRED") {
     return {
       isValid: false,
@@ -116,12 +120,13 @@ export async function ingestMarketDataSnapshot(snapshot, pool) {
   const {
     ticker, period, retrievedAt, marketDataSource, marketDataVersion = 1,
     sourceDocumentId, sourceHash, freshnessStatus, sharePrice, sharesOutstanding,
-    marketCap, netDebt = 0, dilutionWarrantsImpactPct = 0.0,
+    marketCap, netDebt = null, dilutionWarrantsImpactPct = null,
     ttmRevenue, ttmEbitda, ttmEbit, ttmPat, ttmEps, ttmFcf = null, rocePct = null,
     peRatio, evEbitdaRatio, peHistoricalPercentile = null
   } = snapshot;
 
-  const programmaticEV = parseFloat(marketCap) + parseFloat(netDebt);
+  const programmaticEV = netDebt !== null && netDebt !== '' && Number.isFinite(Number(netDebt))
+    ? Number(marketCap) + Number(netDebt) : null;
 
   const query = `
     INSERT INTO market_data_snapshots (
@@ -139,8 +144,23 @@ export async function ingestMarketDataSnapshot(snapshot, pool) {
       shares_outstanding = EXCLUDED.shares_outstanding,
       market_cap = EXCLUDED.market_cap,
       enterprise_value = EXCLUDED.enterprise_value,
+      net_debt = EXCLUDED.net_debt,
+      dilution_warrants_impact_pct = EXCLUDED.dilution_warrants_impact_pct,
+      ttm_revenue = EXCLUDED.ttm_revenue,
+      ttm_ebitda = EXCLUDED.ttm_ebitda,
+      ttm_ebit = EXCLUDED.ttm_ebit,
+      ttm_pat = EXCLUDED.ttm_pat,
+      ttm_eps = EXCLUDED.ttm_eps,
+      ttm_fcf = EXCLUDED.ttm_fcf,
+      roce_pct = EXCLUDED.roce_pct,
+      ev_ebitda_ratio = EXCLUDED.ev_ebitda_ratio,
+      pe_historical_percentile = EXCLUDED.pe_historical_percentile,
+      market_data_source = EXCLUDED.market_data_source,
+      market_data_version = EXCLUDED.market_data_version,
+      source_document_id = EXCLUDED.source_document_id,
+      source_hash = EXCLUDED.source_hash,
       pe_ratio = EXCLUDED.pe_ratio,
-      market_data_retrieved_at = NOW()
+      market_data_retrieved_at = EXCLUDED.market_data_retrieved_at
     RETURNING *;
   `;
 
@@ -189,7 +209,7 @@ export async function getMarketDataSnapshot(ticker, period, pool, options = {}) 
 
   const record = rows[0];
 
-  if (record.freshness_status === "EXPIRED") {
+  if (record.freshness_status === "EXPIRED" || !assessSnapshotFreshness(record.market_data_as_of).fresh) {
     return {
       status: "VALUATION_BLOCKED",
       errorCode: "MARKET_DATA_EXPIRED",

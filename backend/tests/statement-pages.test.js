@@ -45,6 +45,11 @@ describe("findStatementPages on the real 143-page filing", () => {
   it("finds nothing in a document without a statement", () => {
     expect(findStatementPages(Array.from({ length: 20 }, (_, i) => filler(i + 1)))).toEqual([]);
   });
+  it('keeps a statement table with notes underneath, but rejects a notes-only page', () => {
+    const table = 'Statement of Unaudited Consolidated Financial Results\nParticulars Revenue from operations Total income Profit before tax';
+    expect(findStatementPages([{ num: 1, text: `${table}\nNotes: The above results were reviewed by the audit committee.` }])).toEqual([1]);
+    expect(findStatementPages([{ num: 2, text: `Notes: The above results were reviewed. ${table}` }])).toEqual([]);
+  });
 });
 
 describe("looksGarbled", () => {

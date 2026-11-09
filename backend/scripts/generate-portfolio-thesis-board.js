@@ -20,6 +20,7 @@ import { pool } from '../db/pool.js';
 import { classifyThesisStateV2, reconcileSnapshotThesisState, THESIS_STATES } from '../services/thesis-state-engine.service.js';
 import { getThesisContract } from '../services/thesis-driver-context.service.js';
 import { compareFiscalQuarters } from '../utils/fiscal-quarter.js';
+import { loadEarningsReactionBoard, reactionBoardMarkdown } from '../services/earnings-reaction-board.service.js';
 
 const OUTPUT_DIR = path.resolve('reports/thesis_board');
 
@@ -99,7 +100,18 @@ export async function generatePortfolioThesisBoard() {
     }
   }
 
-  // 3. Build unified 18-stock board rows
+  // Refreshed on every nightly board so D3/D5 mature without replaying a filing or resending its alert.
+  let reactionReport = null;
+  try {
+    reactionReport = await loadEarningsReactionBoard(pool);
+    fs.writeFileSync(path.join(OUTPUT_DIR, 'earnings-reaction.json'), JSON.stringify(reactionReport, null, 2));
+    fs.writeFileSync(path.join(OUTPUT_DIR, 'earnings-reaction.md'), reactionBoardMarkdown(reactionReport));
+  } catch (err) {
+    console.warn(`[THESIS BOARD] Market reaction unavailable: ${err.message}`);
+  }
+  const reactionMap = new Map((reactionReport?.stocks || []).map(s => [s.ticker, s]));
+
+  // 3. Build unified portfolio board rows
   const boardRows = rankings.map(r => {
     const snap = snapshotMap.get(r.ticker) || {};
     const meta = getOperationalMetadataForTicker(r.ticker);
@@ -112,6 +124,7 @@ export async function generatePortfolioThesisBoard() {
       consolidatedScore: r.consolidated_score,
       trajectoryBonus: r.trajectory_bonus,
       thesisStatus: r.thesis_status,
+      marketReaction: reactionMap.get(r.ticker) || null,
       coreDriver: meta.coreDriver,
       category: meta.category,
       economicRelevance: meta.relevance,
@@ -176,6 +189,7 @@ ${boardRows.map(b => `| **#${b.rank}** | **\`${b.ticker}\`** | **${b.consolidate
     md += `### ${b.rank}. ${b.ticker} (${b.companyName})
 * **Financial Thesis Score:** \`${b.consolidatedScore}\` (Base: \`${b.consolidatedScore - b.trajectoryBonus}\`, Trajectory Bonus: \`${b.trajectoryBonus >= 0 ? '+' + b.trajectoryBonus : b.trajectoryBonus}\`)
 * **Thesis State Bucket:** **${b.thesisBucket}**
+* **Market reaction:** ${b.marketReaction?.context || 'Unavailable: no current verified results reaction.'}
 * **Core Operational Driver:** **${b.coreDriver}** (${b.category})
 * **Economic Relevance:** \`${b.economicRelevance}\` | **Operational Direction:** \`${b.operationalDirection}\`
 * **Underlying Operational Evidence:**  

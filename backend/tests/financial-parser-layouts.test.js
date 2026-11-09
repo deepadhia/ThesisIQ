@@ -122,6 +122,7 @@ describe('whole real documents', () => {
   it('MOREPENLAB (heavily fragmented numbers): revenue and growth are read', () => {
     const f = extractDeterministicFinancials(doc('MOREPENLAB_2026-10-27'));
     expect(f).not.toBeNull();
+    expect(f.statementScope).toBe('CONSOLIDATED');
     expect(f.revenue).toBeCloseTo(746.50, 2);
     expect(f.revenueYoYGrowthPct).toBeCloseTo(81.38, 1);
     expect(f.revenueQoQGrowthPct).toBeCloseTo(30.94, 1);
@@ -341,5 +342,21 @@ Net profit for the period 58.30 54.00 43.00
   it('a revenue cell that does not add up with other income to total income is not shown as verified (232.73 + 5.28 != 288.00)', () => {
     const r = extractDeterministicFinancials(stmt('232.73'));
     expect(r).toBeNull();
+  });
+  it('a smaller OCR digit error is rejected too: 280.72 + 5.28 is not 288.00', () => {
+    expect(extractDeterministicFinancials(stmt('280.72'))).toBeNull();
+  });
+  it('a damaged revenue label cannot silently turn total income into revenue', () => {
+    const text = stmt('282.72').replace('Revenue from operations', 'Revere from operations');
+    expect(extractDeterministicFinancials(text)).toBeNull();
+  });
+  it('rejects the real local-OCR benchmark that misread revenue as total income', () => {
+    expect(extractDeterministicFinancials(doc('SJS_q2fy27-local-ocr-rejected_2026-11-08'), { declaredUnit: 'million' })).toBeNull();
+  });
+  it('a statement heading with scope after a dash/colon is recognised, while an auditor sentence is not', () => {
+    const base = stmt('282.72').replace(/^\s*STATEMENT[^\n]*\n/, 'Statement of Unaudited Financial Results - Standalone\n');
+    expect(extractDeterministicFinancials(base).statementScope).toBe('STANDALONE');
+    expect(extractDeterministicFinancials(base.replace(' - Standalone', ': Consolidated')).statementScope).toBe('CONSOLIDATED');
+    expect(extractDeterministicFinancials(base.replace('Statement of Unaudited Financial Results - Standalone', 'We have reviewed the financial results - Consolidated')).statementScope).toBe('UNKNOWN');
   });
 });

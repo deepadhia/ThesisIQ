@@ -11,8 +11,11 @@ import { fileURLToPath } from "url";
 import { pool } from "../db/pool.js";
 import { compareFiscalQuartersDesc, parseFiscalQuarter } from "../utils/fiscal-quarter.js";
 import { reconcileGuidanceVsActual, classifyGuidanceScope } from "../utils/guidance-scope.js";
-import { extractPdfTextDetailed } from "../services/announcement.service.js";
-import { sendTelegramMessage, formatAnnouncementMessage, sendConcallDiscrepancyAlert, sendPipelineFailureAlert } from "../services/telegram.service.js";
+import { extractPdfTextDetailed, documentContentHash } from "../services/announcement.service.js";
+import { claimFilingExecution, releaseFilingExecution, assertFilingExecution } from "../services/filing-execution.service.js";
+import { loadEarningsReaction, formatReactionContext } from "../services/earnings-reaction.service.js";
+import { currentSyntheses } from "../services/synthesis-freshness.service.js";
+import { sendTelegramMessage, formatAnnouncementMessage, sendConcallDiscrepancyAlert, sendPipelineFailureAlert, formatPipelineFailureAlert } from "../services/telegram.service.js";
 import { classifyFilingForWorker, looksLikeStatementFiling } from "../services/filing-classifier.service.js";
 import { runLlm } from "../services/llm.service.js";
 import { decideLlmFailureAction, backoffDelayMs, audioBackoffDelayMs, quotaPauseMs, isQuotaPaused, batchSizeAfterPause } from "../services/retry-policy.service.js";
@@ -24,7 +27,6 @@ import {
   formatCashFlowAndQualitySection
 } from "../services/cash-flow-analyzer.service.js";
 import { applyInstitutionalGuard, sanitizeConcallHighlights, dropContradictingStance } from "../services/institutional-guard.service.js";
-import { getVerifiedGroundTruth } from "../services/verified-data-layer.service.js";
 import { evaluateDualLayerActionGate } from "../services/thesis-gate-evaluator.service.js";
 import { extractFinancialsViaLlm } from "../services/financial-table-fallback.service.js";
 import {
@@ -74,7 +76,7 @@ import {
   formatDriverAssessmentSection,
   summarizeDriverAssessment
 } from "../services/thesis-driver-context.service.js";
-import { buildFactRegistry, validateSynthesisClaims, calculateProgrammaticCommitmentStatus } from "../services/fact-registry.service.js";
+import { buildFactRegistry, validateSynthesisClaims, currentSynthesisTruth, calculateProgrammaticCommitmentStatus } from "../services/fact-registry.service.js";
 import { 
   extractAudioUrlFromFiling, 
   resolveAudioMediaUrl,
@@ -475,7 +477,6 @@ Return ONLY a valid JSON object:
       "guidance_scope": "QUARTERLY" | "ANNUAL" | "MULTI_YEAR" | "CAPEX_MILESTONE",
       "timeline": "Target quarter, fiscal year or year range exactly as stated in the filing",
       "status": "Pending" | "Achieved" | "Partially Achieved" | "Missed",
-      "status_rule": "CRITICAL: For multi-stage regulatory processes of THIS company (e.g. its own Demergers, NCLT approvals, QIP allotments, Plant Commissioning), initial Board approval MUST be marked status 'Pending' (In Progress). Mark 'Achieved' ONLY when final operational completion or regulatory clearance is explicitly documented in the evidence. NEVER extract third-party or investee company events as commitments.",
       "blockers_and_risks": "If Delayed or Missed, specify the exact reason given by management in concall (e.g. 'Equipment lead time & customs clearance delay by 2 quarters')",
       "credibility_impact": "positive" | "neutral" | "negative"
     }
@@ -746,7 +747,14 @@ async function writeQuotaPause(pause) {
 async function recordQuotaPressure(providerRetryAfterMs) {
   const now = Date.now();
   const previous = await readQuotaPause();
-  if (isQuotaPaused(previous, now)) return previous;
+  if (isQuotaPaused(previous, now)) {
+    if (Number.isFinite(providerRetryAfterMs) && now + providerRetryAfterMs > previous.until) {
+      const extended = { ...previous, until: now + providerRetryAfterMs };
+      await writeQuotaPause(extended);
+      return extended;
+    }
+    return previous;
+  }
   const recent = previous && now - previous.until < QUOTA_ESCALATION_WINDOW_MS;
   const count = recent ? (previous.count || 0) + 1 : 1;
   const pause = { until: now + quotaPauseMs(count, providerRetryAfterMs), count };
@@ -862,23 +870,6 @@ async function sameFailureAlreadyReported(item, reason) {
   }
 }
 
-/** True when a results alert for this stock went out in the last 5 days (so an unreadable deck or press release adds nothing to chase). */
-async function recentResultsAlertSent(item) {
-  try {
-    const { rows } = await pool.query(
-      `SELECT 1 FROM corporate_announcements
-       WHERE ticker = $1 AND id <> $2 AND filing_category = 'QUARTERLY_EARNINGS' AND sent_to_telegram = true
-         AND created_at > NOW() - INTERVAL '5 days'
-       LIMIT 1`,
-      [item.ticker, item.id]
-    );
-    return rows.length > 0;
-  } catch (err) {
-    console.warn(`[WORKER] Could not check recent results alerts for ${item.ticker}:`, err.message);
-    return false;
-  }
-}
-
 async function escalateToReview(item, message, suppressTelegram, { quiet = false, quietReason = "the stock's results were already alerted" } = {}) {
   const reason = String(message || "unknown error").slice(0, 500);
   await pool.query(
@@ -897,12 +888,30 @@ async function escalateToReview(item, message, suppressTelegram, { quiet = false
     return;
   }
   if (!suppressTelegram) {
-    await sendPipelineFailureAlert({
+    const alert = {
       ticker: item.ticker,
       title: item.title,
       error: message,
       docUrl: item.attachment_url
-    }).catch(e => console.warn("[WORKER ALERT ERROR]:", e.message));
+    };
+    const alertText = formatPipelineFailureAlert(alert);
+    // The row is already needs_review. Persist the pending message before network delivery so a crash between those
+    // operations cannot leave a dead-letter filing with neither a delivered alert nor a retryable one.
+    await parkPendingAlert(item, alertText, "Awaiting failure alert delivery");
+    try {
+      await sendPipelineFailureAlert(alert);
+      await pool.query(
+        `UPDATE corporate_announcements
+         SET sent_to_telegram = true,
+             event_analysis = (COALESCE(event_analysis, '{}'::jsonb) - 'alert_pending' - 'pending_alert_text' - 'alert_error')
+                              || jsonb_build_object('failure_alert_sent_at', NOW())
+         WHERE id = $1`,
+        [item.id]
+      );
+    } catch (err) {
+      console.warn(`[WORKER ALERT] Failure alert delivery failed for ${item.ticker}; parking for retry: ${err.message}`);
+      await parkPendingAlert(item, alertText, err);
+    }
   }
 }
 
@@ -1221,14 +1230,18 @@ async function deliverWorkerAlert(item, text, { suppressTelegram = false } = {})
     return { sent: true };
   } catch (err) {
     console.error(`[WORKER ALERT] Telegram delivery failed for ${item.ticker}: ${err.message}. Parking alert for retry.`);
-    await pool.query(
-      `UPDATE corporate_announcements
-       SET event_analysis = COALESCE(event_analysis, '{}'::jsonb) || jsonb_build_object('alert_pending', true, 'pending_alert_text', $1::text, 'alert_error', $2::text)
-       WHERE id = $3`,
-      [text, String(err.message || "").slice(0, 300), item.id]
-    ).catch(e => console.error("[WORKER ALERT] Could not park alert:", e.message));
+    await parkPendingAlert(item, text, err);
     return { sent: false, error: err };
   }
+}
+
+async function parkPendingAlert(item, message, error) {
+  await pool.query(
+    `UPDATE corporate_announcements
+     SET event_analysis = COALESCE(event_analysis, '{}'::jsonb) || jsonb_build_object('alert_pending', true, 'pending_alert_text', $1::text, 'alert_error', $2::text)
+     WHERE id = $3`,
+    [message, String(error?.message || error || "").slice(0, 300), item.id]
+  );
 }
 
 /**
@@ -1268,7 +1281,7 @@ export async function flushPendingAlerts(limit = 10) {
 /**
  * Latest verified financials for a stock (used to judge concall transcripts / decks that carry no statements).
  */
-async function loadCarriedFinancials(ticker) {
+async function loadCarriedFinancials(ticker, stockId, filingDate) {
   try {
     const { rows } = await pool.query(
       `SELECT event_analysis->'institutional_verdict'->'verified_financials' AS vf,
@@ -1276,13 +1289,15 @@ async function loadCarriedFinancials(ticker) {
               event_analysis->'institutional_verdict'->>'conviction_score' AS conviction,
               filing_date
        FROM corporate_announcements
-       WHERE ticker = $1
+       WHERE ticker = $1 AND stock_id = $2
          AND deep_dive_status = 'completed'
+         AND COALESCE(event_analysis->>'foreign_filing', 'false') <> 'true'
          AND event_analysis->'institutional_verdict'->'verified_financials' IS NOT NULL
          AND COALESCE(filing_date, created_at) > NOW() - INTERVAL '150 days'
+         AND COALESCE(filing_date, created_at) <= $3
        ORDER BY filing_date DESC NULLS LAST, created_at DESC
        LIMIT 1`,
-      [ticker]
+      [ticker, stockId, filingDate]
     );
     if (rows.length > 0 && rows[0].vf && typeof rows[0].vf === "object") {
       return {
@@ -1820,6 +1835,7 @@ export function buildStage1Message({ item, verdict, activeFin, finSource, carrie
     degradedNote?.trim(),
     summary?.trim(),
     finBlock?.trim(),
+    formatReactionContext(verdict.market_reaction),
     clarifications?.trim(),
     gateSec?.trim(),
     trendSec?.trim(),
@@ -1930,8 +1946,25 @@ export function buildCommitmentsSection(commitments) {
  * Processes a single queued filing end-to-end. Alert delivery happens BEFORE any slow/optional work, and the
  * filing is only marked 'completed' once the alert is sent or safely parked for retry.
  */
+async function deferOcrRetry(item, pdf, suppressTelegram) {
+  const delay = Number.isFinite(pdf.retryAfterMs) ? Math.max(1000, pdf.retryAfterMs) : 60000;
+  let retryMs = delay;
+  if (pdf.reason === "OCR_RATE_LIMITED") {
+    const pause = await recordQuotaPressure(delay);
+    retryMs = Math.max(delay, pause.until - Date.now());
+  }
+  const outage = await recordLlmOutage(item.id, `${pdf.reason}: ${pdf.detail || "OCR temporarily unavailable"}`);
+  if (Date.now() - outage.firstAtMs >= 24 * 60 * 60 * 1000) {
+    await escalateToReview(item, `OCR did not recover the filing after 24 hours (${pdf.reason}: ${pdf.detail || 'no readable source text'}). Open the source PDF for review.`, suppressTelegram);
+    return { success: false, skipped: true };
+  }
+  await deferRetry(item.id, retryMs);
+  console.warn(`[WORKER RETRY] ${item.ticker}: ${pdf.reason}; retry in ${Math.ceil(retryMs / 60000)} min (attempt not consumed).`);
+  return { success: false, retry: true };
+}
+
 async function processOneDeepDive(item, ctx) {
-  const { suppressTelegram, deadlineAt } = ctx;
+  const { suppressTelegram, deadlineAt, executionClaim, skipOptionalWork = false } = ctx;
   console.log(`[WORKER PARALLEL] Processing ${item.ticker} (${item.deep_dive_status}) - Filing Date: ${item.filing_date || 'N/A'}...`);
 
   // ── 0. Another company's filing? One document belongs to one company: held by 3+ tracked tickers means the exchange feed answered
@@ -1951,9 +1984,15 @@ async function processOneDeepDive(item, ctx) {
 
   // ── 1. Document text ──
   let docText = "";
+  let figuresFromOcr = false;
+  let ocrAlreadyAttempted = false;
   let pdfFailure = { reason: null, detail: "" };
   if (item.attachment_url) {
     const pdf = await extractPdfTextDetailed(item.attachment_url);
+    await assertFilingExecution(pool, executionClaim);
+    if (/^OCR_/.test(pdf.reason || "")) return deferOcrRetry(item, pdf, suppressTelegram);
+    figuresFromOcr = Boolean(pdf.ocrUsed);
+    ocrAlreadyAttempted = Boolean(pdf.ocrAttempted || pdf.ocrUsed);
     docText = pdf.text || "";
     pdfFailure = { reason: pdf.reason, detail: pdf.detail || "" };
   }
@@ -1993,11 +2032,9 @@ async function processOneDeepDive(item, ctx) {
       return { success: false, retry: true };
     }
     console.warn(`[WORKER DEAD-LETTER] Unextractable / unavailable filing text for ${item.ticker}: ${item.title} — ${failureMessage}`);
-    // A scanned investor presentation or press release of a stock whose results were already alerted is not worth a failure
-    // alert of its own (SBCL 2026-11-04): the numbers are in the results note; the filing stays in the dead-letter queue.
-    const deckLike = /presentation|investor\s+deck|press\s+release|media\s+release/i.test(item.title || "");
-    const quiet = deckLike && !classification.isTranscript && await recentResultsAlertSent(item);
-    await escalateToReview(item, failureMessage, suppressTelegram, { quiet });
+    // Results do not cover the separate forward guidance that a presentation or press release may contain. An unreadable
+    // filing needs a visible failure alert after the retry budget, with sibling copies deduplicated by cause.
+    await escalateToReview(item, failureMessage, suppressTelegram);
     return { success: false, skipped: true };
   }
 
@@ -2074,6 +2111,7 @@ async function processOneDeepDive(item, ctx) {
       }
 
       if (!audioTranscriptDoc) {
+      await assertFilingExecution(pool, executionClaim);
       const eventAnalysisObj = {
         audio_analysis: audioAudit,
         investment_memo: audioAudit.investment_memo_markdown || null,
@@ -2134,6 +2172,7 @@ async function processOneDeepDive(item, ctx) {
       return { success: true, ticker: item.ticker, stage: "audio" };
       }
     } catch (audioErr) {
+      if (audioErr.executionLeaseLost) throw audioErr;
       console.error(`[WORKER AUDIO ERROR] Failed for ${item.ticker}:`, audioErr.message);
       // A recording that is not published yet (404) or a transient download error is retried with a growing delay for about 29
       // hours (a company has up to 24 h to publish the audio); it used to be given up after about two hours.
@@ -2174,7 +2213,6 @@ async function processOneDeepDive(item, ctx) {
   // The filing date tells which quarter this is when the statement's own header dates are unreadable (needed for the cumulative columns).
   const periodEndHint = quarterEndBefore(item.filing_date);
   let extractedFin = extractDeterministicFinancials(docText, { periodEndHint });
-  let figuresFromOcr = false; // the statements were read from a scanned PDF by vision OCR (a misread digit is possible)
 
   // Scanned statements often carry a noisy embedded OCR text layer ("Revenue o aperstans", "Soptember") that the parser
   // rightly refuses. Re-read the pages with vision OCR and parse that instead, so the numbers stay VERIFIED.
@@ -2182,7 +2220,7 @@ async function processOneDeepDive(item, ctx) {
   // the consolidated figures are the ones that matter, so a standalone headline would be a wrong alert.
   const filingHasConsolidatedStatement = /consolidated\s+(?:un-?audited\s+|audited\s+)?financial\s+results|statement\s+of\s+(?:un-?audited\s+|audited\s+)?consolidated/i.test(docText);
   const onlyStandaloneParsed = Boolean(extractedFin?.revenue) && extractedFin.statementScope === "STANDALONE" && filingHasConsolidatedStatement;
-  if ((!extractedFin || !extractedFin.revenue || onlyStandaloneParsed) && looksLikeStatementDoc && item.attachment_url) {
+  if ((!extractedFin || !extractedFin.revenue || onlyStandaloneParsed) && !ocrAlreadyAttempted && looksLikeStatementDoc && item.attachment_url) {
     const usable = (f) => Boolean(f?.revenue) && (!onlyStandaloneParsed || f.statementScope === "CONSOLIDATED");
     // A vision-OCR transcription carries rows without the unit line (SJS 2026-11-04: ₹2,827.28 million read as crores, a 10x
     // error). The unit the filing declares in its own embedded text is the fallback for a statement that prints none.
@@ -2192,6 +2230,8 @@ async function processOneDeepDive(item, ctx) {
       forceOcr: true,
       acceptOcr: (t) => usable(extractDeterministicFinancials(t, { periodEndHint, declaredUnit }))
     });
+    await assertFilingExecution(pool, executionClaim);
+    if (/^OCR_/.test(ocr.reason || "")) return deferOcrRetry(item, ocr, suppressTelegram);
     if (ocr.text && ocr.text.trim().length >= 200 && ocr.text !== docText) {
       const ocrFin = extractDeterministicFinancials(ocr.text, { periodEndHint, declaredUnit });
       if (usable(ocrFin)) {
@@ -2216,32 +2256,12 @@ async function processOneDeepDive(item, ctx) {
       extractedFin = null;
     }
   }
-  const groundTruth = getVerifiedGroundTruth(item.ticker);
-  const filingQuarterByDate = getIndianFiscalQuarter(item.filing_date);
   let periodLabel = resolveReportingQuarter(item, extractedFin);
 
   let deterministicFin = null;
   let finSource = null;
   if (extractedFin && extractedFin.revenue) {
     deterministicFin = extractedFin;
-    finSource = "THIS_FILING";
-  } else if (groundTruth && groundTruth.revenue && item.filing_date && groundTruth.period === filingQuarterByDate) {
-    // Benchmark truth only for the exact period it was verified for
-    deterministicFin = {
-      isFinancialResult: true,
-      revenue: groundTruth.revenue,
-      revenueYoYGrowthPct: groundTruth.revenueYoYGrowthPct,
-      ebitda: groundTruth.ebitda,
-      ebitdaMarginPct: groundTruth.ebitdaMarginPct,
-      ebitdaMarginBpsDelta: groundTruth.ebitdaMarginBpsDelta,
-      patConsolidated: groundTruth.patConsolidated,
-      patAttributable: groundTruth.patConsolidated,
-      patYoYGrowthPct: groundTruth.patYoYGrowthPct,
-      isYoYDecline: groundTruth.patYoYGrowthPct !== null && groundTruth.patYoYGrowthPct < 0,
-      isMarginErosion: Boolean(groundTruth.isMarginErosion) || (groundTruth.ebitdaMarginBpsDelta !== null && groundTruth.ebitdaMarginBpsDelta < -100),
-      exceptionalGain: groundTruth.EXCEPTIONAL_ITEM || null,
-      normalisedPat: groundTruth.CORE_PAT || null
-    };
     finSource = "THIS_FILING";
   }
 
@@ -2385,7 +2405,7 @@ async function processOneDeepDive(item, ctx) {
   let gateSource = finSource;
   let carried = null;
   if (!gateFin && !looksLikeStatementDoc) {
-    carried = await loadCarriedFinancials(item.ticker);
+    carried = await loadCarriedFinancials(item.ticker, item.stock_id, item.filing_date);
     if (carried) {
       gateFin = carried.fin;
       gateSource = "CARRIED_FORWARD";
@@ -2414,7 +2434,17 @@ async function processOneDeepDive(item, ctx) {
   verdict.conviction_score = gateResult.calibratedConviction;
   verdict.thesis_gate_result = gateResult;
   verdict.reporting_period = periodLabel;
-  if (activeFin && finSource === "THIS_FILING") verdict.verified_financials = activeFin;
+  verdict.source_document = {
+    announcement_id: item.id,
+    attachment_url: item.attachment_url,
+    text_sha256: documentContentHash(docText),
+    source_kind: audioTranscriptDoc ? 'AUDIO_TRANSCRIPT' : 'PDF'
+  };
+  delete verdict.source_filing;
+  if (activeFin && finSource === "THIS_FILING") {
+    verdict.verified_financials = activeFin;
+    verdict.source_filing = { announcement_id: item.id, attachment_url: item.attachment_url, period_end: activeFin.quarterEnded, ocr: figuresFromOcr, verified_at: new Date().toISOString() };
+  }
   if (figuresFromOcr && finSource === "THIS_FILING") {
     degradedNote += "\n🔍 _These figures were read from a scanned PDF by OCR (a misread digit is possible). Check the filing before acting on a red signal._\n";
   }
@@ -2431,6 +2461,7 @@ async function processOneDeepDive(item, ctx) {
   console.log(`[DUAL-LAYER GATE] ${item.ticker}: ${gateResult.finalAction} (Status: ${gateResult.statusClassification}, Conviction: ${gateResult.calibratedConviction}/10). ${gateResult.decisionExplanation}`);
 
   // ── 7. Persist commitments (fast DB work) ──
+  await assertFilingExecution(pool, executionClaim);
   const quarter = periodLabel;
   if (verdict.commitments && verdict.commitments.length > 0) {
     for (const comm of verdict.commitments) {
@@ -2504,7 +2535,7 @@ async function processOneDeepDive(item, ctx) {
         JSON.stringify(metricsObj),
         JSON.stringify(storable)
       ]
-    ).catch(err => console.warn(`[WORKER] Snapshot upsert warning for ${item.ticker} (${snapQuarter}):`, err.message));
+    );
   }
 
   // ── 9. Build + send the alert (BEFORE any slow optional work) ──
@@ -2529,20 +2560,30 @@ async function processOneDeepDive(item, ctx) {
   const stageInfo = getFilingStageDetails(item.deep_dive_status, item.title, docText);
   const isTranscriptDoc = classification.isTranscript || item.deep_dive_status === "pending_stage2";
 
-  // A deck or press release is written up in the same structure as a call (what changed in guidance first, capex, initiatives,
-  // risks), from its own text. It goes to the digest, not straight to Telegram, so the extra model call never delays an alert;
-  // it is skipped when the run is nearly out of time, and the filing then keeps its ordinary verdict.
-  const isDeckDoc = !isTranscriptDoc && !looksLikeStatementDoc && !classification.isAudio && hasDocText && docText.length >= 600 &&
-    digestKindFor(item.title) !== "OTHER" && (!deadlineAt || deadlineAt - Date.now() > 60000);
+  // A deck or press release needs the same structured guidance pass as a call. If time is short, leave the filing queued;
+  // completing it with only a generic verdict would permanently skip a guidance change in the presentation.
+  const isDeckDoc = !isTranscriptDoc && !looksLikeStatementDoc && !classification.isAudio && hasDocText && docText.length >= 300 &&
+    digestKindFor(item.title) !== "OTHER";
+  if (isDeckDoc && deadlineAt && deadlineAt - Date.now() <= 60000) {
+    console.log(`[WORKER] ${item.ticker}: presentation highlights need a fresh time budget; leaving the filing queued.`);
+    return { success: false, deferred: true };
+  }
 
   if (isTranscriptDoc || isDeckDoc) {
     console.log(`[WORKER] Generating ${isDeckDoc ? "presentation" : "concall"} highlights for ${item.ticker}...`);
     const rawCh = await generateStructuredConcallHighlights(item.ticker, item.company_name, docText, { docKind: isDeckDoc ? "presentation" : "call" });
+    const coverage = rawCh?.extraction_coverage || { parts: 0, parsed: 0 };
+    verdict.highlight_extraction = {
+      status: coverage.parts > 0 && coverage.parsed === coverage.parts ? "COMPLETE" : "INCOMPLETE",
+      parts: coverage.parts,
+      parsed: coverage.parsed
+    };
     const ch = sanitizeConcallHighlights(rawCh, docText, gateFin);
     const hasHighlightContent = ch && [
-      "segment_highlights", "business_performance", "financial_performance", "operational_highlights", "growth_initiatives",
-      "quarterly_guidance", "annual_guidance", "multi_year_targets", "key_positives", "key_challenges"
-    ].some(k => Array.isArray(ch[k]) && ch[k].length > 0);
+      "guidance_changes", "quarterly_guidance", "annual_guidance", "multi_year_targets",
+      "segment_highlights", "business_performance", "financial_performance", "operational_highlights",
+      "growth_initiatives", "key_positives", "key_challenges", "key_monitorables"
+    ].some(k => Array.isArray(ch[k]) && ch[k].length > 0) || Boolean(ch?.key_takeaway);
     if (hasHighlightContent) {
       verdict.concall_highlights = ch;
       // A guidance CUT announced on the call is a veto on a buy (AGENTS.md I7: numbers authorise, vetoes win). The call's own
@@ -2613,6 +2654,13 @@ async function processOneDeepDive(item, ctx) {
   const trendSec = formatQuarterlyThesisTrend(trendSnapshots, periodLabel, verdict);
   const clarificationsSec = formatManagementClarifications(verdict, gateFin, verdict.cash_flow);
 
+  // Optional, bounded market evidence. Never feeds the financial gate or promotes its verdict.
+  // Decks/transcripts cannot move the results-event anchor to their own later publication date.
+  delete verdict.market_reaction; // an LLM cannot supply measured returns
+  if (!isTranscriptDoc && gateSource === "THIS_FILING" && gateFin?.isFinancialResult && gateFin?.isVerified !== false) {
+    verdict.market_reaction = await loadEarningsReaction({ ticker: item.ticker, nseSymbol: item.nse_symbol, publishedAt: item.filing_date });
+  }
+
   const msgCtx = {
     item, verdict, activeFin: gateFin, finSource: gateSource, carried,
     stageName: stageInfo.stageName, periodLabel, guidanceSection, commText, degradedNote,
@@ -2624,6 +2672,7 @@ async function processOneDeepDive(item, ctx) {
   // Persist the full verdict first (without the bulky raw text), then send, then mark completed.
   const storableVerdict = { ...verdict };
   delete storableVerdict._raw_text;
+  await assertFilingExecution(pool, executionClaim);
   await pool.query(
     `UPDATE corporate_announcements
      SET event_analysis = COALESCE(event_analysis, '{}'::jsonb) || $2::jsonb
@@ -2664,6 +2713,7 @@ async function processOneDeepDive(item, ctx) {
       await queueDigestItem(item, digestItem);
     }
   }
+  await assertFilingExecution(pool, executionClaim);
   await pool.query(
     `UPDATE corporate_announcements
      SET deep_dive_status = 'completed',
@@ -2680,6 +2730,11 @@ async function processOneDeepDive(item, ctx) {
   }
 
   // ── 10. Optional follow-ups (never allowed to block or lose the alert) ──
+  if (skipOptionalWork && suppressTelegram) {
+    await assertFilingExecution(pool, executionClaim);
+    await pool.query(`UPDATE corporate_announcements SET event_analysis = COALESCE(event_analysis, '{}'::jsonb) || jsonb_build_object('repair_followups_pending', true) WHERE id = $1`, [item.id]);
+    return { success: true, ticker: item.ticker };
+  }
   try {
     await reconcileStockCommitments(item.ticker);
   } catch (err) {
@@ -2978,8 +3033,11 @@ async function drainPendingSyntheses(deadlineAt, maxTickers = 1) {
  * @param {number} [options.deadlineAt] - epoch ms after which no new filing is started and slow follow-ups are skipped
  */
 export async function processPendingDeepDives(options = {}) {
-  const { suppressTelegram = false, tickers = null, allowHistorical = false, announcementIds = null, retryFailed = false, deadlineAt = null } = options;
-  let batchSize = options.batchSize ?? 4;
+  const { suppressTelegram = false, tickers = null, allowHistorical = false, announcementIds = null, retryFailed = false, deadlineAt = null, skipOptionalWork = false } = options;
+  let batchSize = Number(options.batchSize ?? 4);
+  if (!Number.isInteger(batchSize) || batchSize < 1 || batchSize > 20) throw new Error("batchSize must be an integer from 1 to 20");
+  // An empty explicit selection is a no-op, never permission to drain the normal queue.
+  if (announcementIds && announcementIds.length === 0) return { processed: 0, failed: 0, found: 0 };
 
   // Alerts that failed to deliver earlier go out first
   if (!suppressTelegram && !announcementIds) {
@@ -2994,28 +3052,30 @@ export async function processPendingDeepDives(options = {}) {
 
   // A running quota pause keeps the queue idle (everything below needs the AI): nothing is lost, filings stay queued.
   // After it ends, work one filing at a time until a success clears it.
-  let quotaPause = null;
-  if (!announcementIds) {
-    quotaPause = await readQuotaPause();
-    if (isQuotaPaused(quotaPause)) {
-      console.log(`[WORKER] AI quota pause active until ${new Date(quotaPause.until).toISOString()}; leaving the queue for later.`);
-      return { processed: 0, failed: 0, found: 0, paused: true };
-    }
-    batchSize = batchSizeAfterPause(quotaPause, batchSize);
+  const quotaPause = await readQuotaPause();
+  if (isQuotaPaused(quotaPause)) {
+    console.log(`[WORKER] AI quota pause active until ${new Date(quotaPause.until).toISOString()}; leaving the queue for later.`);
+    return { processed: 0, failed: 0, found: 0, paused: true };
   }
+  batchSize = batchSizeAfterPause(quotaPause, batchSize);
   console.log(`[WORKER] Polling for pending quarterly deep-dives (parallel batch size: ${batchSize})...`);
 
   let queryText;
   let queryParams = [];
 
   const selectCols = `ca.id, ca.stock_id, ca.ticker, ca.title, ca.attachment_url, ca.filing_date, ca.deep_dive_status, ca.filing_category, ca.is_earnings_release,
+             ca.event_analysis,
              s.investment_thesis, s.company_name, s.nse_symbol`;
 
   if (announcementIds && announcementIds.length > 0) {
     queryText = `SELECT ${selectCols}
       FROM corporate_announcements ca
       JOIN stocks s ON s.id = ca.stock_id
-      WHERE ca.id = ANY($1)`;
+      WHERE ca.id = ANY($1)
+        AND COALESCE(ca.event_analysis->>'foreign_filing', 'false') <> 'true'
+        AND (ca.event_analysis->>'retry_not_before' IS NULL
+             OR (ca.event_analysis->>'retry_not_before')::timestamptz <= NOW())
+      ORDER BY (CASE WHEN ca.is_earnings_release THEN 0 ELSE 1 END), ca.filing_date DESC, ca.created_at DESC`;
     queryParams = [announcementIds];
   } else {
     const statuses = retryFailed
@@ -3026,6 +3086,7 @@ export async function processPendingDeepDives(options = {}) {
       FROM corporate_announcements ca
       JOIN stocks s ON s.id = ca.stock_id
       WHERE ca.deep_dive_status = ANY($1)
+        AND COALESCE(ca.event_analysis->>'foreign_filing', 'false') <> 'true'
         AND (s.category IN ('Core', 'Watchlist') OR s.category IS NULL)
         AND (ca.event_analysis->>'retry_not_before' IS NULL
              OR (ca.event_analysis->>'retry_not_before')::timestamptz <= NOW())`;
@@ -3053,15 +3114,39 @@ export async function processPendingDeepDives(options = {}) {
 
   console.log(`[WORKER] Found ${pendingList.length} filings. Executing concurrent batch...`);
 
-  const results = await Promise.all(pendingList.map(async (item, idx) => {
+  const results = [];
+  let lastPause = quotaPause;
+  for (let offset = 0; offset < pendingList.length; offset += batchSize) {
+    lastPause = await readQuotaPause();
+    if (isQuotaPaused(lastPause) || (deadlineAt && Date.now() > deadlineAt)) {
+      results.push(...pendingList.slice(offset).map(() => ({ success: false, deferred: true })));
+      break;
+    }
+    const wave = pendingList.slice(offset, offset + batchSize);
+    results.push(...await Promise.all(wave.map(async (item, idx) => {
     if (idx > 0) await new Promise(r => setTimeout(r, idx * 250));
     if (deadlineAt && Date.now() > deadlineAt) {
       console.log(`[WORKER] Time budget exhausted — leaving ${item.ticker} (${item.title}) queued for the next cycle.`);
       return { success: false, deferred: true };
     }
+    let claim;
     try {
-      return await processOneDeepDive(item, { suppressTelegram, deadlineAt });
+      claim = await claimFilingExecution(pool, item);
     } catch (err) {
+      console.warn(`[WORKER] Could not claim ${item.ticker} (${err.message}); leaving it queued without consuming an attempt.`);
+      return { success: false, deferred: true };
+    }
+    if (!claim) {
+      console.log(`[WORKER] ${item.ticker}: another worker owns this filing or its state changed; leaving this selection alone.`);
+      return { success: false, deferred: true };
+    }
+    try {
+      return await processOneDeepDive(item, { suppressTelegram, deadlineAt, executionClaim: claim, skipOptionalWork });
+    } catch (err) {
+      if (err.executionLeaseLost) {
+        console.warn(`[WORKER] ${item.ticker}: ${err.message}; this worker is stopping without consuming an attempt.`);
+        return { success: false, deferred: true };
+      }
       console.error(`[WORKER ERROR] Deep-dive failed for ${item.ticker} (ID: ${item.id}):`, err.message);
       try {
         const attempts = await recordDeepDiveAttempt(item.id, err.message);
@@ -3074,8 +3159,12 @@ export async function processPendingDeepDives(options = {}) {
         console.error("[WORKER ERROR] Could not record failure:", dbErr.message);
       }
       return { success: false, error: err.message };
+    } finally {
+      try { await releaseFilingExecution(pool, claim); }
+      catch (err) { console.warn(`[WORKER] Could not release ${item.ticker}'s execution lease (${err.message}); it will expire.`); }
     }
-  }));
+    })));
+  }
 
   // Rate limit pause between batches
   await new Promise(r => setTimeout(r, 1000));
@@ -3083,14 +3172,18 @@ export async function processPendingDeepDives(options = {}) {
   const processedCount = results.filter(r => r && r.success).length;
   const failedCount = results.filter(r => r && !r.success && !r.deferred && !r.skipped).length;
   // A filing went through the AI successfully: the quota is back, so the one-at-a-time mode ends
-  if (processedCount > 0 && quotaPause && quotaPause.count > 0) {
+  const recovered = results.some(r => r?.success && !r.skipped);
+  lastPause = await readQuotaPause();
+  if (recovered && quotaPause && quotaPause.count > 0 && !isQuotaPaused(lastPause)) {
     await writeQuotaPause({ until: 0, count: 0 });
     console.log("[WORKER] AI quota recovered; back to normal batches.");
   }
   // Deliver this cycle's queued digests BEFORE the slow optional syntheses (alert-first, I1)
   if (!suppressTelegram) await flushThesisDigests();
   if (!suppressTelegram) await drainPendingSyntheses(deadlineAt);
-  return { processed: processedCount, failed: failedCount, found: pendingList.length };
+  return { processed: processedCount, failed: failedCount, found: pendingList.length,
+    deferred: results.filter(r => r?.deferred).length,
+    processedIds: pendingList.filter((_, i) => results[i]?.success && !results[i]?.skipped).map(r => r.id) };
 }
 
 
@@ -3147,6 +3240,7 @@ export async function reconcileStockCommitments(ticker) {
         stmtLower.includes("nclt") || 
         stmtLower.includes("sebi approval") || 
         stmtLower.includes("demerger") ||
+        /\b(?:acquisition|acquire|stake|investment|merger|amalgamation)\b/.test(`${stmtLower} ${metricLower}`) ||
         metricLower.includes("regulatory");
 
       if (isRegulatoryAction) {
@@ -3243,7 +3337,6 @@ export async function generateInstitutionalSyntheses(ticker, force = false) {
     );
     if (stockRows.length === 0) return;
     const stock = stockRows[0];
-    const truth = getVerifiedGroundTruth(ticker);
 
     const { rows: comms } = await pool.query(
       `SELECT statement, metric, target_value, timeline, status, credibility_impact, blockers_and_risks 
@@ -3252,7 +3345,7 @@ export async function generateInstitutionalSyntheses(ticker, force = false) {
     );
 
     const { rows: rawSnapshots } = await pool.query(
-      `SELECT quarter, thesis_status, thesis_momentum, confidence_score, final_action, summary, metrics, red_flags, dodged_questions
+      `SELECT quarter, thesis_status, thesis_momentum, conviction_score AS confidence_score, final_action, summary, metrics, red_flags, dodged_questions, raw_ai_output
        FROM quarterly_snapshots
        WHERE stock_id = $1`,
       [stock.id]
@@ -3268,6 +3361,11 @@ export async function generateInstitutionalSyntheses(ticker, force = false) {
     );
 
     const latestSnapshot = snapshots.length > 0 ? snapshots[0] : null;
+    const truth = currentSynthesisTruth(latestSnapshot);
+    if (!truth) {
+      console.warn(`[SYNTHESIS] ${ticker}: no current verified statement with source provenance; reports deferred.`);
+      return;
+    }
     const latestQuarterLabel = latestSnapshot ? latestSnapshot.quarter : 'N/A';
 
     const formattedInterQuarterEvents = interQuarterEvents.map(e => 
@@ -3282,7 +3380,7 @@ export async function generateInstitutionalSyntheses(ticker, force = false) {
       const primary = m.primary_thesis_metric ? `Primary Thesis Metric (${m.primary_thesis_metric.metric_name || 'Key Metric'}): ${m.primary_thesis_metric.value} [Evidence: ${m.primary_thesis_metric.evidence}]` : '';
 
       return `### Quarter: ${s.quarter}${idx === 0 ? ' 🔥 [LATEST CURRENT GROUND TRUTH PERIOD]' : ' (Historical Period)'}
-- Thesis Signal: ${s.thesis_status} | Momentum: ${s.thesis_momentum} | Conviction Score: ${s.confidence_score}/100 | Action: ${s.final_action}
+- Thesis Signal: ${s.thesis_status} | Momentum: ${s.thesis_momentum} | Recorded conviction: ${s.confidence_score ?? 'unknown'}/10 (system score, not a probability) | Action: ${s.final_action}
 - Verified Financial & Thesis Metrics:
   • ${rev}
   • ${pat}
@@ -3292,36 +3390,9 @@ export async function generateInstitutionalSyntheses(ticker, force = false) {
     }).join('\n\n');
 
     // Enforce Strict Temporal & Ground Truth Guard (Derives current quarter dynamically from latest snapshot or truth)
-    const currentGroundTruthPeriod = (latestSnapshot && latestSnapshot.quarter) ? latestSnapshot.quarter : (truth?.period || 'Q1 FY27');
+    const currentGroundTruthPeriod = truth.period;
 
-    let groundTruthBlock = '';
-    if (truth && (!latestSnapshot || latestSnapshot.quarter === truth.period)) {
-      groundTruthBlock = `
-🔥 DEFINITIVE CURRENT REPORTING PERIOD GROUND TRUTH: ${currentGroundTruthPeriod}
-(CRITICAL TEMPORAL GUARD: All analysis MUST treat ${currentGroundTruthPeriod} as the current reporting period!)
-
-VERIFIED CANONICAL METRICS (${currentGroundTruthPeriod}):
-• TOTAL_REVENUE = ₹${truth.revenue} Cr (${truth.revenueYoYGrowthPct >= 0 ? '+' : ''}${truth.revenueYoYGrowthPct}% YoY)
-• CORE_PAT = ₹${truth.patConsolidated} Cr (${truth.patYoYGrowthPct >= 0 ? '+' : ''}${truth.patYoYGrowthPct}% YoY)
-• REPORTED_PAT = ${truth.reportedPat ? `₹${truth.reportedPat} Cr (Includes ₹${truth.exceptionalGain} Cr Exceptional Item)` : 'Not Disclosed / Core PAT Only'}
-• EBITDA_MARGIN_PCT = ${truth.ebitdaMarginPct}% (${truth.ebitdaMarginBpsDelta >= 0 ? '+' : ''}${truth.ebitdaMarginBpsDelta} bps YoY)
-• TOTAL_ORDER_BACKLOG = ${truth.orderBookTotal ? `₹${truth.orderBookTotal} Cr` : 'Not Disclosed'}
-• QUARTERLY_ORDER_INFLOW = ${truth.quarterlyOrderInflow ? `₹${truth.quarterlyOrderInflow} Cr booked in ${currentGroundTruthPeriod}` : 'Not Disclosed'}
-• EXPORT_BACKLOG = ${truth.exportOrderBook ? `₹${truth.exportOrderBook} Cr` : 'Not Disclosed'}
-`;
-    } else if (latestSnapshot) {
-      const m = latestSnapshot.metrics || {};
-      groundTruthBlock = `
-🔥 DEFINITIVE CURRENT REPORTING PERIOD GROUND TRUTH: ${currentGroundTruthPeriod}
-(CRITICAL TEMPORAL GUARD: All analysis MUST treat ${currentGroundTruthPeriod} as the current reporting period!)
-
-VERIFIED CANONICAL METRICS (${currentGroundTruthPeriod}):
-• REVENUE_GROWTH = ${m.revenue_growth ? m.revenue_growth.value : 'N/A'} [Evidence: ${m.revenue_growth?.evidence || 'SEBI Filing'}]
-• PAT_GROWTH = ${m.pat_growth ? m.pat_growth.value : 'N/A'} [Evidence: ${m.pat_growth?.evidence || 'SEBI Filing'}]
-• EBITDA_MARGIN = ${m.opm ? m.opm.value : 'N/A'} [Evidence: ${m.opm?.evidence || 'SEBI Filing'}]
-• LATEST_STATUS = Signal: ${latestSnapshot.thesis_status} | Momentum: ${latestSnapshot.thesis_momentum} | Action: ${latestSnapshot.final_action}
-`;
-    }
+    const groundTruthBlock = `Current verified statement period: ${currentGroundTruthPeriod}\nSource: ${JSON.stringify(latestSnapshot.raw_ai_output.source_filing)}\nCanonical parsed facts: ${JSON.stringify(truth)}\nReported PAT and normalised PAT are distinct. Missing metrics are unknown, never zero or core earnings by default.`;
 
     const metricsPlaceholderContent = [
       `Key Thesis Definition: ${stock.key_thesis_metrics || 'Financial & Operational Performance'}`,
@@ -3377,17 +3448,18 @@ ${missed > 0 ? `\n🔴 Missed / Broken Guidance Breakdown (${missed}):\n${missed
 
     // Fetch existing synthesis timestamps for ticker
     const { rows: existingSyntheses } = await pool.query(
-      "SELECT prompt_name, updated_at FROM stock_syntheses WHERE ticker = $1",
+      "SELECT prompt_name, updated_at, report_content FROM stock_syntheses WHERE ticker = $1",
       [ticker]
     );
     const existingMap = new Map(existingSyntheses.map(s => [s.prompt_name, new Date(s.updated_at).getTime()]));
+    const currentReportNames = new Set(currentSyntheses(existingSyntheses, latestSnapshot.raw_ai_output.source_filing.announcement_id).map(s => s.prompt_name));
     const SIX_HOURS_MS = 6 * 60 * 60 * 1000;
     const nowMs = Date.now();
 
     for (const p of promptTemplates) {
       // If this prompt was updated in the last 6 hours, skip UNLESS force = true
       const lastUpdated = existingMap.get(p.name);
-      if (!force && lastUpdated && (nowMs - lastUpdated < SIX_HOURS_MS)) {
+      if (!force && currentReportNames.has(p.name) && lastUpdated && (nowMs - lastUpdated < SIX_HOURS_MS)) {
         console.log(`[SYNTHESIS SKIP] Report '${p.title}' for ${ticker} updated recently (${Math.round((nowMs - lastUpdated)/60000)}m ago). Skipping.`);
         continue;
       }
@@ -3401,10 +3473,10 @@ ${missed > 0 ? `\n🔴 Missed / Broken Guidance Breakdown (${missed}):\n${missed
 
         const factLockMandateBlock = `
 🔥 IMMUTABLE CANONICAL FACT LOCK MANDATES (${currentGroundTruthPeriod}) 🔥
-1. REVENUE GROUND TRUTH: Total Revenue = ₹${truth?.revenue || 'N/A'} Cr (+${truth?.revenueYoYGrowthPct || 'N/A'}% YoY). You MUST cite ONLY +${truth?.revenueYoYGrowthPct || 'N/A'}% as Total Revenue Growth.
-2. CORE PAT GROUND TRUTH: Core PAT = ₹${truth?.patConsolidated || 'N/A'} Cr (+${truth?.patYoYGrowthPct || 'N/A'}% YoY). You MUST cite ONLY +${truth?.patYoYGrowthPct || 'N/A'}% as PAT Growth.
-3. EBITDA MARGIN GROUND TRUTH: EBITDA Margin = ${truth?.ebitdaMarginPct || 'N/A'}% (${truth?.ebitdaMarginBpsDelta || 0} bps YoY).
-4. QUALITATIVE CONVICTION ONLY: Conviction Score MUST be qualitative ONLY ("High", "Medium", "Low"). Outputting numeric "92/100" or "85%" IS FORBIDDEN AND WILL CAUSE IMMEDIATE REPORT REJECTION.
+1. REVENUE GROUND TRUTH: Total Revenue = ₹${truth.revenue ?? 'N/A'} Cr (${truth.revenueYoYGrowthPct ?? 'N/A'}% YoY). Cite only disclosed current revenue growth; absent comparisons are unknown.
+2. REPORTED PAT GROUND TRUTH: PAT = ₹${truth.patAttributable ?? truth.patConsolidated ?? 'N/A'} Cr (${truth.patYoYGrowthPct ?? 'N/A'}% YoY). Do not describe reported PAT as normalised/core earnings.
+3. EBITDA MARGIN GROUND TRUTH: EBITDA Margin = ${truth.ebitdaMarginPct ?? 'N/A'}% (${truth.ebitdaMarginBpsDelta ?? 'N/A'} bps YoY).
+4. QUALITATIVE CONVICTION ONLY: Conviction Score MUST be qualitative ONLY ("High", "Medium", "Low"). Numeric scores and percentages are forbidden.
 5. METRIC ID & LABEL LOCK:
    - Order Book / Backlog is ORDER BACKLOG ONLY. Never call it Revenue.
    - Export Backlog is EXPORT BACKLOG ONLY. Never call it Export Revenue or the revenue of any business line.
@@ -3417,8 +3489,9 @@ Company: ${stock.company_name} (${stock.ticker})
 Investment Thesis: ${stock.investment_thesis || 'Growth & Operating Leverage'}
 
 ${factLockMandateBlock}
+${groundTruthBlock}
 
-🔥 LATEST REPORTING PERIOD GROUND TRUTH: ${currentGroundTruthPeriod} (CRITICAL MANDATE: All analysis MUST treat ${currentGroundTruthPeriod} as the current reporting period! Do NOT label historical Q3 FY26 as current!)
+LATEST REPORTING PERIOD: ${currentGroundTruthPeriod}. Historical quarters must retain their own labels and cannot supply current figures. Missing facts remain unknown; absent event types yield empty arrays or null.
 
 Multi-Quarter Financial & Operational Snapshots History:
 ${formattedMetricsHistory || 'No quarterly snapshot history available.'}
@@ -3431,7 +3504,7 @@ ${commitmentsSummary || 'No explicit commitments tracked yet.'}
 ── CRITICAL MANDATE FOR REPORT OUTPUT ──
 Provide a comprehensive, professional institutional equity research analysis following the exact section structure defined above. Include the exact commitment totals and breakdown percentages from the scorecard above.`;
 
-        const factRegistry = buildFactRegistry(ticker);
+        const factRegistry = buildFactRegistry(ticker, truth);
 
         let finalReportContent = null;
         let attemptPrompt = fullPrompt;
@@ -3448,10 +3521,10 @@ Provide a comprehensive, professional institutional equity research analysis fol
             continue;
           }
 
-          console.log(`[FACT LOCK VALIDATING] Attempt ${attempt}/3 evaluating 8 Machine Gates for ${ticker}...`);
+          console.log(`[FACT LOCK VALIDATING] Attempt ${attempt}/3 evaluating limited deterministic claim checks for ${ticker}...`);
           const validation = validateSynthesisClaims(rawOutput, factRegistry);
           if (validation.valid) {
-            console.log(`[FACT LOCK PASSED] Attempt ${attempt}/3 passed all 8 Machine Gates for ${ticker}!`);
+            console.log(`[FACT LOCK PASSED] Attempt ${attempt}/3 passed the configured claim checks for ${ticker}.`);
             finalReportContent = rawOutput;
             break;
           } else {
@@ -3471,14 +3544,13 @@ YOU MUST CORRECTION THESE ERRORS IN THIS RE-PROMPT:
         }
 
         if (finalReportContent) {
-          // Programmatically prepend Machine-Readable Metadata Header & Q1 FY27 Period Anchor
-          const metadataHeader = `<!-- METADATA_HEADER: { "ticker": "${ticker}", "reporting_period": "${currentGroundTruthPeriod}", "fact_lock_version": "1.0", "validation_status": "PASS", "gates_passed": 8, "generated_at": "${new Date().toISOString()}" } -->
+          // These claim checks are limited; do not label the whole narrative independently verified.
+          const metadataHeader = `<!-- METADATA_HEADER: { "ticker": "${ticker}", "reporting_period": "${currentGroundTruthPeriod}", "fact_lock_version": "2.0", "validation_status": "LIMITED_CLAIM_CHECKS_PASSED", "source_filing_id": "${latestSnapshot.raw_ai_output.source_filing.announcement_id}", "generated_at": "${new Date().toISOString()}" } -->
 **Quarterly Update: ${currentGroundTruthPeriod}**
 
 `;
-          // Clean out any accidental legacy Q3 FY26 header lines generated by LLM
-          let cleanProse = finalReportContent.replace(/\*\*Quarterly Update:?\s*Q3\s*FY26\*\*/gi, '');
-          cleanProse = cleanProse.replace(/Quarterly Update:?\s*Q3\s*FY26/gi, '');
+          // The canonical current-period header is supplied above; retain historical discussion in the body.
+          const cleanProse = finalReportContent.replace(/^\s*\*{0,2}Quarterly Update:?\s*Q[1-4]\s*[_ -]?FY\d{2,4}\*{0,2}\s*$/gim, '');
           
           const structuredReportContent = metadataHeader + cleanProse.trim();
 
@@ -3495,8 +3567,11 @@ YOU MUST CORRECTION THESE ERRORS IN THIS RE-PROMPT:
         }
       } catch (err) {
         console.error(`[SYNTHESIS WARNING] Deferred report '${p.title}' for ${ticker} to next run:`, err.message);
-        // Continue to next prompt or defer cleanly to subsequent run
+        // A provider-chain outage is shared by every report; do not hammer the same failing providers four times.
+        if (err?.chainExhausted) break;
       }
+      // Pace between synthesis reports so back-to-back heavy requests do not trip provider RPM/TPM rate limits
+      await new Promise(r => setTimeout(r, 4000));
     }
   } catch (err) {
     console.error(`[SYNTHESIS ERROR] Failed synthesis for ${ticker}:`, err.message);
@@ -3507,7 +3582,7 @@ YOU MUST CORRECTION THESE ERRORS IN THIS RE-PROMPT:
  * Generates structured, segment-by-segment institutional concall highlights for Telegram.
  */
 export async function generateStructuredConcallHighlights(ticker, companyName, docText, { docKind = "call" } = {}) {
-  if (!docText || docText.length < 300) return null;
+  if (!docText || docText.length < 300) return { extraction_coverage: { parts: 0, parsed: 0 } };
 
   // Clean boilerplate cover letters
   let cleanText = docText;
@@ -3525,10 +3600,11 @@ export async function generateStructuredConcallHighlights(ticker, companyName, d
     try {
       const parsed = parseHighlightReply(await runNimPrompt(system, user, 0.05));
       if (parsed) results.push(parsed);
+      else console.warn(`[CONCALL HIGHLIGHTS WARN] Part ${i + 1}/${parts.length} returned no usable JSON for ${ticker}.`);
     } catch (err) {
       console.warn(`[CONCALL HIGHLIGHTS WARN] Part ${i + 1}/${parts.length} failed for ${ticker}:`, err.message);
     }
   }
-  return mergeConcallHighlights(results);
+  return { ...(mergeConcallHighlights(results) || {}), extraction_coverage: { parts: parts.length, parsed: results.length } };
 }
 

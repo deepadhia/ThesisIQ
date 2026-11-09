@@ -44,12 +44,15 @@ export function stageForFiling(title = "", attachmentUrl = "", previousError = "
 export function buildSelection({ since, ids = [], only = false } = {}) {
   if (only) {
     return { sql: `SELECT id, ticker, title, attachment_url, deep_dive_status, status, filing_date, event_analysis
-     FROM corporate_announcements WHERE id = ANY($1::uuid[]) ORDER BY ticker, filing_date`, params: [ids] };
+     FROM corporate_announcements WHERE id = ANY($1::uuid[])
+       AND COALESCE(event_analysis->>'foreign_filing', 'false') <> 'true'
+     ORDER BY ticker, filing_date`, params: [ids] };
   }
   return { sql: `SELECT id, ticker, title, attachment_url, deep_dive_status, status, filing_date, event_analysis
      FROM corporate_announcements
-     WHERE (deep_dive_status IN ('needs_review', 'failed') AND filing_date >= $1::date)
-        OR id = ANY($2::uuid[])
+     WHERE ((deep_dive_status IN ('needs_review', 'failed') AND filing_date >= $1::date)
+        OR id = ANY($2::uuid[]))
+       AND COALESCE(event_analysis->>'foreign_filing', 'false') <> 'true'
      ORDER BY ticker, filing_date`, params: [since, ids] };
 }
 

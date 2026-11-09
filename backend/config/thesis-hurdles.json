@@ -1,0 +1,152 @@
+{
+  "TIMETECHNO": {
+    "primary": {
+      "minEbitdaMarginPct": 14.5,
+      "minPatCr": 130,
+      "minEbitdaCr": 246
+    },
+    "structural": {
+      "targetVapSharePct": 30
+    },
+    "description": "Primary: EBITDA margin ≥14.5%, PAT ≥₹130 Cr, EBITDA ≥₹246 Cr | Structural: VAP mix ≥30%"
+  },
+  "ANANTRAJ": {
+    "primary": {
+      "minEbitdaMarginPct": 30,
+      "minPatCr": 140
+    },
+    "structural": {
+      "targetDataCenterMw": 6
+    },
+    "description": "Primary: EBITDA margin ≥30%, PAT ≥₹140 Cr | Structural: Data Center monetization"
+  },
+  "HSCL": {
+    "primary": {
+      "minEbitdaMarginPct": 18,
+      "minPatCr": 140
+    },
+    "structural": {
+      "targetScbUtilizationPct": 80
+    },
+    "description": "Primary: EBITDA margin ≥18%, PAT ≥₹140 Cr | Structural: SCB utilization ≥80%"
+  },
+  "HBLENGINE": {
+    "primary": {
+      "minRevenueCr": 700,
+      "minEbitdaMarginPct": 16
+    },
+    "description": "Primary: Quarterly revenue run-rate ≥₹700 Cr, EBITDA margin ≥16%"
+  },
+  "SKIPPER": {
+    "primary": {
+      "minEbitdaMarginPct": 9.5
+    },
+    "structural": {
+      "targetExportMixPct": 45
+    },
+    "description": "Primary: EBITDA margin ≥9.5% | Structural: Export order mix ≥45%"
+  },
+  "INOXINDIA": {
+    "primary": {
+      "minEbitdaMarginPct": 22
+    },
+    "structural": {
+      "targetExportMixPct": 50
+    },
+    "description": "Primary: EBITDA margin ≥22.0% | Structural: Export backlog ≥50%"
+  },
+  "GRAVITA": {
+    "primary": {
+      "minEbitdaMarginPct": 9
+    },
+    "structural": {
+      "targetNonLeadMixPct": 35
+    },
+    "description": "Primary: EBITDA margin ≥9.0% | Structural: Non-lead mix ≥35%"
+  },
+  "CCL": {
+    "primary": {
+      "minEbitdaMarginPct": 18
+    },
+    "structural": {
+      "targetFreezeDriedCapacityUtilPct": 75
+    },
+    "description": "Primary: EBITDA margin ≥18.0% | Structural: Freeze-dried coffee utilization ≥75%"
+  },
+  "ASTRAMICRO": {
+    "primary": {
+      "minEbitdaMarginPct": 18,
+      "minRevenueCr": 200
+    },
+    "structural": {
+      "targetOrderBookCr": 4000
+    },
+    "description": "Primary: Quarterly revenue ≥₹200 Cr, EBITDA margin ≥18.0% | Structural: Order book ≥₹4,000 Cr (HAL Uttam / AMCA AAAU)"
+  },
+  "POLICYBZR": {
+    "primary": {
+      "minRevenueGrowthPct": 25
+    },
+    "structural": {
+      "targetRenewalSharePct": 40
+    },
+    "description": "Primary: Revenue growth ≥25.0% YoY | Structural: Renewal premium share ≥40%"
+  },
+  "ELECON": {
+    "primary": {
+      "minEbitdaMarginPct": 20
+    },
+    "structural": {
+      "targetExportMixPct": 25
+    },
+    "description": "Primary: EBITDA margin ≥20.0% | Structural: European subsidiary demand & export mix ≥25%"
+  },
+  "LUMAXTECH": {
+    "primary": {
+      "minEbitdaMarginPct": 11
+    },
+    "description": "Primary: EBITDA margin ≥11.0% | Structural: IAC India integration & order book expansion"
+  },
+  "SJS": {
+    "primary": {
+      "minEbitdaMarginPct": 22
+    },
+    "description": "Primary: EBITDA margin ≥22.0% | Structural: Walter Pack integration & export share scaling"
+  },
+  "TRANSRAILL": {
+    "primary": {
+      "minEbitdaMarginPct": 11.5
+    },
+    "description": "Primary: EBITDA margin ≥11.5% | Structural: Substation & T&D international execution"
+  },
+  "QPOWER": {
+    "primary": {
+      "minEbitdaMarginPct": 12
+    },
+    "description": "Primary: EBITDA margin ≥12.0% | Structural: Power transmission & distribution order execution"
+  },
+  "SHAKTIPUMP": {
+    "primary": {
+      "minEbitdaMarginPct": 15
+    },
+    "description": "Primary: EBITDA margin ≥15.0% | Structural: KUSUM-3 solar pump dispatch throughput"
+  },
+  "JYOTICNC": {
+    "primary": {
+      "minEbitdaMarginPct": 14
+    },
+    "description": "Primary: EBITDA margin ≥14.0% | Structural: Aerospace & defense CNC order backlog scaling"
+  },
+  "SBCL": {
+    "primary": {
+      "minEbitdaMarginPct": 16
+    },
+    "description": "Primary: EBITDA margin ≥16.0% | Structural: Specialty chemical capacity ramp"
+  },
+  "MOREPENLAB": {
+    "primary": {
+      "minEbitdaMarginPct": 10
+    },
+    "description": "Primary: EBITDA margin ≥10.0% | Structural: Medical devices & API formulation growth"
+  }
+}

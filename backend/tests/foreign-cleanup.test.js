@@ -11,6 +11,23 @@ const row = (o) => ({ id: "r", ticker: "SJS", stock_id: "s-sjs", title: "Updates
 const verified = (map) => new Map(Object.entries(map).map(([t, urls]) => [t, new Set(urls)]));
 
 describe("planForeignCleanup", () => {
+  it('traces already flagged foreign sources even when their text contains quotes or newlines', () => {
+    const statement = 'The board approved a new "speciality" plant\nfor the following financial year';
+    const alien = row({ attachment_url: `${NSE}DENTA_9.pdf`, event_analysis: { foreign_filing: true, commitments: [{ statement }] } });
+    const plan = planForeignCleanup({ rows: [alien], verifiedByTicker: verified({ SJS: [`${NSE}SJS_1.pdf`] }), commitments: [{ id: 'c', ticker: 'SJS', statement }] });
+    expect(plan.foreign).toEqual([]);
+    expect(plan.commitments.map(c => c.id)).toEqual(['c']);
+  });
+
+  it('does not delete evidence also present in a verified own-company filing', () => {
+    const shared = 'Management expects operating performance to improve in the following financial year';
+    const alien = row({ attachment_url: `${NSE}DENTA_9.pdf`, event_analysis: { summary: shared } });
+    const own = row({ attachment_url: `${NSE}SJS_1.pdf`, event_analysis: { summary: shared } });
+    const plan = planForeignCleanup({ rows: [alien, own], verifiedByTicker: verified({ SJS: [`${NSE}SJS_1.pdf`] }), commitments: [{ id: 'c', ticker: 'SJS', statement: shared }], snapshots: [{ id: 's', stock_id: 's-sjs', summary: shared }] });
+    expect(plan.commitments).toEqual([]);
+    expect(plan.snapshots).toEqual([]);
+  });
+
   it("a row whose document is in the stock's own NSE list is legitimate; one that is not is foreign", () => {
     const rows = [row({ id: "own", attachment_url: `${NSE}SJS_1.pdf` }), row({ id: "alien", attachment_url: `${NSE}DENTA_9.pdf` })];
     const plan = planForeignCleanup({ rows, verifiedByTicker: verified({ SJS: [`${NSE}SJS_1.pdf`, `${NSE}SJS_2.pdf`] }) });

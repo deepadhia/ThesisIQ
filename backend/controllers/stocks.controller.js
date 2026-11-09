@@ -3,6 +3,7 @@ import { fetchAndStorePrice } from "../services/price.service.js";
 import { fetchAndStoreFinancials } from "../services/financials.service.js";
 import { pool } from "../db/pool.js";
 import { syncAnnouncementsForTicker } from "../services/announcement.service.js";
+import { currentSyntheses } from "../services/synthesis-freshness.service.js";
 
 /**
  * POST /api/stocks/refresh-screener-data
@@ -273,12 +274,23 @@ export async function getSynthesesHandler(req, res) {
        FROM stock_syntheses WHERE stock_id = $1 ORDER BY prompt_name`,
       [id]
     );
+    const {rows: verifiedSources} = await pool.query(
+      `SELECT raw_ai_output->'source_filing'->>'announcement_id' AS source_id
+       FROM quarterly_snapshots
+       WHERE stock_id = $1
+         AND raw_ai_output->'verified_financials'->>'isFinancialResult' = 'true'
+       ORDER BY COALESCE((substring(quarter from 'FY([0-9]{2})')::integer * 100
+                + substring(quarter from 'Q([1-4])')::integer), 0) DESC, created_at DESC
+       LIMIT 1`, [id]
+    );
+    const freshSyntheses = currentSyntheses(syntheses, verifiedSources[0]?.source_id);
 
     // 2. Fetch Quarterly Filing Deep-Dive Verdicts
     const { rows: quarterlyVerdicts } = await pool.query(
       `SELECT id, title, filing_date, attachment_url, event_analysis 
        FROM corporate_announcements 
-       WHERE stock_id = $1 AND deep_dive_status = 'completed' 
+       WHERE stock_id = $1 AND deep_dive_status = 'completed'
+         AND COALESCE(event_analysis->>'foreign_filing', 'false') <> 'true'
        ORDER BY filing_date DESC`,
       [id]
     );
@@ -286,7 +298,8 @@ export async function getSynthesesHandler(req, res) {
     return res.json({
       ok: true,
       ticker,
-      syntheses,
+      syntheses: freshSyntheses,
+      reportsPending: freshSyntheses.length < syntheses.length,
       quarterlyVerdicts
     });
   } catch (err) {

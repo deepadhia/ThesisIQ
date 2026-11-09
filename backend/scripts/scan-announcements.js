@@ -13,19 +13,19 @@ import {
   sendWeeklyHeartbeat,
   isHeartbeatNeeded,
   markHeartbeatSent,
-  extractTextFromPdfUrl,
+  extractPdfTextDetailed,
   extractResultDateFromText,
   sanitizeResultDate,
   isConcallOrTranscript,
   getConcallType,
   recordScannerSuccess,
   recordScannerFailure,
-  isFuzzyDuplicateTitle,
   isEarningsConcallInvite,
   extractConcallSchedule,
   isImmaterialSubsidiaryFormation,
   largestRupeeAmountCr,
   findContentDuplicate,
+  documentContentHash,
   getFilingAgeHours,
   acquireScanLease,
   releaseScanLease,
@@ -33,7 +33,7 @@ import {
 } from "../services/announcement.service.js";
 import { CLASSIFICATION_ALERT_AFTER_FAILURES, buildClassificationStuckMessage } from "../services/retry-policy.service.js";
 import { classifyAnnouncementWithNim } from "../services/nim.service.js";
-import { classifyFilingCategory, extractCorporateActionDetails, isRoutineCreditRatingReaffirmation, isNewspaperPublicationFiling, isResultsOutcomeFiling } from "../services/filing-classifier.service.js";
+import { classifyFilingCategory, extractCorporateActionDetails, isRoutineCreditRatingReaffirmation, isNewspaperPublicationFiling, isResultsOutcomeFiling, isDocumentedOrderFiling, isPressReleaseDocument, shouldQueueMaterialPressRelease, shouldQueueUnreadableMaterialFiling } from "../services/filing-classifier.service.js";
 import { processPendingDeepDives } from "../workers/quarterly-deepdive-worker.js";
 import { sendAnnouncementAlert, sendConcallScheduleAlert, sendRunSummary, sendTelegramMessage, buildBseDocumentUrl } from "../services/telegram.service.js";
 import { 
@@ -99,7 +99,7 @@ async function sendHeartbeat(stocksCount = 20) {
  * Main Scanning Orchestrator
  */
 export async function scan({ isDryRun = false, runUrl = null, targetTicker = null, forceReevaluate = false } = {}) {
-  writeLog("SCANNER", `🟢 Starting Corporate Announcement Scan... ${isDryRun ? "[DRY RUN]" : "[LIVE DAEMON]"}${forceReevaluate ? " [FORCE REEVALUATE]" : ""}`);
+  writeLog("SCANNER", `🟢 Starting Corporate Announcement Scan... ${isDryRun ? "[DRY RUN]" : "[LIVE DAEMON]"}${forceReevaluate ? " [FORCE REEVALUATE]" : ""}`, { persist: !isDryRun });
   const startTime = Date.now();
 
   // Oracle PM2 and the GitHub Actions failover share one database: only one scan may run at a time,
@@ -133,7 +133,7 @@ async function runScan({ isDryRun, runUrl, targetTicker, forceReevaluate, startT
   }
 
   // 0. System Cleanup & Heartbeat
-  await resetStuckPending();
+  if (!isDryRun) await resetStuckPending();
   // 1. Get portfolio & watchlist stocks dynamically from DB
   let query = "SELECT id, ticker, company_name, COALESCE(nse_symbol, ticker) AS nse_symbol, bse_scrip_code, investment_thesis, category FROM stocks WHERE (category IN ('Core', 'Watchlist') OR category IS NULL)";
   const params = [];
@@ -146,13 +146,13 @@ async function runScan({ isDryRun, runUrl, targetTicker, forceReevaluate, startT
   // Rotate the starting point every cycle so a time-limited run never starves the same tail of the list
   const rotation = allStocks.length > 0 ? Math.floor(Date.now() / 300000) % allStocks.length : 0;
   const stocks = targetTicker ? allStocks : [...allStocks.slice(rotation), ...allStocks.slice(0, rotation)];
-  writeLog("SCANNER", `🔍 Monitoring ${stocks.length} stock(s) across NSE & BSE${targetTicker ? ` (Filtered: ${targetTicker})` : ''}`);
+  writeLog("SCANNER", `🔍 Monitoring ${stocks.length} stock(s) across NSE & BSE${targetTicker ? ` (Filtered: ${targetTicker})` : ''}`, { persist: !isDryRun });
   const thesisGaps = findThesisGaps(stocks);
   if (thesisGaps.length > 0) {
-    writeLog("SCANNER", `⚠️ No usable thesis (placeholder text and no driver contract) for: ${thesisGaps.join(", ")}. Run backend/scripts/seed-stock-theses.js or add a contract.`);
+    writeLog("SCANNER", `⚠️ No usable thesis (placeholder text and no driver contract) for: ${thesisGaps.join(", ")}. Run backend/scripts/seed-stock-theses.js or add a contract.`, { persist: !isDryRun });
   }
 
-  if (!targetTicker) {
+  if (!isDryRun && !targetTicker) {
     await sendHeartbeat(stocks.length);
   }
 
@@ -252,11 +252,8 @@ async function runScan({ isDryRun, runUrl, targetTicker, forceReevaluate, startT
             continue;
           }
 
-          const GENERIC_TITLES = ["General Updates", "Updates", "Corporate Announcement", "Press Release"];
-          if (!GENERIC_TITLES.includes(title) && await isFuzzyDuplicateTitle(ticker, title)) {
-            console.log(`[SKIP] Fuzzy duplicate detected for ${ticker}: ${title}`);
-            continue;
-          }
+          // Source ID is the only safe pre-document identity. Distinct contracts can have the
+          // same standard exchange subject; content duplication is checked after PDF download.
         }
 
         newAnnouncements++;
@@ -303,13 +300,16 @@ async function runScan({ isDryRun, runUrl, targetTicker, forceReevaluate, startT
         }
 
         let extractedText = "";
+        let pdfResult = null;
         if (docUrl) {
           console.log(`[PDF] Extracting text from: ${docUrl}`);
-          extractedText = await extractTextFromPdfUrl(docUrl);
+          // Fast native pass here; queued material PDFs receive quota-managed OCR in the worker.
+          pdfResult = await extractPdfTextDetailed(docUrl, { allowOcr: false });
+          extractedText = pdfResult.text;
         }
 
         // The same PDF is published on NSE and BSE under different ids/titles: analyse and alert it once.
-        if (!forceReevaluate && extractedText && extractedText.length >= 1200) {
+        if (!forceReevaluate && extractedText && extractedText.length >= 150) {
           const dup = await findContentDuplicate(ticker, extractedText);
           if (dup) {
             console.log(`[SKIP CONTENT-DUP] ${ticker} "${title}" is the same document as "${dup.title}" already processed.`);
@@ -326,7 +326,9 @@ async function runScan({ isDryRun, runUrl, targetTicker, forceReevaluate, startT
           }
         }
 
+        const isPressRelease = isPressReleaseDocument(title);
         const isMaterialActionText = 
+          isPressRelease ||
           title.toLowerCase().includes("rights issue") ||
           title.toLowerCase().includes("preferential") ||
           title.toLowerCase().includes("qip") ||
@@ -360,10 +362,10 @@ async function runScan({ isDryRun, runUrl, targetTicker, forceReevaluate, startT
         if (extractedText && extractedText.trim().length > 50) {
           announcementText = `TITLE: ${title}\n\nCONTENT:\n${extractedText}`;
           console.log(`[PDF] Successfully extracted ${extractedText.length} chars.`);
-        } else if (docUrl && isMaterialActionText && (!extractedText || extractedText.trim().length <= 50) && ageHrs < MAX_PDF_DEFER_HOURS) {
+        } else if (docUrl && pdfResult?.reason === 'FETCH_FAILED' && isMaterialActionText && (!extractedText || extractedText.trim().length <= 50) && ageHrs < (isPressRelease ? 0.25 : MAX_PDF_DEFER_HOURS)) {
           console.log(`[PDF DEFER] Material corporate action PDF not replicated yet on CDN (${ticker} - ${title}). Deferring to next scan cycle for full extraction.`);
           continue;
-        } else if (ann.attachment_text) {
+        } else if (ann.attachment_text && !(docUrl && ['NO_TEXT', 'OCR_UNAVAILABLE'].includes(pdfResult?.reason))) {
           console.log(`[TEXT] Using provided attachment text for ${ticker}`);
           announcementText = `TITLE: ${title}\n\nSUMMARY:\n${ann.attachment_text}`;
         } else if (docUrl) {
@@ -381,6 +383,10 @@ async function runScan({ isDryRun, runUrl, targetTicker, forceReevaluate, startT
           console.error(`AI Classification permanently failed for ${ticker}:`, err.message);
           // Save as 'failed' to skip re-download on next runs; will still be retried
           // because isAnnouncementProcessed excludes 'failed' status.
+          if (isDryRun) {
+            console.warn(`[DRY RUN] Classification failed for ${ticker}; no retry state written.`);
+            continue;
+          }
           await saveAnnouncement({
             stock_id: stock.id,
             ticker,
@@ -474,6 +480,19 @@ async function runScan({ isDryRun, runUrl, targetTicker, forceReevaluate, startT
         // and never read, so those stocks had no results alert with verified numbers.
         if (deepDiveStatus === "not_required" && isResultsOutcomeFiling({ title, text: announcementText })) {
           console.warn(`[OVERRIDE] results outcome queued for the deep-dive although classified ${filingCategory}${aiResult.is_earnings_release ? "" : " / not earnings"}: ${ticker} - ${title}`);
+          deepDiveStatus = "pending_stage1";
+        }
+        if (deepDiveStatus === "not_required" && shouldQueueMaterialPressRelease({
+          title, text: announcementText, priority: aiResult.priority, impact: aiResult.impact,
+          hasSubstantiveBusinessInsights: aiResult.has_substantive_business_insights
+        })) {
+          console.log(`[QUEUE PRESS] Material release queued for source-grounded thesis and guidance analysis: ${ticker} - ${title}`);
+          deepDiveStatus = "pending_stage1";
+        }
+        if (deepDiveStatus === "not_required" && shouldQueueUnreadableMaterialFiling({
+          title, text: announcementText, filingCategory, attachmentUrl: docUrl
+        })) {
+          console.warn(`[QUEUE UNREADABLE] ${ticker}: material source PDF could not be read; worker will retry and raise a review alert if needed.`);
           deepDiveStatus = "pending_stage1";
         }
 
@@ -660,6 +679,7 @@ async function runScan({ isDryRun, runUrl, targetTicker, forceReevaluate, startT
           !isRoutineCreditReaffirmation && 
           !isSuppressedCorrigendum && (
           (aiResult.priority === "HIGH") ||
+          isDocumentedOrderFiling({ title, text: announcementText, filingCategory }) ||
           (isMajorCorporateAction && aiResult.priority !== "LOW" && !String(aiResult?.impact || "").includes("NEUTRAL")) ||
           (aiResult.priority === "MEDIUM" && !String(aiResult?.impact || "").includes("NEUTRAL") && aiResult.has_substantive_business_insights)
         );
@@ -798,7 +818,9 @@ async function runScan({ isDryRun, runUrl, targetTicker, forceReevaluate, startT
           attachment_url: docUrl,
           filing_date: timestamp,
           filing_category: (isAgmCompleted || (isAgm && hasMaterialAgmHighlights)) ? "AGM_DISCLOSURE" : filingCategory,
-          event_analysis: eventAnalysis,
+          event_analysis: extractedText && documentContentHash(extractedText)
+            ? { ...eventAnalysis, content_hash: documentContentHash(extractedText) }
+            : eventAnalysis,
           deep_dive_status: deepDiveStatus,
           key_data: aiResult.key_data,
           deep_dive_indicator: aiResult.deep_dive_indicator
@@ -947,10 +969,12 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
     process.exit(0);
   }).catch(async (err) => {
     console.error("Fatal error during scan:", err);
-    try {
-      await recordScannerFailure(err, { environment: "Server PM2 Daemon" });
-    } catch (recErr) {
-      console.error("Failed to record failure in DB:", recErr.message);
+    if (!isDryRun) {
+      try {
+        await recordScannerFailure(err, { environment: "Server PM2 Daemon" });
+      } catch (recErr) {
+        console.error("Failed to record failure in DB:", recErr.message);
+      }
     }
     process.exit(1);
   });

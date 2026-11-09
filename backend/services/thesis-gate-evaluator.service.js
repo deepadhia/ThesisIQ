@@ -149,158 +149,7 @@ export function evaluateUniversalFinancialHealth(fin = {}) {
  * Primary Gates: Mandatory financial conditions for BUY authorization.
  * Structural Confirmation: Modifies conviction (8/10 vs 9/10), but does not block BUY if primary gates clear.
  */
-const SPECIFIC_THESIS_HURDLES = {
-  TIMETECHNO: {
-    primary: {
-      minEbitdaMarginPct: 14.5,
-      minPatCr: 130.0,
-      minEbitdaCr: 246.0
-    },
-    structural: {
-      targetVapSharePct: 30.0
-    },
-    description: "Primary: EBITDA margin ≥14.5%, PAT ≥₹130 Cr, EBITDA ≥₹246 Cr | Structural: VAP mix ≥30%"
-  },
-  ANANTRAJ: {
-    primary: {
-      minEbitdaMarginPct: 30.0,
-      minPatCr: 140.0
-    },
-    structural: {
-      targetDataCenterMw: 6.0
-    },
-    description: "Primary: EBITDA margin ≥30%, PAT ≥₹140 Cr | Structural: Data Center monetization"
-  },
-  HSCL: {
-    primary: {
-      minEbitdaMarginPct: 18.0,
-      minPatCr: 140.0
-    },
-    structural: {
-      targetScbUtilizationPct: 80.0
-    },
-    description: "Primary: EBITDA margin ≥18%, PAT ≥₹140 Cr | Structural: SCB utilization ≥80%"
-  },
-  HBLENGINE: {
-    primary: {
-      minRevenueCr: 700.0,
-      minEbitdaMarginPct: 16.0
-    },
-    description: "Primary: Quarterly revenue run-rate ≥₹700 Cr, EBITDA margin ≥16%"
-  },
-  SKIPPER: {
-    primary: {
-      minEbitdaMarginPct: 9.5
-    },
-    structural: {
-      targetExportMixPct: 45.0
-    },
-    description: "Primary: EBITDA margin ≥9.5% | Structural: Export order mix ≥45%"
-  },
-  INOXINDIA: {
-    primary: {
-      minEbitdaMarginPct: 22.0
-    },
-    structural: {
-      targetExportMixPct: 50.0
-    },
-    description: "Primary: EBITDA margin ≥22.0% | Structural: Export backlog ≥50%"
-  },
-  GRAVITA: {
-    primary: {
-      minEbitdaMarginPct: 9.0
-    },
-    structural: {
-      targetNonLeadMixPct: 35.0
-    },
-    description: "Primary: EBITDA margin ≥9.0% | Structural: Non-lead mix ≥35%"
-  },
-  CCL: {
-    primary: {
-      minEbitdaMarginPct: 18.0
-    },
-    structural: {
-      targetFreezeDriedCapacityUtilPct: 75.0
-    },
-    description: "Primary: EBITDA margin ≥18.0% | Structural: Freeze-dried coffee utilization ≥75%"
-  },
-  ASTRAMICRO: {
-    primary: {
-      minEbitdaMarginPct: 18.0,
-      minRevenueCr: 200.0
-    },
-    structural: {
-      targetOrderBookCr: 4000.0
-    },
-    description: "Primary: Quarterly revenue ≥₹200 Cr, EBITDA margin ≥18.0% | Structural: Order book ≥₹4,000 Cr (HAL Uttam / AMCA AAAU)"
-  },
-  POLICYBZR: {
-    primary: {
-      minRevenueGrowthPct: 25.0
-    },
-    structural: {
-      targetRenewalSharePct: 40.0
-    },
-    description: "Primary: Revenue growth ≥25.0% YoY | Structural: Renewal premium share ≥40%"
-  },
-  ELECON: {
-    primary: {
-      minEbitdaMarginPct: 20.0
-    },
-    structural: {
-      targetExportMixPct: 25.0
-    },
-    description: "Primary: EBITDA margin ≥20.0% | Structural: European subsidiary demand & export mix ≥25%"
-  },
-  LUMAXTECH: {
-    primary: {
-      minEbitdaMarginPct: 11.0
-    },
-    description: "Primary: EBITDA margin ≥11.0% | Structural: IAC India integration & order book expansion"
-  },
-  SJS: {
-    primary: {
-      minEbitdaMarginPct: 22.0
-    },
-    description: "Primary: EBITDA margin ≥22.0% | Structural: Walter Pack integration & export share scaling"
-  },
-  TRANSRAILL: {
-    primary: {
-      minEbitdaMarginPct: 11.5
-    },
-    description: "Primary: EBITDA margin ≥11.5% | Structural: Substation & T&D international execution"
-  },
-  QPOWER: {
-    primary: {
-      minEbitdaMarginPct: 12.0
-    },
-    description: "Primary: EBITDA margin ≥12.0% | Structural: Power transmission & distribution order execution"
-  },
-  SHAKTIPUMP: {
-    primary: {
-      minEbitdaMarginPct: 15.0
-    },
-    description: "Primary: EBITDA margin ≥15.0% | Structural: KUSUM-3 solar pump dispatch throughput"
-  },
-  JYOTICNC: {
-    primary: {
-      minEbitdaMarginPct: 14.0
-    },
-    description: "Primary: EBITDA margin ≥14.0% | Structural: Aerospace & defense CNC order backlog scaling"
-  },
-  SBCL: {
-    primary: {
-      minEbitdaMarginPct: 16.0
-    },
-    description: "Primary: EBITDA margin ≥16.0% | Structural: Specialty chemical capacity ramp"
-  },
-  MOREPENLAB: {
-    primary: {
-      minEbitdaMarginPct: 10.0
-    },
-    description: "Primary: EBITDA margin ≥10.0% | Structural: Medical devices & API formulation growth"
-  }
-};
+const SPECIFIC_THESIS_HURDLES = JSON.parse(fs.readFileSync(path.resolve(__dirname, '../config/thesis-hurdles.json'), 'utf8'));
 
 /**
  * Human-readable hurdle definition for a ticker (e.g. "Primary: EBITDA margin ≥15.0% | Structural: ..."), or null.
@@ -396,18 +245,19 @@ export function evaluateThesisSpecificHurdle(ticker, fin = {}, operational = {})
     }
   }
 
-  // Evaluate Structural Confirmation Metric (e.g. VAP mix)
-  let structuralConfirmed = true;
-  const structural = hurdles.structural || {};
-  if (structural.targetVapSharePct !== undefined) {
-    if (safeOperational.vapSharePct !== undefined && safeOperational.vapSharePct !== null) {
-      structuralConfirmed = Number(safeOperational.vapSharePct) >= structural.targetVapSharePct;
-    } else if (safeFin.vapSharePct !== undefined && safeFin.vapSharePct !== null) {
-      structuralConfirmed = Number(safeFin.vapSharePct) >= structural.targetVapSharePct;
-    } else {
-      structuralConfirmed = false; // Pending structural data
-    }
+  if (primary.minRevenueGrowthPct !== undefined) {
+    if (!Number.isFinite(safeFin.revenueYoYGrowthPct)) unavailable.push('Required KPI revenue growth unavailable in verified data');
+    else if (safeFin.revenueYoYGrowthPct < primary.minRevenueGrowthPct) failures.push(`Revenue growth ${safeFin.revenueYoYGrowthPct}% < target ${primary.minRevenueGrowthPct}%`);
   }
+
+  // Every configured target uses the same evidence rule; absent structural data cannot confirm it.
+  const structural = hurdles.structural || {};
+  const structuralConfirmed = Object.entries(structural).every(([key, target]) => {
+    if (!/^target[A-Z]/.test(key) || !Number.isFinite(target)) return false;
+    const metric = key.replace(/^target([A-Z])/, (_, initial) => initial.toLowerCase());
+    const value = safeOperational[metric] ?? safeFin[metric];
+    return value !== null && value !== undefined && value !== '' && Number.isFinite(Number(value)) && Number(value) >= target;
+  });
 
   if (unavailable.length > 0) {
     return {

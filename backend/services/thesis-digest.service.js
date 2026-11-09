@@ -127,6 +127,7 @@ const SETTLING_KINDS = new Set(["DECK", "PRESS", "OTHER"]);
 export function hasUrgentDigestItem(items = []) {
   return items.some((i) => i && (
     i.llmFailed ||
+    i.highlightExtractionIncomplete ||
     i.guidanceCuts?.length ||
     i.commitmentFlags?.length ||
     (i.assessment || []).some((a) => a && /AT_RISK|BROKEN/i.test(String(a.status || ""))) ||
@@ -144,7 +145,7 @@ export function quietBatchReason({ items = [], resultsAlerted = false } = {}) {
   if (!resultsAlerted || !items.length) return null;
   if (!items.every((i) => i && i.kind === "PRESS")) return null;
   for (const i of items) {
-    if (i.llmFailed) return null;
+    if (i.llmFailed || i.highlightExtractionIncomplete) return null;
     if (i.guidance?.length || i.guidanceCuts?.length || i.commitmentFlags?.length || i.growthInitiatives?.length || i.operations?.length || i.businessExecution?.length || i.highlights) return null;
     if ((i.assessment || []).some((a) => a && /AT_RISK|BROKEN/i.test(String(a.status || "")))) return null;
   }
@@ -162,7 +163,7 @@ const CALL_LISTS = ["guidance_changes", "annual_guidance", "quarterly_guidance",
  */
 export function repeatsEarlierCallWriteup({ items = [], earlierItems = [] } = {}) {
   if (!items.length || !earlierItems.length) return false;
-  if (!items.every((i) => i && i.kind === "CONCALL" && i.source !== "audio" && i.highlights)) return false;
+  if (!items.every((i) => i && i.kind === "CONCALL" && i.source !== "audio" && i.highlights && !i.highlightExtractionIncomplete)) return false;
   const earlier = earlierItems.filter((e) => e && e.highlights);
   if (!earlier.length) return false;
   const known = numbersOf(earlier.flatMap((e) => CALL_LISTS.flatMap((k) => asList(e.highlights[k]))).join(" "));
@@ -262,6 +263,7 @@ export function buildDigestItem({ kind, title, url = null, filedAt, queuedAt = n
     source,
     // True when the item holds real analysis of a call: only then does the digest report the concall as analysed.
     analysed: Boolean(analysed),
+    highlightExtractionIncomplete: verdict.highlight_extraction?.status === "INCOMPLETE",
     llmFailed: failed
   };
 }
@@ -325,7 +327,7 @@ export function guidanceCutsOf(ch = {}) {
  * pure noise. A filing whose AI analysis failed is never content-free: the user must still hear that it arrived.
  */
 export function isContentFreeDigestItem(item = {}) {
-  if (item.llmFailed) return false;
+  if (item.llmFailed || item.highlightExtractionIncomplete) return false;
   const hasEvidence = Array.isArray(item.assessment) && item.assessment.some((a) => a && !/NO_EVIDENCE/i.test(String(a.status || "")) && String(a.evidence || "").trim());
   return !(item.positives?.length || item.concerns?.length || item.guidance?.length || item.facts?.length || item.commitmentFlags?.length || item.highlights || hasEvidence);
 }
@@ -595,6 +597,9 @@ export function formatThesisDigestMessage({ ticker, companyName, items = [], boa
   signalLines.push(`🧭 *THESIS STATUS:* ${status.emoji} ${status.label}${tally ? `\n   _(${tally})_` : ""}`);
 
   let msg = `${headerLines.join("\n")}\n${divider}\n${signalLines.join("\n\n")}\n${divider}`;
+  if (items.some(i => i.highlightExtractionIncomplete)) {
+    msg += "\n\n⚠️ *Highlight extraction incomplete:* part of a call or presentation could not be read by the AI. Review the linked filing for missing guidance and forward points.";
+  }
 
   if (financialsBlock) msg += `\n\n${financialsBlock.trim()}`;
   // Guidance pacing from the newest item that carries it: the year to date against the full-year guide, and what the rest must deliver.

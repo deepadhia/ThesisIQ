@@ -47,9 +47,9 @@ async function main() {
   }
 
   const { rows: commitments } = await pool.query(
-    "SELECT id, ticker, stock_id, quarter, statement, evidence_summary, created_at FROM management_commitments WHERE created_at >= $1", [since]);
+    "SELECT id, ticker, stock_id, quarter, statement, evidence_summary, created_at FROM management_commitments");
   const { rows: snapshots } = await pool.query(
-    "SELECT id, stock_id, quarter, summary, created_at FROM quarterly_snapshots WHERE created_at >= $1", [since]);
+    "SELECT id, stock_id, quarter, summary, created_at FROM quarterly_snapshots");
   const plan = planForeignCleanup({ rows, verifiedByTicker, commitments, snapshots });
   const s = plan.summary;
 

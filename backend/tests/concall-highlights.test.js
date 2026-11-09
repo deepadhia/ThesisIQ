@@ -87,6 +87,13 @@ describe("merging the per-part model results", () => {
     expect(user).toContain("part 2 of 3");
     expect(`${system}${user}`).not.toMatch(/SJS|Shivalik|Transrail|₹\s?\d|Rs\.?\s?\d/i);
   });
+  it("asks for forward commitments across fiscal years and business scopes without treating a segment target as group guidance", () => {
+    const { user } = buildHighlightPrompts({ ticker: "ABC", companyName: "Abc Ltd", text: "transcript" });
+    expect(user).toMatch(/future fiscal year/i);
+    expect(user).toMatch(/segment|subsidiary/i);
+    expect(user).toMatch(/milestone/i);
+    expect(user).toMatch(/scope.*(?:company|segment)/i);
+  });
 });
 
 describe("guidance cuts are recognised by the marker the model writes, not by words elsewhere in the bullet", () => {

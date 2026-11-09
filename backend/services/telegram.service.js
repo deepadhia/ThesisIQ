@@ -957,7 +957,7 @@ export async function sendConcallDiscrepancyAlert({
  * Sends a high-visibility pipeline failure alert when a material filing fails deep-dive extraction.
  * Ensures dead-letter items are never silently dropped.
  */
-export async function sendPipelineFailureAlert({ ticker, title, error, docUrl }) {
+export function formatPipelineFailureAlert({ ticker, title, error, docUrl }) {
   const timestamp = getIstTimestamp();
   let message = `⚠️ *PIPELINE EXTRACTION FAILURE ALERT*\n`;
   message    += `──────────────────────────────\n`;
@@ -970,5 +970,9 @@ export async function sendPipelineFailureAlert({ ticker, title, error, docUrl })
   } else {
     message += `🕐 ${timestamp}`;
   }
-  return sendTelegramMessage(message);
+  return message;
+}
+
+export async function sendPipelineFailureAlert(params) {
+  return sendTelegramMessage(formatPipelineFailureAlert(params));
 }

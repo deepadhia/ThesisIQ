@@ -171,7 +171,8 @@ function recordFailure(name, err, nowMs) {
   h.consecutive += 1;
   h.lastError = String(err.message || err).slice(0, 200);
   h.lastStatus = err.status ?? null;
-  if (PERMANENT_STATUSES.has(err.status)) {
+  if (PERMANENT_STATUSES.has(err.status) || err.status === 402) {
+    // Billing exhaustion needs account action, not model rediscovery or repeated attempts on every filing.
     h.permanent = true;
     h.cooldownUntil = nowMs + PERMANENT_COOLDOWN_MS;
   } else if (err.status === 429) {
@@ -299,9 +300,10 @@ export async function runLlmPrompt(systemPrompt, userPrompt, {
       if (timeLeft() < MIN_ATTEMPT_MS) break;
       let waitedOnce = false;
       for (;;) {
+        const attemptTimeoutMs = Math.min(p.timeoutMs, timeLeft());
         try {
           const attemptStart = Date.now();
-          const reply = await callProvider(p, systemPrompt, userPrompt, temperature, fetchImpl);
+          const reply = await callProvider({ ...p, timeoutMs: attemptTimeoutMs }, systemPrompt, userPrompt, temperature, fetchImpl);
           recordSuccess(p.name);
           stats.succeeded += 1;
           const secs = ((Date.now() - attemptStart) / 1000).toFixed(1);
@@ -316,7 +318,7 @@ export async function runLlmPrompt(systemPrompt, userPrompt, {
           if (PERMANENT_STATUSES.has(err.status) && onPermanentFailure) {
             try { onPermanentFailure(p, err); } catch { /* a hook must never break a call */ }
           }
-          console.warn(`[LLM] ${p.name} failed: ${err.name === "AbortError" ? `no reply within ${p.timeoutMs / 1000}s` : err.message}`);
+          console.warn(`[LLM] ${p.name} failed: ${err.name === "AbortError" ? `no reply within ${attemptTimeoutMs / 1000}s` : err.message}`);
           if (err.status === 429 && !waitedOnce) {
             const wait = err.retryAfterMs ?? DEFAULT_RETRY_AFTER_MS;
             if (wait <= MAX_RETRY_AFTER_MS && timeLeft() - wait >= MIN_ATTEMPT_MS) {

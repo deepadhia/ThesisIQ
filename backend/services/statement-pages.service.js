@@ -16,7 +16,7 @@ export const lettersOnly = (s) => String(s || "").toLowerCase().replace(/[^a-z]/
 const HEADING = /statementof(?:un)?audited(?:(?:standalone|consolidated)(?:and(?:standalone|consolidated))?)?financialresult|financialresultsforthequarter|resultsforthequarterandhalfyear/;
 const TABLE_WORDS = ["particulars", "revenuefromoperation", "totalincome", "profitbeforetax", "profitfortheperiod", "profitfortheyear", "totalexpense"];
 // pages that talk ABOUT the statement (the auditor's review, notes) rather than hold it
-const NOT_A_TABLE = /independentauditor|limitedreviewreport|wehavereviewed|reviewengagement|notes(?:to|on)(?:the)?(?:standalone|consolidated|unaudited)/;
+const NOT_A_TABLE = /independentauditor|limitedreviewreport|wehavereviewed|reviewengagement|theabovestatement|theaboveresult|notes(?:to|on)(?:the)?(?:standalone|consolidated|unaudited)/;
 
 /**
  * Page numbers (as given by the extractor) of the results statement tables, consolidated first, at most `max`.
@@ -26,8 +26,10 @@ export function findStatementPages(pages = [], max = 4) {
   const hits = [];
   for (const p of pages) {
     const t = lettersOnly(p?.text);
-    if (!t || NOT_A_TABLE.test(t.slice(0, 600))) continue;
-    if (!HEADING.test(t.slice(0, 1200))) continue;
+    const headingAt = t.slice(0, 1200).search(HEADING);
+    if (!t || headingAt < 0) continue;
+    // A real table may have notes below it. Reject only an auditor/notes introduction BEFORE the heading.
+    if (NOT_A_TABLE.test(t.slice(0, Math.min(headingAt, 600)))) continue;
     const words = TABLE_WORDS.filter((w) => t.includes(w)).length;
     if (words < 2) continue;
     hits.push({ num: p.num, consolidated: /^.{0,300}consolidated/.test(t) || t.slice(0, 600).includes("consolidated"), words });

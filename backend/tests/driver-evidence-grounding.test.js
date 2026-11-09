@@ -18,6 +18,15 @@ const verdictWith = (assessment, raw = filing) => ({
 const byDriver = (out, name) => out.thesis_driver_assessment.find(a => a.driver === name);
 
 describe('thesis driver evidence grounding', () => {
+  it('binds the amount to PAT when a correct PAT sentence also mentions revenue growth', () => {
+    const claim = 'Consolidated PAT grew 34.85% YoY to ₹58.03 Cr, significantly outpacing revenue growth.';
+    const fin = { isFinancialResult: true, revenue: 282.73, patAttributable: 58.03, patConsolidated: 58.03, patYoYGrowthPct: 34.85, revenueYoYGrowthPct: 16.95 };
+    const result = applyInstitutionalGuard({ ...verdictWith([], claim + ' Revenue stood at 282.73 Cr in the quarter.'), key_positives: [claim] }, fin, 'Results', 'TEST');
+    expect(result.key_positives).toContain(claim);
+    const wrong = claim.replace('₹58.03', '₹90.00');
+    const rejected = applyInstitutionalGuard({ ...verdictWith([], wrong + ' Revenue stood at 282.73 Cr in the quarter.'), key_positives: [wrong] }, fin, 'Results', 'TEST');
+    expect(rejected.key_positives).not.toContain(wrong);
+  });
   const out = applyInstitutionalGuard(verdictWith([
     entry('A', 'CONFIRMED', 'Order book stood at 1,450 Cr at the end of the quarter'),
     entry('B', 'AT_RISK', 'Receivable days rose to 340 days from 96 a year ago'),

@@ -134,13 +134,14 @@ describe('Exchange feed correctness', () => {
     expect(getFilingAgeHours('2026-10-23T18:25:25', now)).toBeCloseTo(0.07, 1); // filed 5 minutes ago, not "in the future"
   });
 
-  it('two different NSE "Updates" on the same day no longer collide, long descriptive titles still dedupe', () => {
+  it('different exchange IDs do not collide before the PDFs are read, even under the same standard order title', () => {
     const t = '2026-10-23T15:00:00';
     const a = generateAnnouncementHash('SHAKTIPUMP', 'Updates', t, 'seq-1');
     const b = generateAnnouncementHash('SHAKTIPUMP', 'Updates', t, 'seq-2');
     expect(a).not.toBe(b);
-    const longTitle = 'Announcement under Regulation 30 (LODR)-Credit Rating assigned by CRISIL to the bank facilities';
-    expect(generateAnnouncementHash('X', longTitle, t, 'seq-1')).toBe(generateAnnouncementHash('X', longTitle, t, 'seq-2'));
+    const longTitle = 'Announcement under Regulation 30 (LODR)-Bagging/receiving of order(s) or contract(s)';
+    expect(generateAnnouncementHash('X', longTitle, t, 'seq-1')).not.toBe(generateAnnouncementHash('X', longTitle, t, 'seq-2'));
+    expect(generateAnnouncementHash('X', longTitle, t, 'seq-1')).toBe(generateAnnouncementHash('X', longTitle, t, 'seq-1'));
   });
 
   it('a call invitation that promises a future transcript is not a transcript; a real transcript still is', () => {

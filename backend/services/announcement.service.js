@@ -7,6 +7,10 @@ import { GEMINI_API_KEY } from "../config/env.js";
 import { backoffDelayMs } from "./retry-policy.service.js";
 import { getGeminiModelNames } from "./llm.service.js";
 import { findStatementPages, looksGarbled, capDocumentText } from "./statement-pages.service.js";
+import { rankScannedTablePages, rotateOcrImages } from "./scanned-statement-pages.service.js";
+import { geminiOcrQuotaGate, ocrDeferred, ocrRetryAfterMs } from "./ocr-quota.service.js";
+import { extractDeterministicFinancials, detectDocumentUnit } from "./financial-validator.service.js";
+import { ocrCacheKey, ocrTextCache } from "./ocr-cache.service.js";
 
 const HIGH_KEYWORDS = [
   "order", "contract", "work order", "order win", "loa", "letter of award",
@@ -862,15 +866,12 @@ export async function fetchNseAnnouncements(symbol, lookbackDaysNum = 30) {
  * when source_id (NEWS_ID) is missing or unreliable.
  */
 export function generateAnnouncementHash(ticker, title, timestamp, discriminator = null) {
-  // Use normalized title and DATE ONLY for the hash to handle small time drifts between exchanges
+  // An exchange ID identifies a filing before its PDF is available. Standard exchange subjects
+  // can repeat for different orders on one day; cross-exchange copies are checked by content.
   const norm = normalizeTitle(title);
   const iso = parseExchangeTimestamp(timestamp);
   const date = iso ? iso.split('T')[0] : 'nodate';
-  // NSE files many different documents under the same short generic subject ("Updates", "Press Release",
-  // "Financial Results", ...). Without a discriminator the 2nd..nth such filing of the day is silently
-  // dropped as a duplicate of the first. Long descriptive titles keep the cross-exchange dedup behaviour.
-  const isGenericShort = norm.split(/\s+/).filter(Boolean).length <= 5;
-  const disc = isGenericShort && discriminator ? `:${discriminator}` : '';
+  const disc = discriminator ? `:${discriminator}` : '';
   const data = `${ticker}:${norm}:${date}${disc}`;
   return crypto.createHash("md5").update(data).digest("hex");
 }
@@ -988,6 +989,11 @@ export async function isEventAlertRecentlySent({ ticker, title, summary, concall
       }
     }
   }
+
+  // Distinct orders and commissioning events can share the exact standard exchange subject
+  // and even the same amount. The filename checks above and the scanner's PDF-content check
+  // handle actual copies; title/summary similarity must not suppress a new source document.
+  if (["ORDER_WIN", "CAPEX_COMMISSIONING"].includes(filing_category)) return false;
 
   // 2. Earnings Release deduplication check (1 release alert per ticker per 24 hours)
   if (is_earnings_release) {
@@ -1198,25 +1204,30 @@ export async function isFuzzyDuplicateTitle(ticker, title) {
   });
 }
 
-/**
- * Cross-exchange document de-duplication: NSE and BSE publish the same PDF under different ids/titles.
- * Matches on the first ~1,000 characters of extracted text already stored for this ticker.
- */
+/** Stable identity of the complete extracted PDF, independent of exchange title and filename. */
+export function documentContentHash(extractedText) {
+  const normalized = String(extractedText || '').replace(/\s+/g, ' ').trim();
+  return normalized.length >= 150 ? crypto.createHash('sha256').update(normalized).digest('hex') : null;
+}
+
+/** Cross-exchange document deduplication, requiring the full body rather than a shared cover. */
 export async function findContentDuplicate(ticker, extractedText, withinDays = 10) {
   const text = String(extractedText || "");
-  if (!ticker || text.length < 1200) return null;
-  const probe = text.slice(0, 1000);
+  const hash = documentContentHash(text);
+  if (!ticker || !hash) return null;
   const { rows } = await pool.query(
-    `SELECT id, status, deep_dive_status, sent_to_telegram, title
+    `SELECT id, status, deep_dive_status, sent_to_telegram, title, raw_text, event_analysis->>'content_hash' AS content_hash
      FROM corporate_announcements
      WHERE ticker = $1
-       AND created_at > NOW() - ($3 || ' days')::interval
+       AND created_at > NOW() - ($2 || ' days')::interval
        AND status != 'failed'
-       AND POSITION($2 IN raw_text) > 0
-     LIMIT 1`,
-    [ticker, probe, String(withinDays)]
+       AND (event_analysis->>'content_hash' = $3 OR raw_text LIKE $4)
+     ORDER BY created_at DESC LIMIT 50`,
+    [ticker, String(withinDays), hash, `%${text.slice(0, 150)}%`]
   );
-  return rows[0] || null;
+  return rows.find(row => row.content_hash === hash ||
+    row.event_analysis?.content_hash === hash ||
+    (text.length <= 4000 && String(row.raw_text || '').endsWith(text))) || null;
 }
 
 /**
@@ -1707,16 +1718,32 @@ export function stripOcrMarkdown(text) {
     .replace(/[^\S\r\n]*\|[^\S\r\n]*/g, " ");                                          // column separators -> plain spacing (the statement parser tokenises on whitespace)
 }
 
-const TABLE_FIDELITY_RULES = "Output plain text only: no markdown, no bold, no headings, no separator rows. Keep every row label and keep the column order and column headings exactly as printed (Quarter Ended, Preceding Quarter, Corresponding Quarter, Half Year Ended, Year Ended). Write each table row on one line with its numbers separated by ' | ', and state the unit printed in the table heading (Rs. in crores / lakhs). Preserve exact numbers and parentheses for negatives; never estimate or fill in a figure you cannot read.";
+const TABLE_FIDELITY_RULES = "Output plain text only: no markdown, no bold, no headings, no separator rows. Keep every row label and keep the column order and column headings exactly as printed (Quarter Ended, Preceding Quarter, Corresponding Quarter, Half Year Ended, Year Ended). Write each table row on one line with its numbers separated by ' | ', and state the exact unit printed in each table heading (crores, lakhs, millions or another printed unit); never convert units or relabel millions as crores. Preserve exact numbers and parentheses for negatives; never estimate or fill in a figure you cannot read.";
 // Re-reading only the statements keeps the call to ~20 s (a full 15-page transcription takes ~90 s, longer than the pipeline may block before an alert).
 const STATEMENTS_OCR_PROMPT = `Transcribe ONLY the financial results statements in this filing: the Standalone statement and the Consolidated statement of profit and loss (revenue, expenses, profit before tax, tax, profit for the period, other comprehensive income, profit attributable to owners, earnings per share) and the segment results table if present. Skip auditor reports, notes, balance sheets and cash-flow statements. ${TABLE_FIDELITY_RULES}`;
 const FULL_OCR_PROMPT = `Transcribe the text of this corporate filing verbatim. Reproduce every financial results table row by row. ${TABLE_FIDELITY_RULES}`;
+const pageBatchPrompt = pageNumbers => `${FULL_OCR_PROMPT} Read each supplied image separately, in order. Begin each image's transcription with its exact marker: ${pageNumbers.map(n => `[PAGE ${n}]`).join(', ')}. Include every marker exactly once, even if that image has no readable text; then write [NO READABLE TEXT] for that image. Do not merge images or omit a marker.`;
+
+export function isOcrUnitConsistent(nativeText, ocrText) {
+  const printed = detectDocumentUnit(nativeText);
+  const transcribed = detectDocumentUnit(ocrText);
+  return !printed || !transcribed || printed === transcribed;
+}
+
+/** pdf.js can return hundreds of characters of page counters from an otherwise image-only filing. */
+export function hasSubstantivePdfText(text) {
+  const content = String(text || "")
+    .replace(/^\s*--\s*\d+\s+of\s+\d+\s*--\s*$/gm, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return (content.match(/[A-Za-z]/g) || []).length >= 35 && (content.match(/[A-Za-z]{2,}/g) || []).length >= 5;
+}
 
 /**
  * Multimodal Gemini Vision OCR fallback for scanned zero-text PDFs.
  * @param {{statementsOnly?: boolean}} [opts] statementsOnly: transcribe just the results statements (fast re-read)
  */
-export async function ocrPdfWithGemini(uint8Buffer, apiKey, { statementsOnly = false, accept = null, totalMs = 80000, perModelMs = 35000, minMs = 5000, images = null } = {}) {
+export async function ocrPdfWithGemini(uint8Buffer, apiKey, { statementsOnly = false, accept = null, totalMs = 80000, perModelMs = 35000, minMs = 5000, images = null, pageNumbers = null, quotaGate = geminiOcrQuotaGate, cache = ocrTextCache } = {}) {
   // `images`: PNG renders of just the pages worth reading (the statement pages of a long filing), sent instead of the whole PDF.
   const haveImages = Array.isArray(images) && images.length > 0;
   if (!apiKey || (!haveImages && (!uint8Buffer || uint8Buffer.length === 0))) return null;
@@ -1726,6 +1753,14 @@ export async function ocrPdfWithGemini(uint8Buffer, apiKey, { statementsOnly = f
     return null;
   }
 
+  const prompt = statementsOnly ? STATEMENTS_OCR_PROMPT : Array.isArray(pageNumbers) ? pageBatchPrompt(pageNumbers) : FULL_OCR_PROMPT;
+  const cacheKey = cache ? ocrCacheKey({ bytes: uint8Buffer, images: haveImages ? images : null, prompt }) : null;
+  const cached = cache ? await cache.get(cacheKey) : null;
+  if (cached && (!accept || accept(cached))) {
+    console.log(`[GEMINI OCR] Reused ${cached.length} characters from the content-verified transcription cache.`);
+    return cached;
+  }
+  const text = await quotaGate.run(totalMs, async () => {
   const docParts = haveImages
     ? images.map((img) => ({ inline_data: { mime_type: "image/png", data: Buffer.from(img).toString("base64") } }))
     : [{ inline_data: { mime_type: "application/pdf", data: Buffer.from(uint8Buffer).toString("base64") } }];
@@ -1755,7 +1790,7 @@ export async function ocrPdfWithGemini(uint8Buffer, apiKey, { statementsOnly = f
             parts: [
               ...docParts,
               {
-                text: statementsOnly ? STATEMENTS_OCR_PROMPT : FULL_OCR_PROMPT
+                text: prompt
               }
             ]
           }],
@@ -1769,6 +1804,7 @@ export async function ocrPdfWithGemini(uint8Buffer, apiKey, { statementsOnly = f
       if (!res.ok) {
         const errText = await res.text();
         console.warn(`[GEMINI OCR] Model ${model} returned ${res.status}: ${errText.substring(0, 100)}`);
+        if (res.status === 429) throw ocrDeferred("OCR_RATE_LIMITED", ocrRetryAfterMs(res.headers, errText), "Gemini OCR rate limited (429)");
         continue;
       }
 
@@ -1776,6 +1812,10 @@ export async function ocrPdfWithGemini(uint8Buffer, apiKey, { statementsOnly = f
       const candidate = data.candidates?.[0];
       // Join every part: a long transcription can arrive split across several parts.
       const extractedText = (candidate?.content?.parts || []).map(p => p.text || "").join("");
+      if (candidate?.finishReason && candidate.finishReason !== "STOP") {
+        console.warn(`[GEMINI OCR] Model ${model} returned an incomplete transcription (finish=${candidate.finishReason}); trying next model.`);
+        continue;
+      }
       if (!extractedText || extractedText.length <= 50) {
         console.warn(`[GEMINI OCR] Model ${model} returned no usable text (finish=${candidate?.finishReason || "none"}, blocked=${data.promptFeedback?.blockReason || "no"}).`);
       }
@@ -1795,10 +1835,14 @@ export async function ocrPdfWithGemini(uint8Buffer, apiKey, { statementsOnly = f
         return cleaned;
       }
     } catch (err) {
+      if (err.ocrDeferred) throw err;
       console.warn(`[GEMINI OCR] Attempt with ${model} failed: ${err.message}`);
     }
   }
   return null;
+  });
+  if (text && cache) await cache.set(cacheKey, text);
+  return text;
 }
 
 const DOWNLOAD_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
@@ -1856,8 +1900,20 @@ function httpsDownload(url, signal, redirectsLeft = 3) {
  * @param {string} url 
  * @returns {Promise<string>}
  */
-export async function extractTextFromPdfUrl(url) {
-  return (await extractPdfTextDetailed(url)).text;
+export async function extractTextFromPdfUrl(url, options = {}) {
+  const result = await extractPdfTextDetailed(url, options);
+  return result.reason?.startsWith('OCR_') ? '' : result.text;
+}
+
+async function withPdfParser(bytes, read) {
+  const parser = new PDFParse(bytes);
+  try { return await read(parser); }
+  finally {
+    if (typeof parser.destroy === 'function') {
+      try { await parser.destroy(); }
+      catch (err) { console.warn(`[PDF CLEANUP] Could not release parser resources: ${err.message}`); }
+    }
+  }
 }
 
 /**
@@ -1868,9 +1924,9 @@ export async function extractTextFromPdfUrl(url) {
  * @param {string} url
  * @param {{forceOcr?: boolean, acceptOcr?: (text: string) => boolean}} [opts] forceOcr: read the results statements
  *   with Gemini vision even when a text layer exists; acceptOcr: a transcription is only taken when this returns true
- * @returns {Promise<{text: string, reason: null|"FETCH_FAILED"|"NO_TEXT", detail: string, ocrUsed: boolean}>}
+ * @returns {Promise<{text: string, reason: null|"FETCH_FAILED"|"NO_TEXT"|"OCR_UNAVAILABLE", detail: string, ocrUsed: boolean}>}
  */
-export async function extractPdfTextDetailed(url, { forceOcr = false, acceptOcr = null } = {}) {
+export async function extractPdfTextDetailed(url, { forceOcr = false, acceptOcr = null, allowOcr = true } = {}) {
   let downloadUrl = url;
   if (downloadUrl.includes("drive.google.com/file/d/")) {
     const match = downloadUrl.match(/\/file\/d\/([^\/]+)/);
@@ -1918,8 +1974,7 @@ export async function extractPdfTextDetailed(url, { forceOcr = false, acceptOcr 
       let cleanText = "";
       let pageList = [];
       try {
-        const parser = new PDFParse(uint8);
-        const data = await parser.getText();
+        const data = await withPdfParser(uint8, parser => parser.getText());
         if (data && data.text) {
           pageList = Array.isArray(data.pages) ? data.pages : [];
           const normalised = data.text
@@ -1934,6 +1989,7 @@ export async function extractPdfTextDetailed(url, { forceOcr = false, acceptOcr 
           // (the verdict by capContext, the highlights by splitTranscript), so a transcript keeps up to 160,000 characters.
           const textCap = /transcript/i.test(String(url)) ? 160000 : 60000;
           cleanText = normalised.length > textCap && pageList.length ? capDocumentText(pageList, textCap) : normalised.substring(0, textCap);
+          if (!hasSubstantivePdfText(cleanText)) cleanText = "";
         }
       } catch (parseErr) {
         console.warn(`[PDF PARSE WARN] Native pdf-parse failed (${parseErr.message}). Falling back to Vision OCR.`);
@@ -1942,27 +1998,133 @@ export async function extractPdfTextDetailed(url, { forceOcr = false, acceptOcr 
       }
 
       // OCR Fallback: If native parse threw or extracted < 100 characters (scanned image or compressed xref), fallback to Gemini Vision
-      const activeGeminiKey = GEMINI_API_KEY || process.env.GEMINI_API_KEY;
+      const activeGeminiKey = allowOcr ? GEMINI_API_KEY || process.env.GEMINI_API_KEY : '';
       let ocrUsed = false;
+      let ocrAttempted = false;
+      // A readable exchange cover does not establish that the attached slides have a text layer.
+      // Require OCR whenever a meaningful fraction of a multi-page PDF is unreadable.
+      const unreadablePages = pageList.filter(p => !hasSubstantivePdfText(p.text)).length;
+      const mixedUnreadable = pageList.length > 1 && unreadablePages > 0 &&
+        unreadablePages / pageList.length >= 0.25 && Boolean(cleanText);
+
+      // A long scanned deck cannot fit a single model response or worker deadline. OCR a bounded
+      // page batch per cycle; completed batches survive restarts in the content-addressed cache.
+      const scannedPageNumbers = pageList.filter(p => !hasSubstantivePdfText(p.text)).map(p => p.num);
+      if (activeGeminiKey && scannedPageNumbers.length > 8 && (forceOcr || !cleanText || mixedUnreadable)) {
+        if (!ocrTextCache) {
+          return { text: '', reason: 'OCR_UNAVAILABLE', detail: 'Resumable OCR cache is disabled for a long scanned document', retryAfterMs: 300000, ocrUsed: false, ocrAttempted: false };
+        }
+        const transcribed = [];
+        let freshBatches = 0;
+        for (let i = 0; i < scannedPageNumbers.length; i += 4) {
+          const pageNumbers = scannedPageNumbers.slice(i, i + 4);
+          const images = await withPdfParser(new Uint8Array(bytes), async parser => {
+            const shots = await parser.getScreenshot({ partial: pageNumbers, scale: 1.4, imageBuffer: true });
+            const byNumber = new Map((shots?.pages || []).map((p, index) => [p.pageNumber || p.num || pageNumbers[index], Buffer.from(p.data)]));
+            return pageNumbers.map(n => byNumber.get(n)).filter(Boolean);
+          });
+          if (images.length !== pageNumbers.length) {
+            return { text: '', reason: 'OCR_UNAVAILABLE', detail: `Could not render scanned pages ${pageNumbers.join(', ')}`, retryAfterMs: 300000, ocrUsed: false, ocrAttempted: true };
+          }
+          const prompt = pageBatchPrompt(pageNumbers);
+          const acceptsPages = (numbers, text) => {
+            if (!hasSubstantivePdfText(text) || /\[NO READABLE TEXT\]/i.test(text)) return false;
+            const markers = [...text.matchAll(/\[PAGE\s+(\d+)\]/gi)].map(match => Number(match[1]));
+            return markers.length === numbers.length && numbers.every(n => markers.filter(m => m === n).length === 1);
+          };
+          const acceptsBatch = text => acceptsPages(pageNumbers, text);
+          const cached = await ocrTextCache.get(ocrCacheKey({ bytes: null, images, prompt }));
+          const validCached = cached && acceptsBatch(cached) ? cached : null;
+          if (!validCached && freshBatches >= 1) {
+            return { text: '', reason: 'OCR_PARTIAL', detail: `${i} of ${scannedPageNumbers.length} scanned pages cached; next batch queued`, retryAfterMs: 60000, ocrUsed: false, ocrAttempted: true };
+          }
+          try {
+            let batchText = validCached;
+            if (!batchText) {
+              const rotated = await rotateOcrImages(images);
+              const savedSingles = await Promise.all(pageNumbers.map((n, index) =>
+                ocrTextCache.get(ocrCacheKey({ bytes: null, images: [rotated[index]], prompt: pageBatchPrompt([n]) }))));
+              const validSingles = savedSingles.map((text, index) => text && acceptsPages([pageNumbers[index]], text) ? text : null);
+              if (!cached && !validSingles.some(Boolean)) {
+                batchText = await ocrPdfWithGemini(null, activeGeminiKey, {
+                  images, pageNumbers, accept: acceptsBatch, totalMs: 60000, perModelMs: 30000
+                });
+                if (batchText) freshBatches++;
+              }
+              if (!batchText) {
+                const pieces = [];
+                for (let j = 0; j < pageNumbers.length; j++) {
+                  const n = pageNumbers[j];
+                  let pageText = validSingles[j];
+                  if (!pageText && freshBatches >= 1) {
+                    return { text: '', reason: 'OCR_PARTIAL', detail: `Scanned page ${n} queued for the next OCR cycle`, retryAfterMs: 60000, ocrUsed: false, ocrAttempted: true };
+                  }
+                  if (!pageText) {
+                    pageText = await ocrPdfWithGemini(null, activeGeminiKey, {
+                      images: [rotated[j]], pageNumbers: [n], accept: text => acceptsPages([n], text), totalMs: 80000, perModelMs: 35000
+                    });
+                    if (!pageText) {
+                      return { text: '', reason: 'OCR_UNAVAILABLE', detail: `No substantive OCR for scanned page ${n}`, retryAfterMs: 300000, ocrUsed: false, ocrAttempted: true };
+                    }
+                    freshBatches++;
+                  }
+                  pieces.push(pageText);
+                }
+                batchText = pieces.join('\n\n');
+              }
+            }
+            transcribed.push(`[scanned pages ${pageNumbers.join(', ')}]\n${batchText}`);
+          } catch (ocrErr) {
+            if (ocrErr.ocrDeferred) return { text: '', reason: ocrErr.code, detail: ocrErr.message, retryAfterMs: ocrErr.retryAfterMs, ocrUsed: false, ocrAttempted: true };
+            throw ocrErr;
+          }
+        }
+        const joined = `${cleanText}\n\n${transcribed.join('\n\n')}`.trim();
+        return { text: joined, reason: null, detail: '', ocrUsed: true, ocrAttempted: true };
+      }
 
       // Statement pages whose text layer is garbled (a scan with broken labels): re-read ONLY those few pages by vision, not the
       // whole filing (143 pages of POLICYBZR never fitted the OCR budget). Any failure here keeps the text as it is.
-      if (!forceOcr && activeGeminiKey && pageList.length) {
-        const stmtPages = findStatementPages(pageList);
+      let targetedOcrAttempted = false;
+      if (activeGeminiKey && pageList.length) {
+        let stmtPages = findStatementPages(pageList, 3);
+        // An image-only results packet can have blank text on every statement page. Find ruled tables in a bounded
+        // low-resolution scan before spending the OCR budget on the entire PDF.
+        if (!stmtPages.length && forceOcr) {
+          const blankPages = pageList.filter((p) => String(p.text || '').trim().length < 80).slice(0, 24).map((p) => p.num);
+          if (blankPages.length >= 2) {
+            const thumbnails = await withPdfParser(new Uint8Array(bytes), parser =>
+              parser.getScreenshot({ partial: blankPages, scale: 0.7, imageBuffer: true }));
+            stmtPages = await rankScannedTablePages((thumbnails?.pages || []).map(p =>
+              ({num: p.pageNumber || p.num, image: Buffer.from(p.data)})), 2);
+            if (stmtPages.length) console.log(`[PDF OCR] Selected scanned table page(s) ${stmtPages.join(', ')} for targeted OCR.`);
+          }
+        }
         const garbled = stmtPages.length > 0 && stmtPages.every((n) => looksGarbled(pageList.find((p) => p.num === n)?.text || ""));
-        if (garbled) {
+        if (stmtPages.length && (forceOcr || garbled)) {
           try {
             console.log(`[PDF OCR] Statement page(s) ${stmtPages.join(", ")} have a garbled text layer; reading just those pages by vision.`);
-            const shots = await new PDFParse(new Uint8Array(bytes)).getScreenshot({ partial: stmtPages.slice(0, 3), scale: 1.8, imageBuffer: true });
-            const images = (shots?.pages || []).map((p) => Buffer.from(p.data)).filter((b) => b.length > 0);
-            const pageOcr = images.length ? await ocrPdfWithGemini(null, activeGeminiKey, { statementsOnly: true, images }) : null;
+            const images = await withPdfParser(new Uint8Array(bytes), async parser => {
+              const shots = await parser.getScreenshot({ partial: stmtPages.slice(0, 3), scale: 1.8, imageBuffer: true });
+            const pagesByNumber = new Map((shots?.pages || []).map((p, i) => [p.pageNumber || p.num || stmtPages[i], Buffer.from(p.data)]));
+              return stmtPages.map(n => pagesByNumber.get(n)).filter(b => b?.length > 0);
+            });
+            targetedOcrAttempted = images.length > 0;
+            ocrAttempted = targetedOcrAttempted;
+            const declaredUnit = detectDocumentUnit(cleanText);
+            const statementText = pageList.filter(p => stmtPages.includes(p.num)).map(p => p.text).join('\n');
+            const acceptsStatement = (t) => isOcrUnitConsistent(statementText, t) &&
+              (acceptOcr ? acceptOcr(t) : Boolean(extractDeterministicFinancials(t, { declaredUnit })?.revenue));
+            const pageOcr = images.length ? await ocrPdfWithGemini(null, activeGeminiKey, { statementsOnly: true, images, accept: acceptsStatement }) : null;
             if (pageOcr && pageOcr.length > 50) {
               ocrUsed = true;
               const keep = cleanText.includes("[statement pages]") ? cleanText.slice(0, cleanText.indexOf("[statement pages]")) : cleanText.slice(0, 40000);
-              cleanText = `${keep.trim()}\n\n[statement pages, read by vision OCR]\n${pageOcr}`.substring(0, 60000);
+              // Clean statements must precede the garbled layer so the parser does not select broken rows first.
+              cleanText = forceOcr ? pageOcr : `${pageOcr}\n\n[embedded text layer]\n${keep.trim()}`.substring(0, 60000);
               console.log(`[PDF OCR SUCCESS] Read ${images.length} statement page(s) by vision (${pageOcr.length} characters).`);
             }
           } catch (pageErr) {
+            if (pageErr.ocrDeferred) return { text: cleanText, reason: pageErr.code, detail: pageErr.message, retryAfterMs: pageErr.retryAfterMs, ocrUsed: false };
             console.warn(`[PDF OCR WARN] Page-targeted statement OCR failed (${pageErr.message}); keeping the text layer.`);
           }
         }
@@ -1971,12 +2133,16 @@ export async function extractPdfTextDetailed(url, { forceOcr = false, acceptOcr 
       if (forceOcr && !activeGeminiKey) {
         console.warn(`[PDF OCR] Vision OCR requested but GEMINI_API_KEY is not configured; keeping the embedded text layer.`);
       }
-      if ((forceOcr || cleanText.length < 100) && activeGeminiKey) {
+      if (!targetedOcrAttempted && (forceOcr || cleanText.length < 100 || mixedUnreadable) && activeGeminiKey) {
         try {
           console.log(`[PDF OCR] ${forceOcr ? "Forced re-read of" : "Native parse yielded"} ${cleanText.length} chars. Invoking Gemini Multimodal Document OCR...`);
           // `bytes` (the download buffer), NOT `uint8`: pdf.js takes ownership of the array it parses and leaves it empty.
-          const ocrText = await ocrPdfWithGemini(bytes, activeGeminiKey, { statementsOnly: forceOcr, accept: acceptOcr });
-          if (ocrText && ocrText.length > 50) {
+          ocrAttempted = true;
+          const ocrText = await ocrPdfWithGemini(bytes, activeGeminiKey, {
+            statementsOnly: forceOcr,
+            accept: (t) => isOcrUnitConsistent(cleanText, t) && (!acceptOcr || acceptOcr(t))
+          });
+          if (ocrText && hasSubstantivePdfText(ocrText)) {
             ocrUsed = true;
             cleanText = ocrText
               .replace(/[^\S\r\n]+/g, ' ')
@@ -1987,13 +2153,25 @@ export async function extractPdfTextDetailed(url, { forceOcr = false, acceptOcr 
             console.log(`[PDF OCR SUCCESS] Extracted ${cleanText.length} characters via Gemini Vision OCR.`);
           }
         } catch (ocrErr) {
+          if (ocrErr.ocrDeferred) return { text: cleanText, reason: ocrErr.code, detail: ocrErr.message, retryAfterMs: ocrErr.retryAfterMs, ocrUsed: false };
           console.warn(`[PDF OCR WARN] Gemini vision fallback encountered an issue: ${ocrErr.message}`);
         }
       }
 
-      if (cleanText.length > 0) {
+      if (mixedUnreadable && !ocrUsed) {
+        return { text: '', reason: 'OCR_UNAVAILABLE', detail: `${unreadablePages} of ${pageList.length} pages have no substantive text layer`, retryAfterMs: 300000, ocrUsed: false, ocrAttempted };
+      }
+      if (hasSubstantivePdfText(cleanText)) {
         console.log(`[PDF] Extracted ${cleanText.length} characters.`);
-        return { text: cleanText, reason: null, detail: "", ocrUsed };
+        return { text: cleanText, reason: null, detail: "", ocrUsed, ocrAttempted };
+      }
+      if (ocrAttempted) {
+        // The models were tried under one bounded budget. Re-downloading the same image-only PDF immediately only collides
+        // with the shared OCR lease and hides the actual unreadable-source condition behind OCR_BUSY.
+        return { text: "", reason: "OCR_UNAVAILABLE", detail: "Vision OCR returned no substantive text within its budget", retryAfterMs: 300000, ocrUsed: false, ocrAttempted: true };
+      }
+      if (!allowOcr) {
+        return { text: '', reason: 'NO_TEXT', detail: 'Native PDF text is unavailable; worker OCR required', ocrUsed: false, ocrAttempted: false };
       }
       throw new Error(activeGeminiKey
         ? "Unable to extract readable text from PDF via native parser or OCR"
@@ -2038,7 +2216,7 @@ export async function syncAnnouncementsForTicker(stockId, ticker, lookbackDays =
       const title = ann.NEWSSUB || "";
       const sourceId = String(ann.NEWS_ID || "");
       const timestamp = ann.DT_TM;
-      const titleHash = generateAnnouncementHash(ticker, title, timestamp);
+      const titleHash = generateAnnouncementHash(ticker, title, timestamp, sourceId);
 
       if (await isAnnouncementProcessed(ticker, sourceId, titleHash, ann.ALT_IDS)) {
         results.skipped++;
@@ -2087,7 +2265,7 @@ export async function syncAnnouncementsForTicker(stockId, ticker, lookbackDays =
         const title = ann.NEWSSUB || "";
         const sourceId = String(ann.NEWS_ID || "");
         const timestamp = ann.DT_TM;
-        const titleHash = generateAnnouncementHash(ticker, title, timestamp);
+        const titleHash = generateAnnouncementHash(ticker, title, timestamp, sourceId);
 
         if (await isAnnouncementProcessed(ticker, sourceId, titleHash)) {
           results.skipped++;

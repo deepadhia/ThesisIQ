@@ -1,4 +1,10 @@
-import { getVerifiedGroundTruth } from './verified-data-layer.service.js';
+/** Only persisted statement provenance can supply current synthesis truth. */
+export function currentSynthesisTruth(snapshot) {
+  const output = snapshot?.raw_ai_output;
+  const fin = output?.verified_financials;
+  if (!snapshot?.quarter || !output?.source_filing?.announcement_id || !output.source_filing.attachment_url || !fin?.isFinancialResult || fin.isVerified === false || fin.verification === 'LLM_LOCATED_TEXT_GROUNDED' || !Number.isFinite(fin.revenue)) return null;
+  return { ...fin, period: snapshot.quarter };
+}
 
 /**
  * Multi-Layer Typed Knowledge Graph Fact Registry & Immutable Claim Validation Service
@@ -13,11 +19,10 @@ import { getVerifiedGroundTruth } from './verified-data-layer.service.js';
  * 7. RISK_ALERTS (Derived warning flags: e.g. HBL -810 bps margin erosion alert, Shakti receivable days)
  */
 
-export function buildFactRegistry(ticker) {
-  const truth = getVerifiedGroundTruth(ticker);
-  if (!truth) return null;
+export function buildFactRegistry(ticker, truth = null) {
+  if (!truth?.period) return null;
 
-  const periodTag = (truth.period || 'Q1_FY27').replace(/\s+/g, '');
+  const periodTag = truth.period.replace(/\s+/g, '');
   const prefix = `${ticker}_${periodTag}`;
 
   const registry = {
@@ -31,15 +36,17 @@ export function buildFactRegistry(ticker) {
     accountingAdjustments: new Map(),
     riskAlerts: new Map()
   };
+  if (Number.isFinite(truth.capacityUtilizationPct)) registry.primaryThesisMetrics.set(`${prefix}_CAPACITY_UTILIZATION`, { value: truth.capacityUtilizationPct });
 
   // 1. CORE FINANCIALS
-  if (truth.revenue !== undefined) {
+  if (Number.isFinite(truth.revenue)) {
     registry.coreFinancials.set(`${prefix}_TOTAL_REVENUE`, {
       metric_id: `${prefix}_TOTAL_REVENUE`,
       ticker,
       metric_name: 'TOTAL_REVENUE',
       value: truth.revenue,
       yoy_growth_pct: truth.revenueYoYGrowthPct,
+      qoq_growth_pct: truth.revenueQoQGrowthPct,
       unit: 'INR_CR',
       period: truth.period,
       fact_status: 'VERIFIED',
@@ -47,11 +54,11 @@ export function buildFactRegistry(ticker) {
     });
   }
 
-  if (truth.patConsolidated !== undefined) {
+  if (Number.isFinite(truth.patConsolidated)) {
     registry.coreFinancials.set(`${prefix}_CORE_PAT`, {
       metric_id: `${prefix}_CORE_PAT`,
       ticker,
-      metric_name: 'CORE_PAT',
+      metric_name: 'REPORTED_PAT',
       value: truth.patConsolidated,
       yoy_growth_pct: truth.patYoYGrowthPct,
       unit: 'INR_CR',
@@ -61,7 +68,7 @@ export function buildFactRegistry(ticker) {
     });
   }
 
-  if (truth.ebitdaMarginPct !== undefined) {
+  if (Number.isFinite(truth.ebitdaMarginPct)) {
     registry.coreFinancials.set(`${prefix}_EBITDA_MARGIN`, {
       metric_id: `${prefix}_EBITDA_MARGIN`,
       ticker,
@@ -129,7 +136,7 @@ export function buildFactRegistry(ticker) {
       metric_name: 'EXCEPTIONAL_ITEM_ISOLATION',
       value: truth.exceptionalGain,
       unit: 'INR_CR',
-      description: 'One-off JV Buyout Exceptional Gain isolated from Core PAT',
+      description: truth.exceptionalDescription || 'Reported exceptional item; classification requires filing evidence',
       fact_status: 'VERIFIED',
       isNormalized: true
     });
@@ -141,9 +148,9 @@ export function buildFactRegistry(ticker) {
       alert_id: `${prefix}_MARGIN_EROSION_ALERT`,
       ticker,
       alert_type: 'MARGIN_CONTRACTION',
-      bps_delta: truth.ebitdaMarginBpsDelta || -810,
+      bps_delta: Number.isFinite(truth.ebitdaMarginBpsDelta) ? truth.ebitdaMarginBpsDelta : null,
       severity: 'HIGH',
-      description: `EBITDA Margin contracted by ${Math.abs(truth.ebitdaMarginBpsDelta || 810)} bps YoY.`
+      description: Number.isFinite(truth.ebitdaMarginBpsDelta) ? `EBITDA Margin contracted by ${Math.abs(truth.ebitdaMarginBpsDelta)} bps YoY.` : 'Margin erosion flagged; magnitude unavailable.'
     });
   }
 
@@ -162,28 +169,21 @@ export function validateSynthesisClaims(reportText = "", factRegistry) {
 
   // TEST 1: Check for contradictory Revenue Growth % vs Ground Truth (Strict Entity-Period-Metric Fact Lock)
   const revFact = factRegistry.coreFinancials.get(`${factRegistry.ticker}_${factRegistry.period.replace(/\s+/g, '')}_TOTAL_REVENUE`);
-  if (revFact && revFact.yoy_growth_pct !== undefined) {
-    const matches = reportText.matchAll(/(\d+(\.\d+)?)\%\s*(YoY|year-over-year)?\s*(revenue\s+growth|revenue)/gi);
+  if (revFact && Number.isFinite(revFact.yoy_growth_pct)) {
+    const matches = [
+      ...reportText.matchAll(/([+-]?\d+(\.\d+)?)\%\s*(YoY|year-over-year)?\s*(revenue\s+growth|revenue)/gi),
+      ...reportText.matchAll(/\brevenue\s+(?:growth(?:\s+of)?|grew(?:\s+by)?|increased(?:\s+by)?|declined(?:\s+by)?|fell(?:\s+by)?)\s*[:=]?\s*([+-]?\d+(?:\.\d+)?)\s*%/gi)
+    ];
     for (const m of matches) {
-      const citedPct = parseFloat(m[1]);
-      if (Math.abs(citedPct - revFact.yoy_growth_pct) > 0.5) {
-        // Disambiguate historical or domain-specific metrics misbound to Current Revenue Growth
-        let reason = `Contradictory Revenue Growth cited (${citedPct}%) vs Canonical Ground Truth (${revFact.yoy_growth_pct}%)`;
-        if (factRegistry.ticker === 'ANANTRAJ' && Math.abs(citedPct - 46) < 0.5) {
-          reason = `Misbound Fact: 46% (ANANTRAJ Q1_FY26 EBITDA Growth) cited as Q1_FY27 Total Revenue Growth (Canonical: ${revFact.yoy_growth_pct}%)`;
-        } else if (factRegistry.ticker === 'TIMETECHNO' && Math.abs(citedPct - 12.8) < 0.5) {
-          reason = `Misbound Fact: 12.8% (TIMETECHNO EBITDA Margin) cited as Q1_FY27 Total Revenue Growth (Canonical: ${revFact.yoy_growth_pct}%)`;
-        } else if (factRegistry.ticker === 'SKIPPER' && Math.abs(citedPct - 25) < 0.5) {
-          reason = `Misbound Fact: 25% (SKIPPER Order Book Growth) cited as Q1_FY27 Total Revenue Growth (Canonical: ${revFact.yoy_growth_pct}%)`;
-        } else if (factRegistry.ticker === 'SHAKTIPUMP' && Math.abs(citedPct - 45) < 0.5) {
-          reason = `Misbound Fact: 45% (SHAKTIPUMP Q1_FY26 Export Mix) cited as Q1_FY27 Total Revenue Growth (Canonical: ${revFact.yoy_growth_pct}%)`;
-        }
+      const citedPct = /\b(?:declined|fell)\b/i.test(m[0]) ? -Math.abs(parseFloat(m[1])) : parseFloat(m[1]);
+      const trailing = reportText.slice(m.index + m[0].length, m.index + m[0].length + 16);
+      const preceding = reportText.slice(Math.max(0,m.index - 12), m.index);
+      const qoq = /\bqoq\b|quarter[- ]on[- ]quarter/i.test(`${preceding} ${trailing}`);
+      const expectedPct = qoq ? revFact.qoq_growth_pct : revFact.yoy_growth_pct;
+      if (!Number.isFinite(expectedPct) || Math.abs(citedPct - expectedPct) > 0.5) {
+        const reason = `Contradictory Revenue Growth cited (${citedPct}%) vs current statement (${Number.isFinite(expectedPct) ? expectedPct : 'unverified'}% ${qoq ? 'QoQ' : 'YoY'})`;
         errors.push(`[TEST 1 FAIL] ${reason}`);
       }
-    }
-    // Also check for "Revenue Growth: 19.8%" or table entries
-    if (textLower.includes('revenue growth') && textLower.includes('19.8%')) {
-      errors.push(`[TEST 1 FAIL] Revenue Growth 19.8% cited in text/scorecard. Canonical Ground Truth is ${revFact.yoy_growth_pct}%.`);
     }
   }
 
@@ -209,9 +209,10 @@ export function validateSynthesisClaims(reportText = "", factRegistry) {
     errors.push(`[TEST 4 FAIL] Unanchored numeric conviction score (e.g. 92/100) cited. Use qualitative Conviction (High/Medium/Low) ONLY.`);
   }
 
-  // 4. Check for Capacity Utilization conflation with EBITDA margin (e.g., "Capacity Utilization: 23.5%")
-  if (textLower.includes('capacity utilization: 23.5%') || textLower.includes('capacity utilization: 23.56%')) {
-    errors.push(`Capacity Utilization assigned EBITDA Margin % (23.56%). Must be NOT DISCLOSED if unstated.`);
+  // Capacity claims must match disclosed capacity, rather than a list of historically troublesome percentages.
+  const capacity = factRegistry.primaryThesisMetrics.get(`${factRegistry.ticker}_${factRegistry.period.replace(/\s+/g, '')}_CAPACITY_UTILIZATION`);
+  for (const claim of reportText.matchAll(/capacity\s+utili[sz]ation\s*[:=]\s*(\d+(?:\.\d+)?)\s*%/gi)) {
+    if (!capacity || Math.abs(Number(claim[1]) - capacity.value) > 0.05) errors.push('Capacity utilization is missing or differs from the current disclosed metric.');
   }
 
   // 5. Check for Premature Guidance Achievement in Q1

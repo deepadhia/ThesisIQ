@@ -1,0 +1,10 @@
+{
+  "reviewed": "2026-11-08",
+  "method": "Expected cells checked visually against the rendered exchange statement; values normalized to crore by the printed unit. JYOTICNC uses the independently reviewed existing real-layout regression fixture.",
+  "cases": [
+    { "id": "SJS", "statementPages": [6], "url": "https://nsearchives.nseindia.com/corporate/SJS_04112026141255_BMoutcomeQ2FY27.pdf", "expected": { "revenue": 282.728, "pat": 58.03, "period": "2026-09-30", "scope": "CONSOLIDATED", "unit": "MILLIONS" } },
+    { "id": "MOREPENLAB", "statementPages": [5], "url": "https://nsearchives.nseindia.com/corporate/MOREPENLAB_27102026133045_SEIntimationQ2Results271026F.pdf", "expected": { "revenue": 746.5019, "pat": 88.8947, "period": "2026-09-30", "scope": "CONSOLIDATED", "unit": "LAKHS" } },
+    { "id": "SKIPPER", "statementPages": [10], "url": "https://nsearchives.nseindia.com/corporate/skipper_30102026141018_Outcome.pdf", "expected": { "revenue": 1383.976, "pat": 58.044, "period": "2026-09-30", "scope": "CONSOLIDATED", "unit": "MILLIONS" } },
+    { "id": "JYOTICNC", "statementPages": [11], "url": "https://www.bseindia.com/xml-data/corpfiling/AttachLive/afcda4e5-579c-4d41-af85-399a25fcc30f.pdf", "expected": { "revenue": 602.01, "pat": 72.58, "period": "2026-09-30", "scope": "CONSOLIDATED", "unit": "CRORES" } }
+  ]
+}

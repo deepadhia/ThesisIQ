@@ -226,9 +226,9 @@ ${text}
 
 Extract these sections (and nothing else):
 1. "guidance_changes": every change to earlier guidance or targets: say what the metric is, what it was before, what it is now, and whether it was RAISED, CUT or REAFFIRMED. Include a change management itself calls a revision or recalibration, and what management gave as the reason. [] if none.
-2. "quarterly_guidance": explicit guidance for the next quarter only. [] if none.
-3. "annual_guidance": explicit guidance for the full fiscal year (growth, margin, volume, capex). [] if none.
-4. "multi_year_targets": explicit 3-5 year targets or roadmap. [] if none.
+2. "quarterly_guidance": explicit targets or milestones for the next quarter. State the business scope (company, segment or subsidiary) and timing exactly as given. [] if none.
+3. "annual_guidance": explicit targets or commitments for the current or a future fiscal year, including revenue, growth, margin, volume, order execution or capex. State the business scope (company, segment or subsidiary) and fiscal year exactly; never present a segment target as company-wide guidance. [] if none.
+4. "multi_year_targets": explicit longer-horizon targets or milestones, including a dated plan or a one-to-two-year goal that does not name a fiscal year. State the business scope and horizon exactly. [] if none.
 5. "financial_performance": the revenue, EBITDA and margin, profit, order book, export or segment revenue, cash and return ratios management stated for the period, each with the comparison given.
 6. "business_performance": customer wins, order sizes, segment or division and market-share performance, export performance, product mix.
 7. "operational_highlights": capacity, utilisation, plant or facility start-up dates, capex amounts and how they are funded, acquisitions and integration.

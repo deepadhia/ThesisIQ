@@ -36,4 +36,10 @@ describe('buildSelection: --only re-queues exactly the named rows', () => {
     expect(s.sql).toMatch(/id = ANY\(\$1::uuid\[\]\)/);
     expect(s.params).toEqual([ids]);
   });
+  it('neither selection mode can revive a flagged foreign filing', () => {
+    for (const only of [true, false]) {
+      const s = buildSelection({ since: '2026-10-01', ids, only });
+      expect(s.sql).toMatch(/COALESCE\(event_analysis->>'foreign_filing', 'false'\) <> 'true'/);
+    }
+  });
 });

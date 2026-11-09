@@ -29,12 +29,18 @@ export function evaluatePipelineHealth(s = {}) {
   if (s.foreignFilings?.length) add("critical", "FOREIGN_FILINGS", `${s.foreignFilings.length} filing(s) of OTHER companies are saved under tracked stocks (e.g. ${names(s.foreignFilings.flatMap((f) => f.tickers.map((ticker) => ({ ticker }))), "ticker", 4)}): the exchange feed answered for the wrong company; their alerts and numbers are not that stock's`);
   if (s.misroutedResults?.length) add("critical", "RESULTS_NOT_QUEUED", `results filed but never read (classified as something else and skipped): ${names(s.misroutedResults)}`);
   if (s.resultsWithoutNumbers?.length) add("critical", "RESULTS_WITHOUT_NUMBERS", `results filed ${Math.round(Math.min(...s.resultsWithoutNumbers.map((r) => r.filedHoursAgo)))}+ h ago but no verified numbers were produced: ${names(s.resultsWithoutNumbers)}`);
+  if (s.prematureCommitments?.length) add('critical', 'PREMATURE_COMMITMENT', `${s.prematureCommitments.length} board-approved or proposed ownership action(s) were marked achieved before final completion (${names(s.prematureCommitments)}); review the source and repair the ledger`);
   if (s.unreadableSources?.length) add("critical", "SOURCE_CORRUPTED", `source file(s) contain control characters (a damaged regex): ${s.unreadableSources.slice(0, 3).join(", ")}`);
   if (s.stuck?.length) add("warn", "FILINGS_STUCK", `${s.stuck.length} filing(s) waiting more than 6 h, oldest ${Math.round(Math.max(...s.stuck.map((r) => r.ageHours)))} h (${names(s.stuck)})`);
+  if (s.ocrDeferred?.length) add("warn", "OCR_QUOTA_BACKLOG", `${s.ocrDeferred.length} filing(s) waiting for OCR quota or its shared lease (${names(s.ocrDeferred)}); retries are deferred without consuming filing attempts`);
+  if (s.expiredExecutions?.length) add("warn", "EXECUTION_RECOVERY_STALLED", `${s.expiredExecutions.length} eligible filing(s) still waiting more than 30 min after an execution lease expired (${names(s.expiredExecutions)}); automatic recovery is stalled`);
   if (s.parkedAlerts?.length) add("warn", "ALERTS_PARKED", `${s.parkedAlerts.length} alert(s) could not be delivered and are waiting to retry (${names(s.parkedAlerts)})`);
   if (s.boardBacklog?.length) add("warn", "BOARD_BACKLOG", `${s.boardBacklog.length} filing(s) have waited over 30 h for the allocation board, oldest ${Math.round(Math.max(...s.boardBacklog.map((r) => r.ageHours)))} h`);
   if (s.conflicts?.length) add("warn", "CONFLICTING_STANCES", `the same stock was graded two different ways within 48 h on verified numbers: ${names(s.conflicts)}`);
   if (s.guidanceTablesMissing) add("warn", "GUIDANCE_TABLES_MISSING", "the guidance tracking tables do not exist: run \"npm run db:migrate\" (pacing history and year-end outcomes cannot be stored, so no track record builds)");
+  if (s.guidanceCoverageGaps?.length) add("warn", "GUIDANCE_COVERAGE_GAP", `${s.guidanceCoverageGaps.length} completed call(s) contain forward commitments but have no structured guidance; review and reprocess their source filings (${names(s.guidanceCoverageGaps)})`);
+  if (s.incompleteHighlights?.length) add("warn", "HIGHLIGHTS_INCOMPLETE", `${s.incompleteHighlights.length} completed call or presentation read(s) missed one or more highlight parts; review and reprocess their source filings (${names(s.incompleteHighlights)})`);
+  if (s.unresolvedDeadLetters?.length) add("warn", "DEAD_LETTER_REVIEW", `${s.unresolvedDeadLetters.length} material filing(s) remain in needs_review after extraction failed (${names(s.unresolvedDeadLetters)}); open the source and repair or retry them`);
   if (s.gateEnabled === false) add("warn", "GATE_OFF", "the allocation gate is switched OFF: every alert is being pushed (ALLOCATION_GATE=off)");
 
   return out.sort((a, b) => (a.level === b.level ? 0 : a.level === "critical" ? -1 : 1));
@@ -89,10 +95,64 @@ export function findControlCharSources(root, dirs = ["backend", "scripts"]) {
  */
 export async function gatherHealthSnapshot(pool, { now = Date.now(), gateEnabled = true, sourceRoot = null, lookbackDays = 10 } = {}) {
   const days = Math.max(1, Math.min(60, Math.floor(Number(lookbackDays) || 10)));
-  const snap = { stuck: [], parkedAlerts: [], boardBacklog: [], misroutedResults: [], resultsWithoutNumbers: [], conflicts: [], foreignFilings: [], gateEnabled, unreadableSources: [], queryErrors: [], guidanceTablesMissing: false };
+  const snap = { stuck: [], parkedAlerts: [], boardBacklog: [], misroutedResults: [], resultsWithoutNumbers: [], conflicts: [], foreignFilings: [], guidanceCoverageGaps: [], incompleteHighlights: [], unresolvedDeadLetters: [], prematureCommitments: [], gateEnabled, unreadableSources: [], queryErrors: [], guidanceTablesMissing: false };
   const run = async (label, sql, params = []) => {
     try { return (await pool.query(sql, params)).rows || []; } catch (err) { snap.queryErrors.push(`${label}: ${err.message}`); return []; }
   };
+  snap.ocrDeferred = await run("OCR quota backlog",
+    `SELECT ticker, event_analysis->>'pipeline_error' AS reason, event_analysis->>'retry_not_before' AS retry_at
+     FROM corporate_announcements
+     WHERE deep_dive_status IN ('pending_stage1','pending_stage2','pending_audio')
+       AND event_analysis->>'pipeline_error' ~ '^OCR_(RATE_LIMITED|BUSY|UNAVAILABLE|PARTIAL):'
+       AND COALESCE(event_analysis->>'foreign_filing', 'false') <> 'true'
+     ORDER BY filing_date LIMIT 30`);
+  snap.prematureCommitments = await run('premature commitments',
+    `SELECT ticker, id, 'premature_commitment' AS tag FROM management_commitments
+     WHERE status LIKE 'Achieved%'
+       AND statement ~* '(board[[:space:]]+approv|proposed)'
+       AND (statement || ' ' || COALESCE(metric, '')) ~* '(acquisit|stake|invest|merger|demerg|scheme)'
+       AND created_at > NOW() - INTERVAL '60 days'
+     ORDER BY created_at DESC LIMIT 30`);
+  snap.guidanceCoverageGaps = await run("guidance coverage gap",
+    `SELECT DISTINCT c.ticker, 'guidance_coverage_gap' AS tag
+     FROM corporate_announcements c
+     WHERE c.deep_dive_status = 'completed'
+       AND (c.title ~* 'transcript' OR c.event_analysis->>'processed_stage' = 'audio')
+       AND c.created_at BETWEEN NOW() - INTERVAL '${days} days' AND NOW() - INTERVAL '2 hours'
+       AND COALESCE(c.event_analysis->>'foreign_filing', 'false') <> 'true'
+       AND EXISTS (
+         SELECT 1 FROM jsonb_array_elements(
+           CASE WHEN jsonb_typeof(c.event_analysis->'institutional_verdict'->'commitments') = 'array'
+             THEN c.event_analysis->'institutional_verdict'->'commitments' ELSE '[]'::jsonb END
+         ) AS commitment
+         WHERE commitment->>'guidance_scope' IN ('QUARTERLY', 'ANNUAL', 'MULTI_YEAR')
+       )
+       AND COALESCE(c.event_analysis->'institutional_verdict'->'concall_highlights'->'guidance_changes', '[]'::jsonb) = '[]'::jsonb
+       AND COALESCE(c.event_analysis->'institutional_verdict'->'concall_highlights'->'quarterly_guidance', '[]'::jsonb) = '[]'::jsonb
+       AND COALESCE(c.event_analysis->'institutional_verdict'->'concall_highlights'->'annual_guidance', '[]'::jsonb) = '[]'::jsonb
+       AND COALESCE(c.event_analysis->'institutional_verdict'->'concall_highlights'->'multi_year_targets', '[]'::jsonb) = '[]'::jsonb
+     LIMIT 30`);
+  snap.incompleteHighlights = await run("incomplete highlights",
+    `SELECT ticker FROM corporate_announcements
+     WHERE deep_dive_status = 'completed'
+       AND event_analysis->'institutional_verdict'->'highlight_extraction'->>'status' = 'INCOMPLETE'
+       AND created_at BETWEEN NOW() - INTERVAL '${days} days' AND NOW() - INTERVAL '2 hours'
+       AND COALESCE(event_analysis->>'foreign_filing', 'false') <> 'true'
+     ORDER BY created_at DESC LIMIT 30`);
+  snap.unresolvedDeadLetters = await run("material dead letters",
+    `SELECT ticker, title, 'material_dead_letter' AS tag FROM corporate_announcements
+     WHERE deep_dive_status = 'needs_review'
+       AND title ~* '(presentation|press release|financial results|outcome of board meeting|transcript)'
+       AND created_at > NOW() - INTERVAL '${days} days'
+       AND COALESCE(event_analysis->>'foreign_filing', 'false') <> 'true'
+     ORDER BY created_at DESC LIMIT 30`);
+  snap.expiredExecutions = await run("expired execution recovery",
+    `SELECT ticker FROM corporate_announcements
+     WHERE deep_dive_status IN ('pending_stage1','pending_stage2','pending_audio')
+       AND event_analysis->'execution_lease'->>'until' IS NOT NULL
+       AND (event_analysis->'execution_lease'->>'until')::bigint < floor(EXTRACT(EPOCH FROM NOW() - INTERVAL '30 minutes') * 1000)::bigint
+       AND (event_analysis->>'retry_not_before' IS NULL OR (event_analysis->>'retry_not_before')::timestamptz <= NOW())
+       AND COALESCE(event_analysis->>'foreign_filing', 'false') <> 'true' LIMIT 30`);
   const VERIFIED_ELSEWHERE = `NOT EXISTS (SELECT 1 FROM corporate_announcements v WHERE v.ticker = c.ticker AND v.created_at > NOW() - INTERVAL '${days} days'
         AND v.event_analysis->'institutional_verdict'->'verified_financials' IS NOT NULL)`;
 

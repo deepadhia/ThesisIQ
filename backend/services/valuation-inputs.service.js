@@ -45,7 +45,7 @@ export function assessSnapshotFreshness(asOf, { now = new Date(), maxAgeDays = D
   const d = asOf instanceof Date ? asOf : new Date(`${String(asOf).slice(0, 10)}T00:00:00Z`);
   if (Number.isNaN(d.getTime())) return { fresh: false, ageDays: null };
   const ageDays = Math.floor((now.getTime() - d.getTime()) / 86400000);
-  return { fresh: ageDays <= maxAgeDays, ageDays };
+  return { fresh: ageDays >= 0 && ageDays <= maxAgeDays, ageDays };
 }
 
 /** Stored statuses that mean "no assessment was possible" (not a verdict). Lower-case, matched exactly. */
@@ -71,6 +71,7 @@ const OPTIONAL_CASH_FIELDS = ['cfoPatRatio', 'receivableDays', 'debtToEquity', '
 export function buildAuditedEquity(row, assumption = null, { now = new Date(), maxAgeDays = DEFAULT_MAX_SNAPSHOT_AGE_DAYS } = {}) {
   const inputGaps = [];
   const inputNotes = [];
+  if (row.thesis_source_verified !== true) inputGaps.push('UNVERIFIED_THESIS_SOURCE');
 
   const price = positive(row.share_price);
   const pe = positive(row.pe_ratio);
@@ -144,11 +145,20 @@ export function buildAuditedEquity(row, assumption = null, { now = new Date(), m
 const COHORT_SQL = `
   SELECT s.ticker, s.company_name, s.sector,
          qs.thesis_status, qs.quarter AS thesis_quarter, qs.conviction_score, qs.final_action,
+         COALESCE(EXISTS (
+           SELECT 1 FROM corporate_announcements evidence
+           WHERE evidence.id::text = qs.raw_ai_output->'source_filing'->>'announcement_id'
+             AND evidence.stock_id = s.id
+             AND COALESCE(evidence.event_analysis->>'foreign_filing', 'false') <> 'true'
+             AND qs.raw_ai_output->'verified_financials'->>'isFinancialResult' = 'true'
+             AND COALESCE(qs.raw_ai_output->'verified_financials'->>'isVerified', 'true') <> 'false'
+             AND qs.raw_ai_output->'verified_financials' = evidence.event_analysis->'institutional_verdict'->'verified_financials'
+         ), false) AS thesis_source_verified,
          md.share_price, md.pe_ratio, md.market_cap, md.ttm_pat, md.ttm_revenue, md.roce_pct, md.market_data_as_of
   FROM stocks s
   LEFT JOIN (
     -- Latest snapshot that carries a usable status: a newer "DATA_UNAVAILABLE" does not hide an older real verdict.
-    SELECT DISTINCT ON (stock_id) stock_id, quarter, thesis_status, conviction_score, final_action
+    SELECT DISTINCT ON (stock_id) stock_id, quarter, thesis_status, conviction_score, final_action, raw_ai_output
     FROM quarterly_snapshots
     ORDER BY stock_id,
              (CASE WHEN thesis_status IS NULL OR LOWER(thesis_status) = ANY($1::text[]) THEN 1 ELSE 0 END),

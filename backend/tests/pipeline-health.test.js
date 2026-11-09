@@ -13,6 +13,16 @@ const ok = () => ({
 });
 
 describe("evaluatePipelineHealth", () => {
+  it('reports expired execution claims that stayed eligible instead of recovering', () => {
+    const f = evaluatePipelineHealth({ ...ok(), expiredExecutions: [{ ticker: 'SJS' }] });
+    expect(f).toContainEqual(expect.objectContaining({ code: 'EXECUTION_RECOVERY_STALLED', level: 'warn' }));
+    expect(f[0].text).toContain('SJS');
+  });
+  it('reports filings deferred by OCR quota with their retry time', () => {
+    const f = evaluatePipelineHealth({ ...ok(), ocrDeferred: [{ ticker: 'SJS', reason: 'OCR_RATE_LIMITED', retryAt: '2026-11-08T10:00:00Z' }] });
+    expect(f).toContainEqual(expect.objectContaining({ code: 'OCR_QUOTA_BACKLOG', level: 'warn' }));
+    expect(f[0].text).toContain('SJS');
+  });
   it("a healthy pipeline has no findings and no message", () => {
     const f = evaluatePipelineHealth(ok());
     expect(f).toEqual([]);
@@ -49,6 +59,27 @@ describe("evaluatePipelineHealth", () => {
     expect(f).toHaveLength(1);
     expect(f[0]).toMatchObject({ level: "warn", code: "GUIDANCE_TABLES_MISSING" });
     expect(f[0].text).toMatch(/db:migrate/);
+  });
+
+  it("warns when an analysed call has dated or annual commitments but no extracted forward guidance", () => {
+    const f = evaluatePipelineHealth({ ...ok(), guidanceCoverageGaps: [{ ticker: "QPOWER" }] });
+    expect(f).toContainEqual(expect.objectContaining({ level: "warn", code: "GUIDANCE_COVERAGE_GAP" }));
+    expect(f[0].text).toContain("QPOWER");
+    expect(evaluatePipelineHealth({ ...ok(), guidanceCoverageGaps: [] })).toEqual([]);
+  });
+  it("warns when a completed call or presentation has only a partial highlight read", () => {
+    const f = evaluatePipelineHealth({ ...ok(), incompleteHighlights: [{ ticker: "ABC" }] });
+    expect(f).toContainEqual(expect.objectContaining({ level: "warn", code: "HIGHLIGHTS_INCOMPLETE" }));
+    expect(f[0].text).toContain("ABC");
+  });
+  it('reports initial board approval incorrectly recorded as a completed acquisition', () => {
+    const findings = evaluatePipelineHealth({ ...ok(), prematureCommitments: [{ ticker: 'EXAMPLE' }] });
+    expect(findings).toContainEqual(expect.objectContaining({ code: 'PREMATURE_COMMITMENT', level: 'critical' }));
+  });
+  it("reports unresolved material dead letters even when the old worker sent no failure alert", () => {
+    const f = evaluatePipelineHealth({ ...ok(), unresolvedDeadLetters: [{ ticker: "ABC", title: "Investor Presentation" }] });
+    expect(f).toContainEqual(expect.objectContaining({ level: "warn", code: "DEAD_LETTER_REVIEW" }));
+    expect(f[0].text).toContain("ABC");
   });
 
   it("the gate being switched off is reported (every alert is being pushed)", () => {
@@ -114,6 +145,56 @@ describe("foreign filings query", () => {
 });
 
 describe("gatherHealthSnapshot reads the database through the injected pool", () => {
+  it('queries the ledger for achieved proposed or board-approved ownership actions', async () => {
+    let sqlSeen = '';
+    const pool = { query: vi.fn(async sql => {
+      if (sql.includes('premature_commitment')) { sqlSeen = sql; return { rows: [{ ticker: 'EXAMPLE' }] }; }
+      if (sql.includes('information_schema.tables')) return { rows: [{ table_name: 'guidance_pacing_history' }, { table_name: 'guidance_outcomes' }] };
+      return { rows: [] };
+    }) };
+    const snap = await gatherHealthSnapshot(pool);
+    expect(snap.prematureCommitments).toEqual([{ ticker: 'EXAMPLE' }]);
+    expect(sqlSeen).toMatch(/management_commitments/);
+    expect(sqlSeen).toMatch(/Achieved/);
+  });
+  it("checks completed transcripts with source commitments for missing guidance sections", async () => {
+    let sqlSeen = "";
+    const pool = { query: vi.fn(async (sql) => {
+      if (sql.includes("guidance_coverage_gap")) {
+        sqlSeen = sql;
+        return { rows: [{ ticker: "QPOWER" }] };
+      }
+      if (sql.includes("information_schema.tables")) return { rows: [{ table_name: "guidance_pacing_history" }, { table_name: "guidance_outcomes" }] };
+      return { rows: [] };
+    }) };
+    const snap = await gatherHealthSnapshot(pool);
+    expect(snap.guidanceCoverageGaps).toEqual([{ ticker: "QPOWER" }]);
+    expect(sqlSeen).toMatch(/pending_stage2|processed_stage/i);
+    expect(sqlSeen).toMatch(/guidance_scope/i);
+  });
+  it("reads incomplete highlight markers from completed filings", async () => {
+    let sqlSeen = "";
+    const pool = { query: vi.fn(async sql => {
+      if (sql.includes("highlight_extraction")) { sqlSeen = sql; return { rows: [{ ticker: "ABC" }] }; }
+      if (sql.includes("information_schema.tables")) return { rows: [{ table_name: "guidance_pacing_history" }, { table_name: "guidance_outcomes" }] };
+      return { rows: [] };
+    }) };
+    const snap = await gatherHealthSnapshot(pool);
+    expect(snap.incompleteHighlights).toEqual([{ ticker: "ABC" }]);
+    expect(sqlSeen).toMatch(/INCOMPLETE/);
+  });
+  it("checks unreadable results, decks, press releases and transcripts left in review", async () => {
+    let sqlSeen = "";
+    const pool = { query: vi.fn(async sql => {
+      if (sql.includes("material_dead_letter")) { sqlSeen = sql; return { rows: [{ ticker: "ABC", title: "Investor Presentation" }] }; }
+      if (sql.includes("information_schema.tables")) return { rows: [{ table_name: "guidance_pacing_history" }, { table_name: "guidance_outcomes" }] };
+      return { rows: [] };
+    }) };
+    const snap = await gatherHealthSnapshot(pool);
+    expect(snap.unresolvedDeadLetters).toEqual([{ ticker: "ABC", title: "Investor Presentation" }]);
+    expect(sqlSeen).toMatch(/needs_review/);
+    expect(sqlSeen).toMatch(/presentation/);
+  });
   it("turns query rows into the snapshot, and a failing query is reported as a finding, not swallowed", async () => {
     const pool = { query: vi.fn(async (sql) => {
       if (sql.includes("pending_stage1")) return { rows: [{ ticker: "SJS", status: "pending_stage1", age_hours: 9 }] };

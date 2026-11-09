@@ -81,6 +81,7 @@ export function classifyFilingCategory(title = "", text = "", attachmentUrl = ""
   // 0a. Earnings Concall Transcripts, Audio Recordings & Investor Decks (Must ALWAYS route to QUARTERLY_EARNINGS; never suppress under procedural rules)
   const isConcallTranscriptOrAudio = 
     titleLower.includes("transcript") || 
+    titleLower.includes("call transc") ||
     attachLower.includes("transcript") || 
     attachLower.includes("calltranscript") || 
     titleLower.includes("audio recording") ||
@@ -182,6 +183,9 @@ export function classifyFilingCategory(title = "", text = "", attachmentUrl = ""
     titleLower.includes("investor presentation") || 
     titleLower.includes("earnings presentation") || 
     titleLower.includes("analyst presentation") || 
+    titleLower.includes("investor presentati") ||
+    titleLower.includes("earnings presentati") ||
+    titleLower.includes("analyst presentati") ||
     titleLower.includes("presentation to analyst") ||
     titleLower.includes("presentation on financial") ||
     attachLower.includes("investorpresentation") ||
@@ -300,6 +304,8 @@ export function classifyFilingCategory(title = "", text = "", attachmentUrl = ""
 
   // 5b. ORDER_WIN (Bagging of orders, LOA, Contract Win, Tender award)
   if (
+    /bagging\s*(?:\/|\s+or\s+)?\s*receiving\s+of\s+orders?(?:\(s\))?(?:\s*(?:or|\/)\s*contracts?(?:\(s\))?)?/i.test(title) ||
+    /\b(?:bags?|bagged|secures?|secured)\b.{0,30}\b(?:orders?|contracts?)\b/i.test(titleLower) ||
     combined.includes("bagging of order") ||
     combined.includes("order win") ||
     combined.includes("letter of award") ||
@@ -311,6 +317,7 @@ export function classifyFilingCategory(title = "", text = "", attachmentUrl = ""
     combined.includes("awarded contract") ||
     combined.includes("receipt of order") ||
     combined.includes("received order") ||
+    combined.includes("receivedorder") ||
     combined.includes("work order") ||
     combined.includes("purchase order") ||
     combined.includes("new order") ||
@@ -351,6 +358,12 @@ export function classifyFilingCategory(title = "", text = "", attachmentUrl = ""
     combined.includes("resignation of cfo") ||
     combined.includes("resignation of managing director") ||
     combined.includes("resignation of director") ||
+    combined.includes("resignation of key managerial personnel") ||
+    combined.includes("resignation of kmp") ||
+    combined.includes("resignation of senior management") ||
+    combined.includes("resignation of smp") ||
+    combined.includes("cessation of key managerial personnel") ||
+    combined.includes("cessation of kmp") ||
     combined.includes("cessation of") ||
     combined.includes("default in payment") ||
     combined.includes("default on payment") ||
@@ -374,6 +387,7 @@ export function classifyFilingCategory(title = "", text = "", attachmentUrl = ""
 
   // 8. ACQUISITION (Acquisition, Investment in Subsidiary, Stake Purchase, JV)
   if (
+    /\bacquisitions?\b/i.test(titleLower) ||
     combined.includes("acquisition of") ||
     combined.includes("investment in subsidiary") ||
     combined.includes("stake acquisition") ||
@@ -751,6 +765,44 @@ export async function extractCorporateActionDetails(category, ticker, announceme
  * 4. High-Value Operational / Corporate Action.
  * 5. Routine Procedural Compliance.
  */
+/** A generic exchange press subject still refers to a document that must be read. */
+export function isPressReleaseDocument(title = '') {
+  const name = String(title).toLowerCase();
+  return /press\s+release|media\s+release/.test(name) &&
+    !/newspaper|corrigendum|errata|prior\s+intimation|advertisement|clarification/.test(name);
+}
+
+/** Preserve a documented order on the alert/board path when the model underrates it. */
+export function isDocumentedOrderFiling({ title = '', text = '', filingCategory = '' } = {}) {
+  if (filingCategory !== 'ORDER_WIN' || String(text).trim().length < 200 || /\[NO (?:TEXT EXTRACTED|FILING TEXT AVAILABLE)/i.test(text)) return false;
+  const subjectNamesAward = /\b(?:bagging|receiving|award(?:ed)?|won|secured)\b.{0,35}\b(?:orders?|contracts?)\b/i.test(title);
+  const documentNamesAward = /\b(?:awarded|received|secured|bagged)\b.{0,80}\b(?:orders?|contracts?)\b/i.test(String(text).slice(0, 3000));
+  return subjectNamesAward || documentNamesAward;
+}
+
+/** A material PDF whose source cannot be read must be retried and visibly reviewed. */
+export function shouldQueueUnreadableMaterialFiling({ title = '', text = '', filingCategory = '', attachmentUrl = null } = {}) {
+  if (!attachmentUrl || !/\[NO TEXT EXTRACTED/i.test(text)) return false;
+  if (isPressReleaseDocument(title)) return true;
+  return new Set([
+    'ORDER_WIN', 'CAPEX_COMMISSIONING', 'ACQUISITION', 'CAPITAL_RAISE',
+    'RESTRUCTURING', 'REGULATORY_ACTION', 'GOVERNANCE_RISK', 'CREDIT_EVENT'
+  ]).has(filingCategory);
+}
+
+/** A substantive release needs the same source-grounded guidance and thesis pass as a deck. */
+export function shouldQueueMaterialPressRelease({ title = '', text = '', priority = '', impact = '', hasSubstantiveBusinessInsights = false } = {}) {
+  if (!isPressReleaseDocument(title)) return false;
+  if (String(text).trim().length < 300 || /\[NO (?:TEXT EXTRACTED|FILING TEXT AVAILABLE)/i.test(text)) return false;
+  // A documented first operational launch is an event even if the AI assigns LOW priority.
+  // Require a present announcement and a concrete product/market/facility object; an
+  // aspiration to explore or a historical "first" alone is not enough.
+  const firstLaunch = /\bannounc(?:ed|es)\b.{0,45}\blaunch\b.{0,70}\bfirst\b.{0,65}\b(?:product|medicine|drug|formulation|market|facility|plant|commercial\s+shipment|manufacturing\s+line)\b/i.test(text);
+  if (firstLaunch) return true;
+  const materialPriority = priority === 'HIGH' || (priority === 'MEDIUM' && hasSubstantiveBusinessInsights);
+  return materialPriority && !/^(?:NEUTRAL|NO_IMPACT)$/i.test(String(impact).trim());
+}
+
 export function classifyFilingForWorker({
   title = "",
   attachmentUrl = "",

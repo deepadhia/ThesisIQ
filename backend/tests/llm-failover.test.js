@@ -202,6 +202,23 @@ describe('runLlmPrompt', () => {
 });
 
 describe('circuit breaker', () => {
+  it('stops repeatedly charging attempts to a provider that returns payment-required', async () => {
+    const f = vi.fn(async url => isOpenRouter(url) ? http(402) : ok('fallback'));
+    const providers = [...buildProviders({ openrouterKey: 'or' }), ...buildProviders({ geminiKey: 'gm' })];
+    await runLlmPrompt('s', 'u', { providers, fetchImpl: f });
+    await runLlmPrompt('s', 'u', { providers, fetchImpl: f });
+    expect(f.mock.calls.filter(c => isOpenRouter(c[0]))).toHaveLength(1);
+  });
+  it('clips each provider timeout to the remaining whole-call budget', async () => {
+    let clock = 0;
+    const timers = vi.spyOn(globalThis, 'setTimeout');
+    const providers = buildProviders({ geminiKey: 'gm' }).slice(0, 2).map(p => ({ ...p, timeoutMs: 40000 }));
+    const f = vi.fn(async () => { if (clock === 0) { clock = 40000; throw new Error('first attempt failed'); } return ok('fallback'); });
+    try {
+      await runLlmPrompt('s', 'u', { providers, fetchImpl: f, now: () => clock, maxTotalMs: 50000 });
+      expect(timers.mock.calls.map(c => c[1])).toContain(10000);
+    } finally { timers.mockRestore(); }
+  });
   it('stops calling a retired model (404/410) or revoked key (401) on later calls, and flags it permanent', async () => {
     const f = vi.fn(async (url) => (isGroq(url) ? http(404) : ok('gemini')));
     await run(f);

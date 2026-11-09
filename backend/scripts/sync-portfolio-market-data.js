@@ -36,7 +36,7 @@ async function main() {
 
   const startTime = Date.now();
   try {
-    const results = await syncAllPortfolioValuations(pool, { period: 'Q1_FY27' });
+    const results = await syncAllPortfolioValuations(pool, { period: 'TTM' });
 
     console.log(
       'Ticker'.padEnd(14) +

@@ -28,6 +28,7 @@ const marketRow = (over = {}) => ({
   company_name: 'Alpha Co',
   sector: 'Industrial',
   thesis_status: 'Intact',
+  thesis_source_verified: true,
   conviction_score: 8,
   final_action: 'HOLD',
   share_price: 100,
@@ -119,6 +120,12 @@ describe('snapshot freshness is computed from the date, not the stored label', (
 });
 
 describe('buildAuditedEquity: no ticker-specific behaviour, no silent defaults', () => {
+  it('does not authorize an imported or source-mismatched thesis as verified evidence', () => {
+    for (const source of [false, undefined]) {
+      const r = buildAuditedEquity(marketRow({ thesis_source_verified: source }), assumption(), { now: NOW });
+      expect(r.inputGaps).toContain('UNVERIFIED_THESIS_SOURCE');
+    }
+  });
   it('gives identical numbers for identical inputs regardless of ticker', () => {
     const a = buildAuditedEquity(marketRow({ ticker: 'AAA' }), assumption(), { now: NOW });
     const b = buildAuditedEquity(marketRow({ ticker: 'BBB' }), assumption(), { now: NOW });

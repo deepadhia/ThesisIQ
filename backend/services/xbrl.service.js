@@ -299,7 +299,7 @@ export async function fetchAndStoreXbrlMetrics({ stock_id, ticker, bse_scrip_cod
             // Also save to corporate_announcements so it shows up in the new tab
             const title = `XBRL Financial Results - ${qLabel}`;
             const sourceId = `XBRL_${ticker}_${qLabel}`;
-            const titleHash = generateAnnouncementHash(ticker, title, row.period_end_date);
+            const titleHash = generateAnnouncementHash(ticker, title, row.period_end_date, sourceId);
 
             await saveAnnouncement({
               stock_id,

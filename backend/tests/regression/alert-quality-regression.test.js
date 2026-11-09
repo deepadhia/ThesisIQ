@@ -124,6 +124,16 @@ describe('prompt template leakage (AGENTS.md rule 6)', () => {
     expect(out.key_takeaway).toBeFalsy();                         // "25% PAT growth" is not in the call
     expect(out.management_tone).toBe('Confident');
   });
+
+  test('forward guidance keeps its stated horizon and does not turn an untimed capacity or opportunity into a dated target', () => {
+    const call = `Management: WS revenue guidance is about INR200 crores next year. Endoks could generate INR1,500 crores from its installed capacity, but we gave no timing. The new factory should double capacity in about 18 months. Current capacity is 4 GW.`;
+    const out = sanitizeConcallHighlights({
+      annual_guidance: ['WS revenue guidance is about INR200 crores next year', 'Endoks could generate INR1,500 crores from its installed capacity'],
+      multi_year_targets: ['The new factory should double capacity in about 18 months', 'Current capacity is 4 GW']
+    }, call);
+    expect(out.annual_guidance).toEqual(['WS revenue guidance is about INR200 crores next year']);
+    expect(out.multi_year_targets).toEqual(['The new factory should double capacity in about 18 months']);
+  });
 });
 
 describe('filing routing', () => {

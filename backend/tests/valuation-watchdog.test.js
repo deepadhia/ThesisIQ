@@ -17,6 +17,7 @@ const row = (ticker, over = {}) => ({
   thesis_status: 'Strengthening',
   conviction_score: 9,
   final_action: 'ACCUMULATE_CONVICTION',
+  thesis_source_verified: true,
   share_price: 450,
   pe_ratio: 10.3,
   market_cap: 4500,

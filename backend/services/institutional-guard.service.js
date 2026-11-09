@@ -24,6 +24,8 @@ export function applyInstitutionalGuard(llmOutput = {}, financialData = null, ti
   // 1. Multi-Stage Regulatory Commitment Guard (Rule 2 in AGENTS.md)
   if (guarded.commitments && Array.isArray(guarded.commitments)) {
     guarded.commitments = guarded.commitments.map(comm => {
+      const safeComm = { ...comm };
+      delete safeComm.status_rule;
       const stmtLower = (comm.statement || "").toLowerCase();
       const metricLower = (comm.metric || "").toLowerCase();
       const isOperationalOrFinancialTarget = 
@@ -61,11 +63,18 @@ export function applyInstitutionalGuard(llmOutput = {}, financialData = null, ti
         titleLower.includes("nclt order") || 
         titleLower.includes("sebi clearance") || 
         titleLower.includes("listing intimation") || 
-        titleLower.includes("effective date");
+        titleLower.includes("effective date") ||
+        /\b(?:completed|consummated|closed)\s+(?:the\s+)?(?:acquisition|investment|transaction)\b/.test(`${titleLower} ${stmtLower}`);
+
+      const isCorporateAction = /\b(?:acquisition|acquire|stake|investment|merger|demerger|scheme|commissioning|capacity expansion)\b/.test(`${stmtLower} ${metricLower}`);
+      const isInitialStage = /\b(?:board\s+approv(?:ed|al)|proposed|subject\s+to\s+(?:requisite\s+)?(?:approvals?|conditions?))\b/.test(stmtLower);
+      if (isCorporateAction && isInitialStage && !isFinalClearance) {
+        return { ...safeComm, status: "Pending", blockers_and_risks: safeComm.blockers_and_risks || "Final completion or required approvals have not been documented." };
+      }
 
       if (isStrictRegulatoryApproval && isInitialBoardApproval && !isFinalClearance) {
         return {
-          ...comm,
+          ...safeComm,
           status: "Pending",
           blockers_and_risks: comm.blockers_and_risks || "Initial Board Approval granted; awaiting statutory shareholder/creditor approval and final NCLT sanction order."
         };
@@ -83,16 +92,20 @@ export function applyInstitutionalGuard(llmOutput = {}, financialData = null, ti
       
       const isFutureTargetYear = timelineLower.includes("fy28") || timelineLower.includes("fy29") || timelineLower.includes("fy30") || timelineLower.includes("fy27");
 
-      if ((statusLower === "achieved" || statusLower.includes("achieved")) && (isEarlyText || isFutureTargetYear)) {
+      const explicitlyDelivered = /\b(?:completed|commissioned|achieved|delivered|met)\b/.test(stmtLower);
+      if (statusLower.includes("achieved") && isFutureTargetYear && !isEarlyText && !explicitlyDelivered) {
+        return { ...safeComm, status: "Pending", credibility_impact: "neutral" };
+      }
+      if (statusLower.includes("achieved") && isEarlyText) {
         return {
-          ...comm,
+          ...safeComm,
           status: "Achieved Ahead of Schedule",
           credibility_impact: "high_positive",
           blockers_and_risks: comm.blockers_and_risks || "Target delivered ahead of original management guidance timeline."
         };
       }
 
-      return comm;
+      return safeComm;
     });
   }
 
@@ -251,8 +264,13 @@ export function applyInstitutionalGuard(llmOutput = {}, financialData = null, ti
     const quotesUnverifiedAmount = (item, pattern, candidates) => {
       // Half-year / annual / order-book / forward-looking lines are not this quarter's headline figures: not judged here.
       if (candidates.length === 0 || !pattern.test(item) || SEGMENT_WORDS.test(item) || NOT_A_QUARTER_FLOW.test(item)) return false;
-      const amounts = amountsIn(item);
-      return amounts.length > 0 && amounts.every(a => !matchesAny(a, candidates));
+      const metricMentions = [...item.matchAll(/\b(?:total\s+revenue|revenue|net\s+sales|turnover|pat|net\s+profit|profit\s+after\s+tax|profit\s+for\s+the\s+(?:period|quarter|year)|ebitda|pbt|expenses?|costs?)\b/gi)];
+      const relevant = amountClaimsInCrore(item).filter(amount => {
+        const preceding = metricMentions.filter(metric => metric.index < amount.index);
+        const nearest = preceding.at(-1) || metricMentions.find(metric => metric.index >= amount.end);
+        return nearest ? pattern.test(nearest[0]) : pattern.test(item);
+      });
+      return relevant.some(amount => !matchesAny(amount.value, candidates));
     };
     // Plausibility: a profit-and-loss line for the quarter cannot exceed the quarter's verified revenue (allowing a loss-making
     // quarter more room). Filings print standalone and consolidated figures in "Rs. millions", and the model often writes
@@ -481,7 +499,7 @@ export function amountMatchesVerified(amount, candidates) {
  * "Rs. millions" (1 crore = 10 million), and the model mixes the units. Only numbers with a currency prefix (₹, Rs, INR) or a
  * unit word count; a bare "42%" or "2026" is not an amount. A prefix with no unit is read as crore (the alert's own unit).
  */
-export function amountsInCrore(text) {
+function amountClaimsInCrore(text) {
   const factor = (unit) => {
     const u = String(unit || "").toLowerCase();
     if (/^(million|millions|mn|mln)$/.test(u)) return 0.1;
@@ -495,9 +513,13 @@ export function amountsInCrore(text) {
     const n = parseFloat(m[2].replace(/,/g, ""));
     if (!Number.isFinite(n) || n <= 0) continue;
     const v = factor(m[3]);
-    out.push(Math.round((v < 1 ? n / Math.round(1 / v) : n * v) * 1e6) / 1e6);
+    out.push({ value: Math.round((v < 1 ? n / Math.round(1 / v) : n * v) * 1e6) / 1e6, index: m.index, end: m.index + m[0].length });
   }
   return out;
+}
+
+export function amountsInCrore(text) {
+  return amountClaimsInCrore(text).map(amount => amount.value);
 }
 
 export function isPlaceholderText(text) {
@@ -691,6 +713,14 @@ export function sanitizeConcallHighlights(highlights, rawDocText, financialData 
   ];
   for (const f of LIST_FIELDS) {
     if (Array.isArray(out[f])) out[f] = out[f].filter(item => isItemAcceptable(item, isGrounded));
+  }
+  // A grounded number alone does not make a time-bound guide. The horizon must be in the bullet itself;
+  // otherwise a capacity or revenue opportunity elsewhere in the call can be mislabelled as annual guidance.
+  if (Array.isArray(out.annual_guidance)) {
+    out.annual_guidance = out.annual_guidance.filter(item => /\b(?:FY\s?\d{2,4}|(?:current|this|next|coming|full)[ -]?(?:(?:financial|fiscal)[ -]?)?year|annual|year[ -]?end(?:ing)?|financial year|fiscal year|calendar year)\b/i.test(item));
+  }
+  if (Array.isArray(out.multi_year_targets)) {
+    out.multi_year_targets = out.multi_year_targets.filter(item => /\b(?:FY\s?\d{2,4}|20\d{2}|\d+(?:\s*(?:to|[-–])\s*\d+)?\s*(?:months?|years?)|next year or two)\b/i.test(item));
   }
   if (typeof out.management_tone === "string" && (isPlaceholderText(out.management_tone) || out.management_tone.trim().length < 3)) {
     out.management_tone = null;

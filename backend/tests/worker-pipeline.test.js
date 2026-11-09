@@ -24,6 +24,7 @@ const state = vi.hoisted(() => {
   llmVerdict: null,
   tableJson: null,
   highlightsJson: null,
+  highlightReplies: null,
   whisperText: '',
   twinFailure: false,
   foreignCopies: 0,
@@ -46,6 +47,11 @@ const state = vi.hoisted(() => {
 };
 });
 
+vi.mock('../services/earnings-reaction.service.js', async importOriginal => {
+  const actual = await importOriginal();
+  return { ...actual, loadEarningsReaction: vi.fn(async () => ({ status: 'PENDING', consensus: 'UNKNOWN' })) };
+});
+
 vi.mock('../config/env.js', () => ({
   NVIDIA_API_KEY: 'test-key',
   GROQ_API_KEY: '',
@@ -61,6 +67,20 @@ vi.mock('../db/pool.js', () => ({
     query: vi.fn(async (sql, params) => {
       const text = String(sql);
       state.calls.push({ sql: text, params });
+      if (text.includes('SELECT id, company_name, ticker, investment_thesis')) return { rows: state.synthesisStock ? [state.synthesisStock] : [] };
+      if (text.includes('conviction_score AS confidence_score') && text.includes('raw_ai_output')) return { rows: state.synthesisSnapshots || [] };
+      if (text.includes("'filing_execution_claim' AS tag")) {
+        if (state.claimError) throw new Error('claim store offline');
+        if (state.executionClaims.has(params[0])) return { rows: [] };
+        state.executionClaims.set(params[0], params[1]);
+        return { rows: [{ id: params[0], tag: 'filing_execution_claim' }] };
+      }
+      if (text.includes("'filing_execution_owner' AS tag")) return { rows: state.executionClaims.get(params[0]) === params[1] ? [{ id: params[0] }] : [] };
+      if (text.includes("- 'execution_lease'") && text.includes("->>'owner' = $2")) {
+        if (state.executionClaims.get(params[0]) === params[1]) state.executionClaims.delete(params[0]);
+        return { rows: [] };
+      }
+      if (state.snapshotError && text.includes('INSERT INTO quarterly_snapshots')) throw new Error('snapshot write failed');
       // ── thesis digest queue (event_analysis.digest_pending), emulated in memory ──
       if (text.includes("'digest_pending', true")) {
         state.digestStore.set(params[1], { id: params[1], ticker: state.item?.ticker, company_name: state.item?.company_name, filing_date: state.item?.filing_date, digest_item: JSON.parse(params[0]) });
@@ -78,6 +98,8 @@ vi.mock('../db/pool.js', () => ({
       // guidance tracking tables: the verified track record read, and the upserts (no rows back)
       if (text.includes("'guidance_outcomes_read' AS tag")) return { rows: state.outcomeRows };
       if (text.includes('INSERT INTO guidance_pacing_history') || text.includes('INSERT INTO guidance_outcomes')) return { rows: [] };
+      if (text.includes('SELECT id, statement, metric, target_value, timeline FROM management_commitments')) return { rows: state.pendingCommitments || [] };
+      if (text.includes('SELECT title, attachment_url, event_analysis') && text.includes('FROM corporate_announcements')) return { rows: state.latestCommitmentAnnouncement ? [state.latestCommitmentAnnouncement] : [] };
       // guidance pacing: the stock's stored guidance statements
       if (text.includes("'pacing_commitments' AS tag")) return { rows: state.guidanceRows };
       // self-audit: both guidance tracking tables exist
@@ -95,7 +117,7 @@ vi.mock('../db/pool.js', () => ({
       if (text.includes('FROM market_data_snapshots') && text.includes('digest_price_line')) return { rows: state.marketSnapshot ? [state.marketSnapshot] : [] };
       if (text.includes('GROUP BY ticker')) return { rows: state.otherPending ? [{ ticker: state.item?.ticker, n: state.otherPending }] : [] };
       if (text.includes('digest_sent_at')) { for (const id of params[0]) { const r = state.digestStore.get(id); if (r) r.sent = true; } return { rows: [] }; }
-      if (text.includes('FROM corporate_announcements ca') && text.includes('JOIN stocks')) return { rows: [state.item] };
+      if (text.includes('FROM corporate_announcements ca') && text.includes('JOIN stocks')) return { rows: state.queueItems || [state.item] };
       // system_settings key/value store (the quota-pause state lives there), emulated in memory
       if (text.includes('FROM system_settings')) { const v = state.settings[params[0]]; return { rows: v === undefined ? [] : [{ value: v }] }; }
       if (text.includes('INSERT INTO system_settings')) { state.settings[params[0]] = JSON.parse(params[1]); return { rows: [] }; }
@@ -159,7 +181,7 @@ vi.mock('../services/audio-transcript-analyzer.service.js', async () => {
   };
 });
 
-import { processPendingDeepDives, flushThesisDigests, flushAllocationBoard, flushHealthReport } from '../workers/quarterly-deepdive-worker.js';
+import { processPendingDeepDives, flushThesisDigests, flushAllocationBoard, flushHealthReport, generateInstitutionalSyntheses, reconcileStockCommitments } from '../workers/quarterly-deepdive-worker.js';
 import { getThesisContract } from '../services/thesis-driver-context.service.js';
 import { sendPipelineFailureAlert } from '../services/telegram.service.js';
 import { extractPdfTextDetailed } from '../services/announcement.service.js';
@@ -200,6 +222,7 @@ function stubFetch(mode) {
         content = '**Tier 2: Neutral**\n**Credibility** is unproven; the filing shows mixed results and I would HOLD.';
       }
       else if (body.includes('financial data transcriber') && state.tableJson) content = state.tableJson;
+      else if ((body.includes('concall highlight') || body.includes('presentation highlight')) && state.highlightReplies?.length) content = state.highlightReplies.shift();
       else if ((body.includes('concall highlight') || body.includes('presentation highlight')) && state.highlightsJson) content = state.highlightsJson;
       else content = JSON.stringify(state.llmVerdict || llmVerdictJson());
       return { ok: true, json: async () => ({ choices: [{ message: { content } }] }) };
@@ -229,6 +252,10 @@ const attemptKeys = () => state.calls.filter(c => c.sql.includes('AS attempts'))
 describe('quarterly deep-dive worker', () => {
   beforeEach(() => {
     state.calls = [];
+    state.synthesisStock = null;
+    state.synthesisSnapshots = [];
+    state.executionClaims = new Map();
+    state.claimError = false;
     state.sends = [];
     state.sendImpl = null;
     state.attempts = 1;
@@ -243,6 +270,7 @@ describe('quarterly deep-dive worker', () => {
     state.llmVerdict = null;
     state.tableJson = null;
     state.highlightsJson = null;
+    state.highlightReplies = null;
     state.twinFailure = false;
     state.foreignCopies = 0;
     state.transcriptCovers = false;
@@ -252,6 +280,8 @@ describe('quarterly deep-dive worker', () => {
     state.marketSnapshot = null;
     state.previousRows = [];
     state.guidanceRows = [];
+    state.pendingCommitments = [];
+    state.latestCommitmentAnnouncement = null;
     state.outcomeRows = [];
     state.boardRows = new Map();
     state.nimBodies = [];
@@ -259,8 +289,74 @@ describe('quarterly deep-dive worker', () => {
     state.pdfFailReason = 'NO_TEXT';
     state.pdfFailDetail = '';
     state.item = baseItem();
+    state.queueItems = null;
+    state.snapshotError = false;
     state.docText = shaktiText;
     stubFetch('ok');
+  });
+
+  it('adds a measured-market-context placeholder without treating pending prices as flat or blocking results delivery', async () => {
+    await processPendingDeepDives({ announcementIds: [state.item.id] });
+    expect(state.sends).toHaveLength(1);
+    expect(state.sends[0]).toContain('Market reaction pending the first completed post-release session');
+    expect(state.sends[0]).toContain('expectations unknown');
+  });
+  it('never sends fixed historical company figures to a current-quarter synthesis prompt', async () => {
+    state.synthesisStock = { id: 'stock-1', ticker: 'TIMETECHNO', company_name: 'Test issuer' };
+    state.synthesisSnapshots = [{ quarter: 'Q2_FY27', raw_ai_output: { source_filing: { announcement_id: 'filing-1', attachment_url: 'https://exchange.test/report.pdf' }, verified_financials: { isFinancialResult: true, revenue: 200, revenueYoYGrowthPct: 19.8 } } }];
+    await generateInstitutionalSyntheses('TIMETECHNO', true);
+    const prompts = JSON.stringify(state.nimBodies);
+    expect(prompts).toContain('Current verified statement period: Q2_FY27');
+    expect(prompts).toContain('filing-1');
+    expect(prompts).not.toContain('IMMUTABLE CANONICAL FACT LOCK MANDATES (Q1');
+    expect(state.calls.some(c => c.sql.includes('SELECT quarter') && c.sql.includes('raw_ai_output'))).toBe(true);
+  });
+  it('can repair verified data without optional reports or Telegram, recording the deferred follow-ups', async () => {
+    const result = await processPendingDeepDives({ announcementIds: [state.item.id], suppressTelegram: true, skipOptionalWork: true });
+    expect(result.processed).toBe(1);
+    expect(state.sends).toEqual([]);
+    expect(state.calls.some(c => c.sql.includes('INSERT INTO quarterly_snapshots'))).toBe(true);
+    expect(state.calls.some(c => c.sql.includes('repair_followups_pending'))).toBe(true);
+    expect(state.calls.some(c => c.sql.includes('SELECT id, company_name, ticker, investment_thesis'))).toBe(false);
+  });
+  it('records the exact source document on every worker verdict for replay audit', async () => {
+    await processPendingDeepDives({ announcementIds: [state.item.id], suppressTelegram: true, skipOptionalWork: true });
+    const verdictWrite = state.calls.find(c => c.sql.includes('event_analysis = COALESCE(event_analysis') && c.params?.[1]?.includes('institutional_verdict'));
+    const verdict = JSON.parse(verdictWrite.params[1]).institutional_verdict;
+    expect(verdict.source_document).toMatchObject({ announcement_id: state.item.id, attachment_url: state.item.attachment_url });
+  });
+  it('does not turn a pending acquisition into Achieved because an unrelated filing says operational', async () => {
+    state.pendingCommitments = [{ id: 'commitment-1', statement: 'Board approved acquisition of 49% equity stake in a 990 MW solar portfolio', metric: 'Solar Portfolio Acquisition', target_value: '49% stake', timeline: 'FY2027 onwards' }];
+    state.latestCommitmentAnnouncement = { title: 'Press Release', event_analysis: { institutional_verdict: { verdict_summary: 'The unrelated factory is operational and margins improved.', key_drivers: [] } } };
+    await reconcileStockCommitments('EXAMPLE');
+    expect(state.calls.some(c => c.sql.includes('UPDATE management_commitments'))).toBe(false);
+  });
+
+  it('overlapping repair and scanner workers execute a filing only once', async () => {
+    const options = { announcementIds: [state.item.id], deadlineAt: Date.now() + 20000 };
+    const results = await Promise.all([processPendingDeepDives(options), processPendingDeepDives(options)]);
+    expect(state.sends).toHaveLength(1);
+    expect(results.reduce((n, r) => n + r.processed, 0)).toBe(1);
+  });
+
+  it('an unavailable execution-claim store defers work without consuming filing attempts', async () => {
+    state.claimError = true;
+    const res = await processPendingDeepDives({ announcementIds: [state.item.id], suppressTelegram: true });
+    expect(res.deferred).toBe(1);
+    expect(attemptKeys()).toEqual([]);
+    expect(state.sends).toEqual([]);
+  });
+
+  it('a worker that loses its lease during a slow document read cannot write or alert', async () => {
+    vi.mocked(extractPdfTextDetailed).mockImplementationOnce(async () => {
+      state.executionClaims.delete(state.item.id);
+      return { text: state.docText, reason: null, detail: '' };
+    });
+    const res = await processPendingDeepDives({ announcementIds: [state.item.id] });
+    expect(res.deferred).toBe(1);
+    expect(attemptKeys()).toEqual([]);
+    expect(state.sends).toEqual([]);
+    expect(state.calls.some(c => c.sql.includes('INSERT INTO quarterly_snapshots'))).toBe(false);
   });
 
   it('the alert never carries two opposite calls: a model sentence stating HOLD is dropped when the gates made the final action REASSESS (HBLENGINE 2026-11-07)', async () => {
@@ -392,7 +488,7 @@ describe('quarterly deep-dive worker', () => {
     // and the filing is held back (retry_not_before) instead of being retried every cycle.
     expect(attemptKeys()).toEqual([]);
     expect(state.calls.some(c => c.sql.includes('llm_outage_first_at'))).toBe(true);
-    const defer = state.calls.find(c => c.sql.includes("'retry_not_before'"));
+    const defer = state.calls.find(c => c.sql.includes("jsonb_build_object('retry_not_before'"));
     expect(defer).toBeTruthy();
     const waitMs = new Date(defer.params[0]).getTime() - Date.now();
     expect(waitMs).toBeGreaterThan(4 * 60 * 1000);
@@ -991,6 +1087,53 @@ describe('quarterly deep-dive worker', () => {
     const pauseState = () => state.settings.llm_quota_pause;
     const queueSelects = () => state.calls.filter(c => c.sql.includes('deep_dive_status = ANY'));
 
+    it('explicit repair IDs also honour an active quota pause', async () => {
+      state.settings.llm_quota_pause = { until: Date.now() + 30 * MIN, count: 1 };
+      const res = await processPendingDeepDives({ announcementIds: [state.item.id], suppressTelegram: true });
+      expect(res.paused).toBe(true);
+      expect(state.calls.some(c => c.sql.includes('FROM corporate_announcements ca') && c.sql.includes('WHERE ca.id = ANY'))).toBe(false);
+    });
+
+    it('batchSize: 1 stops the remaining repair IDs when the first filing exhausts OCR quota', async () => {
+      state.queueItems = [state.item, { ...state.item, id: 'aaaaaaaa-0000-0000-0000-000000000002' }];
+      vi.mocked(extractPdfTextDetailed).mockClear();
+      vi.mocked(extractPdfTextDetailed).mockResolvedValueOnce({ text: '', reason: 'OCR_RATE_LIMITED', retryAfterMs: 1200000 });
+      const res = await processPendingDeepDives({ announcementIds: state.queueItems.map(r => r.id), batchSize: 1, suppressTelegram: true });
+      expect(extractPdfTextDetailed).toHaveBeenCalledTimes(1);
+      expect(res.deferred).toBe(1);
+      expect(res.processedIds).toEqual([]);
+    });
+
+    it('an empty repair selection does not process the entire pending queue', async () => {
+      const res = await processPendingDeepDives({ announcementIds: [], suppressTelegram: true });
+      expect(res.found).toBe(0);
+      expect(queueSelects()).toEqual([]);
+    });
+
+    it('repair selection excludes foreign filings and honours each filing retry time', async () => {
+      await processPendingDeepDives({ announcementIds: [state.item.id], suppressTelegram: true });
+      const select = state.calls.find(c => c.sql.includes('WHERE ca.id = ANY'));
+      expect(select.sql).toContain('foreign_filing');
+      expect(select.sql).toContain('retry_not_before');
+    });
+
+    it('OCR quota exhaustion defers a scanned PDF without consuming any filing attempts', async () => {
+      vi.mocked(extractPdfTextDetailed).mockResolvedValueOnce({ text: '', reason: 'OCR_RATE_LIMITED', detail: 'Gemini quota exhausted', retryAfterMs: 1200000 });
+      const res = await processPendingDeepDives({ announcementIds: [state.item.id], suppressTelegram: true });
+      expect(res.processed).toBe(0);
+      expect(attemptKeys()).toEqual([]);
+      expect(pauseState()?.until).toBeGreaterThan(Date.now() + 19 * MIN);
+      expect(state.calls.some(c => c.sql.includes("jsonb_build_object('retry_not_before'"))).toBe(true);
+      expect(state.sends).toEqual([]);
+    });
+    it('raises a visible review after a day of OCR failures instead of retrying forever', async () => {
+      state.outageFirstAt = new Date(Date.now() - 25 * 60 * MIN).toISOString();
+      vi.mocked(extractPdfTextDetailed).mockResolvedValueOnce({ text: '', reason: 'OCR_UNAVAILABLE', detail: 'Image pages could not be read', retryAfterMs: 300000 });
+      await processPendingDeepDives({ announcementIds: [state.item.id] });
+      expect(state.calls.some(c => c.sql.includes("deep_dive_status = 'needs_review'"))).toBe(true);
+      expect(sendPipelineFailureAlert).toHaveBeenCalled();
+    });
+
     it('when every provider rate-limits the call, the whole queue is paused (escalating) and the filing is deferred without consuming attempts', async () => {
       stubFetch('429');
       vi.useFakeTimers();
@@ -1104,6 +1247,41 @@ describe('quarterly deep-dive worker', () => {
       expect(state.nimBodies.some(b => JSON.stringify(b.messages).includes('presentation highlight'))).toBe(true);
     });
 
+    it('a filing with only a grounded guidance cut keeps the change and vetoes a buy', async () => {
+      state.item = { ...baseItem(), title: 'Investor Presentation', attachment_url: 'https://nsearchives.nseindia.com/corporate/deck_Q2.pdf', deep_dive_status: 'pending_stage1' };
+      state.docText = 'Investor Presentation Q2 FY27. Management has cut the revenue growth outlook to 1.2 to 1.5 times from 1.5 to 2 times. ' + 'The remaining slides discuss the outlook without new financial figures. '.repeat(12);
+      state.highlightsJson = JSON.stringify({
+        guidance_changes: ['Revenue growth outlook cut to 1.2 to 1.5 times from 1.5 to 2 times']
+      });
+      await runOne();
+      const queued = [...state.digestStore.values()][0]?.digest_item;
+      expect(queued?.highlights?.guidance_changes).toHaveLength(1);
+      expect(queued?.guidanceCuts).toHaveLength(1);
+      expect(String(queued.action)).not.toMatch(/BUY|ADD/);
+    });
+
+    it('a presentation arriving near the worker deadline remains queued for complete highlight extraction next cycle', async () => {
+      state.item = { ...baseItem(), title: 'Investor Presentation', attachment_url: 'https://nsearchives.nseindia.com/corporate/deck_Q2.pdf', deep_dive_status: 'pending_stage1' };
+      state.docText = 'Investor Presentation Q2 FY27. Management cut the annual revenue outlook. '.repeat(15);
+      const res = await processPendingDeepDives({ announcementIds: [state.item.id], deadlineAt: Date.now() + 50000 });
+      expect(res.processed).toBe(0);
+      expect(res.deferred).toBe(1);
+      expect(state.calls.some(c => c.sql.includes("SET deep_dive_status = 'completed'"))).toBe(false);
+      expect(state.digestStore.size).toBe(0);
+    });
+
+    it('a failed highlight part is disclosed in the saved filing and digest instead of silently claiming a complete presentation read', async () => {
+      state.item = { ...baseItem(), title: 'Investor Presentation', attachment_url: 'https://nsearchives.nseindia.com/corporate/deck_Q2.pdf', deep_dive_status: 'pending_stage1' };
+      state.docText = 'Investor Presentation Q2 FY27. Management cut revenue growth outlook from 20% to 10%. ' + 'Operating capacity discussion without new targets. '.repeat(600);
+      state.highlightReplies = [JSON.stringify({ guidance_changes: ['Revenue growth outlook cut from 20% to 10% (cut)'] }), 'this is not json'];
+      await runOne();
+      const queued = [...state.digestStore.values()][0]?.digest_item;
+      expect(queued?.highlightExtractionIncomplete).toBe(true);
+      expect(state.sends[0]).toMatch(/highlight extraction incomplete/i);
+      const saved = state.calls.find(c => c.sql.includes('institutional_verdict:') || (c.sql.includes('SET event_analysis') && c.params?.[1]?.includes('institutional_verdict')));
+      expect(saved?.params?.[1]).toContain('INCOMPLETE');
+    });
+
     it('a deck whose highlights come back empty or unusable is still queued with its ordinary verdict (never lost, never blocked)', async () => {
       state.item = { ...baseItem(), title: 'Investor Presentation', attachment_url: 'https://nsearchives.nseindia.com/corporate/deck_Q2.pdf', deep_dive_status: 'pending_stage1' };
       state.docText = 'Investor Presentation Q2 FY27. ' + 'Passenger vehicle segment drove growth in the quarter. '.repeat(12);
@@ -1182,6 +1360,16 @@ describe('quarterly deep-dive worker', () => {
     expect(attemptKeys()).toContain('notext_attempts');
   });
 
+  it('an unreadable presentation is retried without judging its title as if it were the filing', async () => {
+    state.item = { ...baseItem(), title: 'Investor Presentation', filing_category: 'GENERAL', is_earnings_release: false, deep_dive_status: 'pending_stage1' };
+    state.docText = '';
+    const res = await processPendingDeepDives({ announcementIds: [state.item.id], deadlineAt: Date.now() + 20000 });
+    expect(res.processed).toBe(0);
+    expect(state.sends).toHaveLength(0);
+    expect(attemptKeys()).toContain('notext_attempts');
+    expect(state.calls.some(c => c.sql.includes("deep_dive_status = 'completed'"))).toBe(false);
+  });
+
   it('a results PDF the parser cannot read still produces an alert with AI-located, clearly unverified figures', async () => {
     state.docText = shaktiText
       .replace(/Revenue from operations/g, 'Turnover (net)')
@@ -1214,6 +1402,14 @@ describe('quarterly deep-dive worker', () => {
     const run = () => processPendingDeepDives({ announcementIds: ['aaaaaaaa-0000-0000-0000-000000000001'], deadlineAt: Date.now() + 20000 });
     const verdictCalls = () => state.nimBodies.filter(b => JSON.stringify(b.messages).includes('thesis_driver_assessment'));
 
+    it('a historical repair cannot substitute static benchmark figures for this filing', async () => {
+      unreadableStatement();
+      state.item = { ...baseItem(), ticker: 'ANANTRAJ', filing_date: '2026-07-25T12:00:00Z', attachment_url: 'https://example.test/results.pdf' };
+      const res = await run();
+      expect(res.processed).toBe(0);
+      expect(state.calls.some(c => c.sql.includes('INSERT INTO quarterly_snapshots'))).toBe(false);
+    });
+
     it('gets NO AI narrative written from the garbled text: it is retried instead (a garbled table made the model report a loss for a profitable quarter)', async () => {
       unreadableStatement();
       const res = await run();
@@ -1223,7 +1419,7 @@ describe('quarterly deep-dive worker', () => {
       expect(verdictCalls()).toHaveLength(0);                                   // the model never saw the garbled statements
       expect(state.calls.some(c => c.sql.includes("SET deep_dive_status = 'completed'"))).toBe(false);
       expect(attemptKeys()).toContain('unreadable_attempts');
-      expect(state.calls.some(sqlIncludes("'retry_not_before'"))).toBe(true);    // backs off instead of retrying every cycle
+      expect(state.calls.some(sqlIncludes("jsonb_build_object('retry_not_before'"))).toBe(true);    // backs off instead of retrying every cycle
     });
 
     it('if the AI providers are down while the figures are being located, it is an outage: no attempt is consumed', async () => {
@@ -1264,6 +1460,13 @@ describe('quarterly deep-dive worker', () => {
       expect(res.processed).toBe(1);
       expect(state.sends[0]).toContain('AI-LOCATED, UNVERIFIED');
     });
+  });
+
+  it('a failed snapshot write cannot be reported as a completed repair', async () => {
+    state.snapshotError = true;
+    const res = await processPendingDeepDives({ announcementIds: [state.item.id], suppressTelegram: true });
+    expect(res.processed).toBe(0);
+    expect(state.calls.some(c => c.sql.includes("SET deep_dive_status = 'completed'"))).toBe(false);
   });
 
   it('a garbled OCR text layer is re-read with vision OCR so the figures are VERIFIED, not merely AI-located', async () => {
@@ -1569,7 +1772,7 @@ Profit for the period 80.96 78.00 74.20 158.96 140.00 300.00
       vi.mocked(downloadAndExtractMp3).mockRejectedValueOnce(new Error('Failed to download audio stream: 404 Not Found'));
       await processPendingDeepDives({ announcementIds: ['aaaaaaaa-0000-0000-0000-000000000001'], deadlineAt: Date.now() + 20000 });
       expect(state.calls.some(c => c.sql.includes("deep_dive_status = 'needs_review'"))).toBe(false);
-      const defer = state.calls.find(c => c.sql.includes("'retry_not_before'"));
+      const defer = state.calls.find(c => c.sql.includes("jsonb_build_object('retry_not_before'"));
       expect(defer).toBeTruthy();
       const waitMs = new Date(defer.params[0]).getTime() - Date.now();
       expect(waitMs).toBeGreaterThan(2.5 * 60 * 60 * 1000);  // the 7th wait is 3 h
@@ -1612,7 +1815,7 @@ Profit for the period 80.96 78.00 74.20 158.96 140.00 300.00
     });
   });
 
-  describe('failure alerts: one per cause, and none for a deck the results note already covers (SBCL / INOXINDIA 2026-11-04 sent the same alert for the NSE and the BSE copy)', () => {
+  describe('failure alerts: one per cause, including an unreadable deck with separate forward disclosures', () => {
     const unreadable = () => { state.docText = ''; state.pdfFailReason = 'NO_TEXT'; state.pdfFailDetail = 'no text'; state.attempts = 99; };
 
     it('the second copy of a filing that fails for the same reason does not raise a second alert', async () => {
@@ -1632,13 +1835,35 @@ Profit for the period 80.96 78.00 74.20 158.96 140.00 300.00
       expect(vi.mocked(sendPipelineFailureAlert)).toHaveBeenCalledTimes(1);
     });
 
-    it('an unreadable investor presentation of a stock whose results were already alerted is dead-lettered quietly', async () => {
+    it('a Telegram outage parks a dead-letter failure alert for the next worker cycle', async () => {
+      state.item = { ...baseItem(), title: 'Investor Presentation', filing_category: 'QUARTERLY_EARNINGS', deep_dive_status: 'pending_stage1' };
+      unreadable();
+      vi.mocked(sendPipelineFailureAlert).mockRejectedValueOnce(new Error('Telegram API error (429)'));
+      await processPendingDeepDives({ announcementIds: [state.item.id], deadlineAt: Date.now() + 20000 });
+      const parked = state.calls.find(c => c.sql.includes("'alert_pending', true") && c.sql.includes('pending_alert_text'));
+      expect(parked?.params?.[0]).toContain('PIPELINE EXTRACTION FAILURE ALERT');
+      expect(state.calls.some(c => c.sql.includes("deep_dive_status = 'needs_review'"))).toBe(true);
+    });
+
+    it('a dead-letter failure alert is parked before the send so a worker restart cannot lose it', async () => {
+      state.item = { ...baseItem(), title: 'Investor Presentation', filing_category: 'QUARTERLY_EARNINGS', deep_dive_status: 'pending_stage1' };
+      unreadable();
+      vi.mocked(sendPipelineFailureAlert).mockImplementationOnce(async () => { state.calls.push({ sql: '__FAILURE_SEND__' }); return true; });
+      await processPendingDeepDives({ announcementIds: [state.item.id], deadlineAt: Date.now() + 20000 });
+      const parkedAt = state.calls.findIndex(c => c.sql.includes("'alert_pending', true") && c.sql.includes('pending_alert_text'));
+      const sentAt = state.calls.findIndex(c => c.sql === '__FAILURE_SEND__');
+      expect(parkedAt).toBeGreaterThan(-1);
+      expect(sentAt).toBeGreaterThan(parkedAt);
+      expect(state.calls.some(c => c.sql.includes("'failure_alert_sent_at'") && c.sql.includes("- 'alert_pending'"))).toBe(true);
+    });
+
+    it('an unreadable investor presentation still raises a failure alert after retries even when results were alerted', async () => {
       state.item = { ...baseItem(), title: 'Investor Presentation', deep_dive_status: 'pending_stage1', filing_category: 'QUARTERLY_EARNINGS', is_earnings_release: true };
       unreadable();
       state.recentResultsAlert = true;
       vi.mocked(sendPipelineFailureAlert).mockClear();
       await processPendingDeepDives({ announcementIds: ['aaaaaaaa-0000-0000-0000-000000000001'], deadlineAt: Date.now() + 20000 });
-      expect(vi.mocked(sendPipelineFailureAlert)).not.toHaveBeenCalled();
+      expect(vi.mocked(sendPipelineFailureAlert)).toHaveBeenCalledTimes(1);
       expect(state.calls.some(c => c.sql.includes("deep_dive_status = 'needs_review'"))).toBe(true);
     });
 
@@ -1675,7 +1900,8 @@ Profit for the period 80.96 78.00 74.20 158.96 140.00 300.00
       const res = await processPendingDeepDives({ announcementIds: ['aaaaaaaa-0000-0000-0000-000000000001'], deadlineAt: Date.now() + 20000 });
       expect(res.processed).toBe(1);
       expect(state.sends).toHaveLength(1);
-      expect(state.calls.some(c => c.sql.includes('foreign_filing'))).toBe(false);
+      // The SELECT excludes flagged rows; only a mutation would wrongly set this legitimate filing aside.
+      expect(state.calls.some(c => c.sql.includes("'foreign_filing', true"))).toBe(false);
     });
 
     it('but an unreadable results STATEMENT is always alerted', async () => {
