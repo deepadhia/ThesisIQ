@@ -35,6 +35,7 @@ const state = vi.hoisted(() => {
   marketSnapshot: null,
   nimBodies: [],
   ocrText: '',
+  xbrlRows: [],
   pdfFailReason: 'NO_TEXT',
   pdfFailDetail: '',
   linkedDocText: '',
@@ -118,6 +119,7 @@ vi.mock('../db/pool.js', () => ({
       if (text.includes('earlier_recording_writeup')) return { rows: state.earlierRecordingItems.map(di => ({ di })) };
       if (text.includes("event_analysis->'audio_analysis' IS NOT NULL")) return {rows:state.prevAudio};
       if (text.includes('FROM market_data_snapshots') && text.includes('digest_price_line')) return { rows: state.marketSnapshot ? [state.marketSnapshot] : [] };
+      if (text.includes('FROM xbrl_metrics_quarterly')) return { rows: state.xbrlRows };
       if (text.includes('GROUP BY ticker')) return { rows: state.otherPending ? [{ ticker: state.item?.ticker, n: state.otherPending }] : [] };
       if (text.includes('digest_sent_at')) { for (const id of params[0]) { const r = state.digestStore.get(id); if (r) r.sent = true; } return { rows: [] }; }
       if (text.includes('FROM corporate_announcements ca') && text.includes('JOIN stocks')) return { rows: state.queueItems || [state.item] };
@@ -291,6 +293,7 @@ describe('quarterly deep-dive worker', () => {
     state.boardRows = new Map();
     state.nimBodies = [];
     state.ocrText = '';
+    state.xbrlRows = [];
     state.pdfFailReason = 'NO_TEXT';
     state.pdfFailDetail = '';
     state.linkedDocText = '';
@@ -307,6 +310,16 @@ describe('quarterly deep-dive worker', () => {
     expect(state.sends).toHaveLength(1);
     expect(state.sends[0]).toContain('Market reaction pending the first completed post-release session');
     expect(state.sends[0]).toContain('expectations unknown');
+  });
+
+  it('does not call latest-quarter revenue times four a trailing annual revenue for book-to-bill', async () => {
+    state.docText = `${shaktiText}\nConsolidated order book of ₹4,707 Cr as of quarter end.`;
+    await processPendingDeepDives({ announcementIds: [state.item.id], deadlineAt: Date.now() + 20000 });
+    const saved = state.calls.find(c => c.sql.includes('SET event_analysis') && c.params?.[1]?.includes('institutional_verdict'));
+    const ob = JSON.parse(saved.params[1]).institutional_verdict.order_book;
+    expect(ob.orderBookConsolidatedCr).toBe(4707);
+    expect(ob.bookToBill).toBeNull();
+    expect(ob.line).not.toContain('Book-to-Bill');
   });
   it('never sends fixed historical company figures to a current-quarter synthesis prompt', async () => {
     state.synthesisStock = { id: 'stock-1', ticker: 'TIMETECHNO', company_name: 'Test issuer' };
@@ -1338,6 +1351,29 @@ describe('quarterly deep-dive worker', () => {
       expect(saved?.params?.[1]).toContain('INCOMPLETE');
     });
 
+    it('an incomplete presentation read is routed to review even when the model proposed ADD', async () => {
+      state.item = { ...baseItem(), title: 'Investor Presentation', deep_dive_status: 'pending_stage1' };
+      state.docText = 'Investor Presentation Q2 FY27. Management described the outlook. '.repeat(450);
+      state.highlightReplies = [JSON.stringify({ key_positives: ['Management described the outlook'] }), 'invalid json'];
+      state.llmVerdict = llmVerdictJson({ action_signal: 'ADD', conviction_score: 9 });
+      await runOne();
+      const queued = [...state.digestStore.values()][0]?.digest_item;
+      expect(queued.highlightExtractionIncomplete).toBe(true);
+      expect(queued.action).toBe('HOLD / REVIEW');
+      expect(queued.conviction).toBeLessThanOrEqual(5);
+    });
+
+    it('keeps forward guidance before a presentation heading in the source submitted for highlights', async () => {
+      state.item = { ...baseItem(), title: 'Investor Presentation', deep_dive_status: 'pending_stage1' };
+      state.docText = 'Management lowered its full-year revenue outlook before the slide presentation. ' +
+        'Presentation Q2 FY27. Operating capacity discussion without a target. '.repeat(12);
+      await runOne();
+      const highlightRequest = state.nimBodies.find(body => JSON.stringify(body.messages).includes('presentation highlight'));
+      expect(JSON.stringify(highlightRequest.messages)).toContain('Management lowered its full-year revenue outlook');
+      const saved = state.calls.find(c => c.sql.includes('SET event_analysis') && c.params?.[1]?.includes('institutional_verdict'));
+      expect(JSON.parse(saved.params[1]).institutional_verdict.highlight_extraction.source_chars).toBe(state.docText.trim().length);
+    });
+
     it('a long presentation with skipped middle source text cannot claim complete highlight coverage', async () => {
       state.item = { ...baseItem(), title: 'Investor Presentation', attachment_url: 'https://nsearchives.nseindia.com/corporate/deck_Q2.pdf', deep_dive_status: 'pending_stage1' };
       state.docText = 'Investor Presentation Q2 FY27. ' + 'Operating discussion without a target. '.repeat(2600);
@@ -1496,6 +1532,34 @@ describe('quarterly deep-dive worker', () => {
       expect(state.calls.some(c => c.sql.includes("SET deep_dive_status = 'completed'"))).toBe(false);
       expect(attemptKeys()).toContain('unreadable_attempts');
       expect(state.calls.some(sqlIncludes("jsonb_build_object('retry_not_before'"))).toBe(true);    // backs off instead of retrying every cycle
+    });
+
+    it('a same-quarter legacy XBRL API row cannot turn an unreadable PDF into verified results', async () => {
+      unreadableStatement();
+      state.xbrlRows = [{ ticker: 'SHAKTIPUMP', period_end_date: '2026-09-30',
+        revenue_from_ops: '1766622000', pat: '123483000', ebitda: '250000000', source: 'nse_api' }];
+      const res = await run();
+      expect(res.processed).toBe(0);
+      expect(state.sends).toHaveLength(0);
+      expect(state.calls.some(c => c.sql.includes('INSERT INTO quarterly_snapshots'))).toBe(false);
+    });
+
+    it('an unvalidated raw XML cannot authorize verified result numbers', async () => {
+      state.item = { ...baseItem(), title: 'Financial Results XBRL', attachment_url: 'https://example.test/results.xml' };
+      state.docText = `<?xml version="1.0"?><xbrli:xbrl xmlns:xbrli="http://www.xbrl.org/2003/instance" xmlns:in-capmkt="http://www.sebi.gov.in/xbrl/2025-01-31">
+        <in-capmkt:NatureOfReportStandaloneConsolidated>Consolidated</in-capmkt:NatureOfReportStandaloneConsolidated>
+        <xbrli:context id="Q2"><xbrli:period><xbrli:startDate>2026-07-01</xbrli:startDate><xbrli:endDate>2026-09-30</xbrli:endDate></xbrli:period></xbrli:context>
+        <in-capmkt:RevenueFromOperations contextRef="Q2">1766622000</in-capmkt:RevenueFromOperations>
+        <in-capmkt:ProfitLossForPeriod contextRef="Q2">123483000</in-capmkt:ProfitLossForPeriod>
+        </xbrli:xbrl>`;
+      state.tableJson = JSON.stringify({ scope: 'CONSOLIDATED', unit: 'CRORES', column_dates: [], rows: {} });
+      vi.mocked(extractPdfTextDetailed).mockClear();
+      await run();
+      expect(vi.mocked(extractPdfTextDetailed)).not.toHaveBeenCalled();
+      expect(state.calls.some(c => c.sql.includes('INSERT INTO quarterly_snapshots'))).toBe(false);
+      expect(state.sends.join(' ')).not.toContain('VERIFIED FINANCIALS');
+      expect(state.digestStore.size).toBe(0);
+      expect(state.calls.some(c => c.sql.includes("'needs_review'"))).toBe(true);
     });
 
     it('if the AI providers are down while the figures are being located, it is an outage: no attempt is consumed', async () => {
@@ -1759,6 +1823,55 @@ Profit for the period 80.96 78.00 74.20 158.96 140.00 300.00
     for (const leaked of ['Aerospace', 'Dholera', 'Wayout', '₹3,000', '₹600 Cr', '₹1,500', '₹1,200', '₹10,000', '25% PAT']) {
       expect(msg, `alert still contains "${leaked}"`).not.toContain(leaked);
     }
+  });
+
+  it('an SBCL-length concall transcript creates a source_manifest and reuses completed ranges on resume', async () => {
+    const sentence = "The company delivered strong operational performance across key divisions. ";
+    let text = "Harshit Kapadia: Good day and welcome to the conference call. " + sentence.repeat(160) + "\n\n";
+    for (let i = 1; i <= 14; i++) {
+      text += `Moderator: The next question is from the line of Analyst ${i} from Firm ${i}.\n`;
+      text += `Analyst ${i}: Could you clarify performance in segment ${i}?\n`;
+      if (i === 12) {
+        text += `Analyst 12: By year end, what will be our capacity utilisation?\n`;
+        text += `Management: By the end of this year, capacity utilisation should be around 55%.\n\n`;
+      } else {
+        text += `Management: ` + sentence.repeat(65) + `\n\n`;
+      }
+    }
+    state.docText = text;
+
+    const { createSourceManifest } = await import('../services/concall-highlights.service.js');
+    const initManifest = createSourceManifest({ docText: text, attachmentUrl: 'https://nsearchives.nseindia.com/corporate/SBCL_Transcript.pdf' });
+    expect(initManifest.ranges.length).toBeGreaterThanOrEqual(4);
+    initManifest.ranges[0].status = 'COMPLETE';
+    initManifest.ranges[0].result = {
+      financial_performance: ['Revenue growth remained solid'],
+      management_tone: 'Confident'
+    };
+
+    state.item = {
+      ...baseItem(),
+      title: 'Analysts/Institutional Investor Meet/Con. Call Updates',
+      deep_dive_status: 'pending_stage2',
+      attachment_url: 'https://nsearchives.nseindia.com/corporate/SBCL_Transcript.pdf',
+      is_earnings_release: false,
+      event_analysis: { source_manifest: initManifest }
+    };
+
+    state.highlightReplies = [
+      JSON.stringify({ business_performance: ['Segment 2 growing well'] }),
+      JSON.stringify({ business_performance: ['Segment 3 growing well'] }),
+      JSON.stringify({
+        annual_guidance: ['By the end of this year, capacity utilisation should be around 55%'],
+        operational_highlights: ['Capacity utilisation targeted at 55% by year end']
+      })
+    ];
+
+    const res = await processPendingDeepDives({ announcementIds: ['aaaaaaaa-0000-0000-0000-000000000001'], deadlineAt: Date.now() + 20000 });
+    expect(res.processed).toBe(1);
+
+    const highlightCalls = state.nimBodies.filter(b => JSON.stringify(b.messages).includes('concall highlight report'));
+    expect(highlightCalls.length).toBe(initManifest.ranges.length - 1);
   });
 
   describe('concall RECORDINGS (SJS / SBCL / TRANSRAILL 2026-11-04..05: a one-paragraph summary, "concall not analysed yet", and a guidance cut that never reached the alert)', () => {

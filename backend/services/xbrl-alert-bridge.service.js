@@ -1,9 +1,9 @@
 /**
  * XBRL Alert Bridge Service
  *
- * Bridges official NSE/BSE structured XBRL filings into the real-time alert pipeline.
- * Authorizes 100% verified machine-readable financial metrics (revenue, EBITDA, PAT)
- * to preempt or augment PDF OCR parsing.
+ * Bridges structured XBRL filings into the alert pipeline only when exact-filing,
+ * unit, scope and taxonomy provenance has been retained. Legacy quarterly rows
+ * and this module's unvalidated XML parser are comparison data, not alert authority.
  */
 
 import { parseXbrlFile } from "./xbrl/index.js";
@@ -33,9 +33,10 @@ function normalizeToCrores(val) {
 }
 
 /**
- * Converts a database row from xbrl_metrics_quarterly into a standardized verified financial object.
+ * Converts a database row into the worker's financial shape. The legacy mode is for
+ * comparison only; callers must require alertEligible before using it in an alert.
  */
-export function formatXbrlRowAsFinancials(row) {
+export function formatXbrlRowAsFinancials(row, { absoluteInr = false } = {}) {
   if (!row) return null;
   const rawRev = row.revenue_from_ops ?? row.revenue;
   if (rawRev === null || rawRev === undefined) return null;
@@ -44,21 +45,22 @@ export function formatXbrlRowAsFinancials(row) {
   if (isNaN(numRev) || numRev <= 0) return null;
 
   // DB values in xbrl_metrics_quarterly are stored in absolute INR (e.g. 1766622000.00 for ₹176.66 Cr)
-  const revCr = numRev >= 1e6 ? round2(numRev / 1e7) : round2(numRev);
+  const scale = value => absoluteInr ? round2(Number(value) / 1e7) : (Math.abs(Number(value)) >= 1e6 ? round2(Number(value) / 1e7) : round2(Number(value)));
+  const revCr = scale(numRev);
   const rawPat = row.pat;
-  const patCr = rawPat !== null && rawPat !== undefined ? (parseFloat(rawPat) >= 1e6 ? round2(parseFloat(rawPat) / 1e7) : round2(parseFloat(rawPat))) : null;
+  const patCr = rawPat !== null && rawPat !== undefined && Number.isFinite(Number(rawPat)) ? scale(rawPat) : null;
 
   let ebitdaCr = null;
   if (row.ebitda !== null && row.ebitda !== undefined) {
     const rawEb = parseFloat(row.ebitda);
-    ebitdaCr = rawEb >= 1e6 ? round2(rawEb / 1e7) : round2(rawEb);
+    ebitdaCr = Number.isFinite(rawEb) ? scale(rawEb) : null;
   }
 
   const ebitdaMarginPct = (revCr > 0 && ebitdaCr !== null) ? round2((ebitdaCr / revCr) * 100) : null;
   const periodEnd = row.period_end_date ? new Date(row.period_end_date).toISOString().slice(0, 10) : null;
 
-  const revGrowth = row.revenue_growth_yoy !== null && row.revenue_growth_yoy !== undefined ? parseFloat(row.revenue_growth_yoy) : null;
-  const patGrowth = row.pat_growth_yoy !== null && row.pat_growth_yoy !== undefined ? parseFloat(row.pat_growth_yoy) : null;
+  const revGrowth = !absoluteInr && row.revenue_growth_yoy !== null && row.revenue_growth_yoy !== undefined ? parseFloat(row.revenue_growth_yoy) : null;
+  const patGrowth = !absoluteInr && row.pat_growth_yoy !== null && row.pat_growth_yoy !== undefined ? parseFloat(row.pat_growth_yoy) : null;
 
   return {
     isFinancialResult: true,
@@ -72,16 +74,17 @@ export function formatXbrlRowAsFinancials(row) {
     ebitdaMarginPct: ebitdaMarginPct,
     ebitdaYoYGrowthPct: null,
     ebitdaMarginBpsDelta: null,
-    patStandalone: patCr,
+    patStandalone: absoluteInr ? null : patCr,
     patConsolidated: patCr,
-    patAttributable: patCr,
+    patAttributable: absoluteInr ? null : patCr,
     patYoYGrowthPct: patGrowth,
     isYoYDecline: Boolean(patGrowth !== null && patGrowth < 0),
     isMarginErosion: false,
     segmentRedFlags: [],
     source: "XBRL_XML",
     verification: "XBRL_VERIFIED",
-    isVerified: true
+    isVerified: true,
+    alertEligible: absoluteInr
   };
 }
 
@@ -94,11 +97,16 @@ export async function parseXbrlXmlToFinancials(xmlContent) {
   const parseResult = await parseXbrlFile(xmlContent);
   if (!parseResult.success || !parseResult.data || !parseResult.data.metrics) return null;
 
-  const quarters = Object.keys(parseResult.data.metrics);
-  if (quarters.length === 0) return null;
+  const quarterDates = parseResult.data.quarterDates || {};
+  const datedQuarters = Object.keys(parseResult.data.metrics).map(q => {
+    const raw = quarterDates[q];
+    const end = typeof raw === "string" ? raw : raw?.endDate;
+    const timestamp = Date.parse(end || "");
+    return { q, end, timestamp };
+  }).filter(entry => Number.isFinite(entry.timestamp)).sort((a, b) => b.timestamp - a.timestamp);
+  if (!datedQuarters.length) return null;
 
-  // Pick the latest quarter
-  const latestQ = quarters[0];
+  const latestQ = datedQuarters[0].q;
   const m = parseResult.data.metrics[latestQ];
   if (!m || (m.revenue === undefined && m.pbt === undefined && m.pat === undefined)) return null;
 
@@ -117,8 +125,7 @@ export async function parseXbrlXmlToFinancials(xmlContent) {
   }
 
   const margin = (revCr && revCr > 0 && ebitdaCr !== null) ? round2((ebitdaCr / revCr) * 100) : null;
-  const qDates = parseResult.data.quarterDates?.[latestQ];
-  const periodEnd = qDates?.endDate || null;
+  const periodEnd = datedQuarters[0].end;
 
   return {
     isFinancialResult: true,
@@ -142,6 +149,9 @@ export async function parseXbrlXmlToFinancials(xmlContent) {
     source: "XBRL_XML",
     verification: "XBRL_VERIFIED",
     isVerified: true,
+    // This legacy parser does not validate taxonomy, unitRef, context dimensions or filing identity.
+    // Its figures can be inspected but cannot authorize an alert until those checks exist.
+    alertEligible: false,
     rawSegments: parseResult.data.segments || []
   };
 }
@@ -149,28 +159,32 @@ export async function parseXbrlXmlToFinancials(xmlContent) {
 /**
  * Queries xbrl_metrics_quarterly in Supabase for a matching filing by ticker and periodEndHint.
  */
-export async function resolveXbrlFinancialsForFiling(ticker, periodEndHint, pool) {
-  if (!ticker || !pool) return null;
+export async function resolveXbrlFinancialsForFiling(ticker, periodEndHint, pool, { attachmentUrl = null } = {}) {
+  if (!ticker || !pool || !/^\d{4}-\d{2}-\d{2}$/.test(String(periodEndHint || "")) || !attachmentUrl) return null;
 
   try {
-    let query = `
+    const query = `
       SELECT * FROM xbrl_metrics_quarterly
-      WHERE ticker = $1 AND revenue_from_ops IS NOT NULL
+      WHERE ticker = $1 AND period_end_date = $2::date AND revenue_from_ops IS NOT NULL
+      ORDER BY updated_at DESC LIMIT 1
     `;
-    const params = [ticker];
-
-    if (periodEndHint) {
-      // Check for period end within ±15 days to handle UTC vs IST month-end dates (e.g. 2026-06-29 vs 2026-06-30)
-      query += ` AND period_end_date >= ($2::date - INTERVAL '15 days') AND period_end_date <= ($2::date + INTERVAL '15 days')`;
-      params.push(periodEndHint);
-    }
-
-    query += ` ORDER BY period_end_date DESC LIMIT 1`;
-
-    const { rows } = await pool.query(query, params);
+    const { rows } = await pool.query(query, [ticker, periodEndHint]);
     if (!rows || rows.length === 0) return null;
-
-    return formatXbrlRowAsFinancials(rows[0]);
+    const row = rows[0];
+    const proof = row.metric_metadata?.alert_provenance;
+    // The current quarterly table collapses basis/revisions and contains NSE API as well as XML values.
+    // Only a future fact-ledger writer that supplies this explicit attestation may feed an alert.
+    if (row.source !== "validated_xml" || proof?.taxonomy_validated !== true || proof?.unit !== "INR" ||
+        proof?.scope !== "CONSOLIDATED" || proof?.period_end !== periodEndHint ||
+        proof?.source_url !== attachmentUrl || proof?.fields?.revenue_from_ops !== "validated" ||
+        proof?.fields?.pat !== "validated") return null;
+    const fin = formatXbrlRowAsFinancials(row, { absoluteInr: true });
+    if (!fin || fin.revenue <= 0 || fin.patConsolidated === null) return null;
+    if (proof.fields.ebitda !== "validated") {
+      fin.ebitda = null;
+      fin.ebitdaMarginPct = null;
+    }
+    return fin;
   } catch (err) {
     console.warn(`[XBRL BRIDGE] Query failed for ${ticker}:`, err.message);
     return null;
@@ -181,22 +195,20 @@ export async function resolveXbrlFinancialsForFiling(ticker, periodEndHint, pool
  * Reconciles and enriches a PDF-parsed financial object with XBRL data.
  */
 export function reconcileOrEnrichFinancials(pdfFin, xbrlFin) {
-  if (!pdfFin || !pdfFin.revenue) return xbrlFin;
+  if (!pdfFin || !pdfFin.revenue) return xbrlFin?.alertEligible === true ? xbrlFin : pdfFin;
   if (!xbrlFin || !xbrlFin.revenue) return pdfFin;
 
-  // Enrich missing EBITDA or segments if PDF missed them
-  const enriched = { ...pdfFin };
-  if ((enriched.ebitda === null || enriched.ebitda === undefined) && xbrlFin.ebitda !== null) {
+  const comparable = pdfFin.isVerified === true && xbrlFin.isVerified === true && xbrlFin.alertEligible === true &&
+    pdfFin.quarterEnded && pdfFin.quarterEnded === xbrlFin.quarterEnded &&
+    pdfFin.statementScope && pdfFin.statementScope === xbrlFin.statementScope &&
+    Number.isFinite(Number(pdfFin.patConsolidated)) && Number.isFinite(Number(xbrlFin.patConsolidated));
+  const close = (a, b) => Math.abs(a - b) / Math.max(Math.abs(a), Math.abs(b), 1) <= 0.005;
+  if (!comparable || !close(pdfFin.revenue, xbrlFin.revenue) ||
+      !close(pdfFin.patConsolidated, xbrlFin.patConsolidated)) return pdfFin;
+  const enriched = { ...pdfFin, xbrlReconciled: true };
+  if (enriched.ebitda == null && Number.isFinite(Number(xbrlFin.ebitda)) && xbrlFin.ebitda != null) {
     enriched.ebitda = xbrlFin.ebitda;
     enriched.ebitdaMarginPct = xbrlFin.ebitdaMarginPct;
   }
-
-  // Cross-check revenue
-  const diffPct = Math.abs(enriched.revenue - xbrlFin.revenue) / Math.max(enriched.revenue, xbrlFin.revenue) * 100;
-  if (diffPct <= 2.0) {
-    // Highly reconciled!
-    enriched.xbrlReconciled = true;
-  }
-
   return enriched;
 }

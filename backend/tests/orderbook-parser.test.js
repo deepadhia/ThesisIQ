@@ -32,4 +32,18 @@ describe('Structured Order Book Parser', () => {
     expect(result.orderBookTotalCr).toBeNull();
     expect(result.line).toBeNull();
   });
+
+  it('converts explicit million and billion units instead of presenting them as crores', () => {
+    const result = extractOrderBookMetrics('Consolidated order book of Rs. 500 million. Order inflows were ₹1.2 billion.');
+    expect(result.orderBookConsolidatedCr).toBe(50);
+    expect(result.orderInflowCr).toBe(120);
+    expect(result.line).toContain('₹50 Cr');
+  });
+
+  it('withholds an order-book amount when the filing text gives no unit', () => {
+    const result = extractOrderBookMetrics('Standalone order book stood at 500. Consolidated order book reached ₹600.');
+    expect(result.orderBookStandaloneCr).toBeNull();
+    expect(result.orderBookConsolidatedCr).toBeNull();
+    expect(result.line).toBeNull();
+  });
 });

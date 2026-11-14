@@ -1,3 +1,10 @@
+export function isYearOrPeriodToken(token) {
+  if (!token) return false;
+  const clean = String(token).replace(/[.,]/g, "").trim();
+  const n = Number(clean);
+  return Number.isInteger(n) && n >= 1990 && n <= 2099;
+}
+
 /**
  * Post-Processing Institutional Guard Layer
  * 
@@ -596,7 +603,7 @@ function buildGroundingCheck(rawDocText, verifiedPcts = [], financialData = null
     for (const m of sentence.matchAll(/(\d{2,}(?:[.,]\d+)*)(\s*(?:%|bps|x\b))?/gi)) {
       if (m[2]) continue;
       const cleanNum = m[1].replace(/,/g, "");
-      if (["2024", "2025", "2026", "2027", "2028", "2029", "2030"].includes(cleanNum)) continue;
+      if (isYearOrPeriodToken(cleanNum)) continue;
       if (cleanNum.length < 3) continue;
       const intPart = cleanNum.split(".")[0];
       const asNumber = parseFloat(cleanNum);
@@ -697,7 +704,7 @@ export function buildSentenceCooccurrenceCheck(rawDocText) {
     const numbers = [];
     for (const m of bullet.matchAll(/(?:₹|rs\.?|inr)?\s*(\d+(?:,\d+)*(?:\.\d+)?)\s*(?:crores?|crs?\b|cr\b|%|lakhs?|mw|gw|mtpa)?/gi)) {
       const clean = m[1].replace(/,/g, "");
-      if (clean.length >= 2 && !["2024", "2025", "2026", "2027", "2028"].includes(clean)) {
+      if (clean.length >= 2 && !isYearOrPeriodToken(clean)) {
         numbers.push(clean);
       }
     }
@@ -1004,7 +1011,7 @@ function sanitizeLlmOutput(guarded, title = "", ticker = "", financialData = nul
         const numbers = textToCheck.match(/\b\d{2,}(?:[.,]\d+)?\b/g) || [];
         for (const num of numbers) {
           const cleanNum = num.replace(/,/g, "");
-          if (["2024", "2025", "2026", "2027", "2028", "2029", "2030"].includes(cleanNum)) continue;
+          if (isYearOrPeriodToken(cleanNum)) continue;
           if (["10", "12", "15", "18", "20", "22", "25", "30", "35", "40", "50"].includes(cleanNum)) continue;
           if (!rawDocText.includes(cleanNum) && !rawDocText.includes(num)) {
             console.warn(`[GROUNDING GUARD] Suppressed ungrounded commitment token ${num} for ${ticker}: "${comm.statement}"`);

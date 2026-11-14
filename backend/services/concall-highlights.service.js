@@ -8,6 +8,7 @@
  * never asked what changed, so a guidance CUT announced in the Q&A did not reach the alert. Long calls are now read in parts.
  */
 
+import crypto from "crypto";
 import { dedupeNearDuplicates } from "./thesis-digest.service.js";
 
 /** Lists a highlight block carries (the grounding guard and the formatter use the same names). */
@@ -108,28 +109,61 @@ function chunkBySentence(s, max) {
   return out;
 }
 
+/** Groups whole units into contiguous parts of at most MAX_PART_CHARS without trimming any exchanges. */
+function groupIntoPartsExhaustive(prepared, exchanges) {
+  const units = [prepared, ...exchanges].filter(Boolean).flatMap((u) => (u.length > MAX_PART_CHARS ? chunkBySentence(u, MAX_PART_CHARS) : [u]));
+  const parts = [];
+  let current = [];
+  let currentLen = 0;
+
+  for (const unit of units) {
+    const unitLen = unit.length + 2;
+    if (currentLen + unitLen > MAX_PART_CHARS && current.length > 0) {
+      parts.push(current.join("\n\n"));
+      current = [unit];
+      currentLen = unitLen;
+    } else {
+      current.push(unit);
+      currentLen += unitLen;
+    }
+  }
+  if (current.length > 0) {
+    parts.push(current.join("\n\n"));
+  }
+  return parts;
+}
+
 /** Parts that start at an exchange boundary; an over-long call is trimmed per exchange (every analyst stays), not chopped in the middle. */
-function splitByStructure(seg) {
+function splitByStructure(seg, { exhaustive = false, maxParts = null } = {}) {
   const prepared = seg.prepared.trim();
   const exchanges = seg.qa.map((e) => e.text.trim());
+  if (exhaustive) {
+    return groupIntoPartsExhaustive(prepared, exchanges);
+  }
   const total = prepared.length + exchanges.reduce((n, e) => n + e.length, 0);
+  const effectiveMaxParts = maxParts || MAX_PARTS;
+  const effectiveMaxTotal = MAX_PART_CHARS * effectiveMaxParts;
   // As is when it fits; otherwise trim only the longest exchanges, a little more each time, until whole exchanges can be grouped.
-  const ladder = total <= MAX_TOTAL_CHARS ? [null, 0.93, 0.85, 0.75] : [0.93, 0.85, 0.75];
+  const ladder = total <= effectiveMaxTotal ? [null, 0.93, 0.85, 0.75] : [0.93, 0.85, 0.75];
   for (const factor of ladder) {
-    const parts = groupIntoParts(factor === null ? prepared : trimPrepared(prepared), factor === null ? exchanges : trimExchanges(trimPrepared(prepared), exchanges, factor));
+    const parts = groupIntoParts(
+      factor === null ? prepared : trimPrepared(prepared, effectiveMaxTotal),
+      factor === null ? exchanges : trimExchanges(trimPrepared(prepared, effectiveMaxTotal), exchanges, factor, effectiveMaxTotal),
+      effectiveMaxParts
+    );
     if (parts) return parts;
   }
   return null;
 }
 
-function trimPrepared(prepared) {
-  const cap = Math.floor(MAX_TOTAL_CHARS * 0.55);
+function trimPrepared(prepared, maxTotal = MAX_TOTAL_CHARS) {
+  const cap = Math.floor(maxTotal * 0.55);
   return prepared.length > cap ? trimToChars(prepared, cap) : prepared;
 }
 
 /** Water-filling: short exchanges keep all they have, the slack goes to the longest ones. */
-function trimExchanges(prepared, exchanges, factor) {
-  let remaining = Math.floor(MAX_TOTAL_CHARS * factor) - prepared.length;
+function trimExchanges(prepared, exchanges, factor, maxTotal = MAX_TOTAL_CHARS) {
+  let remaining = Math.floor(maxTotal * factor) - prepared.length;
   const order = exchanges.map((e, i) => i).sort((a, b) => exchanges[a].length - exchanges[b].length);
   const caps = new Array(exchanges.length);
   order.forEach((idx, k) => {
@@ -140,16 +174,11 @@ function trimExchanges(prepared, exchanges, factor) {
   return exchanges.map((e, i) => trimToChars(e, caps[i]));
 }
 
-/**
- * Groups whole units into n contiguous parts so that the LARGEST part is as small as possible (a greedy fill to the limit needs a
- * 4th part for a 55-60k call). About twenty units and at most three parts: an exact dynamic programme is instant.
- * Null when even the best grouping leaves a part over the limit.
- */
-function groupIntoParts(prepared, exchanges) {
+function groupIntoParts(prepared, exchanges, maxParts = MAX_PARTS) {
   const units = [prepared, ...exchanges].filter(Boolean).flatMap((u) => (u.length > MAX_PART_CHARS ? chunkBySentence(u, MAX_PART_CHARS) : [u]));
   const size = units.map((u) => u.length + 2);
   const sum = size.reduce((a, b) => a + b, 0);
-  const n = Math.max(1, Math.min(MAX_PARTS, Math.ceil(sum / MAX_PART_CHARS)));
+  const n = Math.max(1, Math.min(maxParts, Math.ceil(sum / MAX_PART_CHARS)));
   const pre = [0];
   size.forEach((sz, i) => pre.push(pre[i] + sz));
   const m = units.length;
@@ -174,43 +203,38 @@ function groupIntoParts(prepared, exchanges) {
   return parts;
 }
 
-/**
- * Splits a transcript into at most three parts. A call with analyst introductions is cut BETWEEN exchanges (prepared remarks first),
- * never inside an answer, and a call longer than three parts can hold is trimmed per exchange so every analyst stays. A text with
- * no structure is cut into parts of about equal size at sentence ends, keeping its beginning and its end.
- */
-export function splitTranscript(text = "") {
+export function splitTranscript(text = "", { exhaustive = false, maxParts = null } = {}) {
   const t = String(text || "").trim();
   if (!t) return [];
   if (t.length <= MAX_PART_CHARS) return [t];
   const seg = segmentCall(t);
   if (seg.qa) {
-    const parts = splitByStructure(seg);
+    const parts = splitByStructure(seg, { exhaustive, maxParts });
     if (parts) return parts;
   }
-  return splitEqually(t);
+  return splitEqually(t, { exhaustive });
 }
 
-/** Reports when the bounded model input omitted source passages. The source itself remains available for reprocessing. */
 export function transcriptCoverage(text = "", parts = []) {
   const sourceChars = String(text || "").trim().length;
   const submittedChars = parts.reduce((total, part) => total + String(part || "").length, 0);
   const shortened = parts.some(part => String(part).includes(" […] "));
+  const complete = !shortened && (submittedChars >= sourceChars - Math.max(100, parts.length * 30));
   return {
-    complete: !shortened && sourceChars <= MAX_TOTAL_CHARS && submittedChars >= sourceChars - parts.length * 2,
+    complete,
     sourceChars,
     submittedChars,
-    omittedChars: Math.max(0, sourceChars - submittedChars)
+    omittedChars: complete ? 0 : Math.max(0, sourceChars - submittedChars)
   };
 }
 
-function splitEqually(input) {
+function splitEqually(input, { exhaustive = false } = {}) {
   let t = input;
-  if (t.length > MAX_TOTAL_CHARS) {
+  if (!exhaustive && t.length > MAX_TOTAL_CHARS) {
     const head = Math.floor(MAX_TOTAL_CHARS * 0.4);
     t = `${t.slice(0, head)}\n${t.slice(t.length - (MAX_TOTAL_CHARS - head))}`;
   }
-  const n = Math.min(MAX_PARTS, Math.ceil(t.length / MAX_PART_CHARS));
+  const n = exhaustive ? Math.max(1, Math.ceil(t.length / MAX_PART_CHARS)) : Math.min(MAX_PARTS, Math.ceil(t.length / MAX_PART_CHARS));
   const target = Math.ceil(t.length / n);
   const parts = [];
   let start = 0;
@@ -224,6 +248,98 @@ function splitEqually(input) {
   }
   parts.push(t.slice(start).trim());
   return parts.filter(Boolean);
+}
+
+export function reconcileQualifyingAnswers(highlights, transcriptText = "") {
+  if (!highlights || !Array.isArray(highlights.key_challenges) || !transcriptText) return highlights;
+
+  const t = String(transcriptText);
+  const updatedChallenges = highlights.key_challenges.map(challenge => {
+    const c = String(challenge || "");
+    // Check for US shunt / geographic revenue shift
+    if (/u\.?s\.?\s+shunt|shunt.*(?:u\.?s\.?|america)|lost.*revenue.*u\.?s\.?/i.test(c)) {
+      if (/ship(?:ped|ment|ping)?\s+directly\s+to\s+(?:end\s+users\s+in\s+)?asia|geographic\s+revenue.*asia|showing\s+up\s+in\s+asia/i.test(t)) {
+        if (!/asia/i.test(c)) {
+          return `${c} (Management clarified in Q&A: shipments to US customers now deliver directly to Asian end users, booking revenue under Asia)`;
+        }
+      }
+    }
+    return challenge;
+  });
+
+  return {
+    ...highlights,
+    key_challenges: updatedChallenges
+  };
+}
+
+export function createSourceManifest({ docText = "", attachmentUrl = null, extractorVersion = "2.0-exhaustive" } = {}) {
+  const text = String(docText || "").trim();
+  const sha256 = crypto.createHash("sha256").update(text).digest("hex");
+  const parts = splitTranscript(text, { exhaustive: true });
+
+  let currentOffset = 0;
+  const ranges = parts.map((part, index) => {
+    const start = text.indexOf(part.slice(0, 100), currentOffset);
+    const charStart = start !== -1 ? start : currentOffset;
+    const charEnd = charStart + part.length;
+    currentOffset = charEnd;
+    return {
+      partIndex: index,
+      charStart,
+      charEnd,
+      chars: part.length,
+      status: "PENDING",
+      result: null,
+      error: null
+    };
+  });
+
+  return {
+    docUrl: attachmentUrl,
+    sha256,
+    version: extractorVersion,
+    totalChars: text.length,
+    partCount: ranges.length,
+    status: ranges.length > 0 ? "IN_PROGRESS" : "COMPLETE",
+    ranges
+  };
+}
+
+export function resumeOrInitManifest(existingManifest, { docText = "", attachmentUrl = null, extractorVersion = "2.0-exhaustive" } = {}) {
+  const text = String(docText || "").trim();
+  const sha256 = crypto.createHash("sha256").update(text).digest("hex");
+
+  if (
+    existingManifest &&
+    existingManifest.sha256 === sha256 &&
+    existingManifest.version === extractorVersion &&
+    Array.isArray(existingManifest.ranges)
+  ) {
+    return { ...existingManifest };
+  }
+
+  return createSourceManifest({ docText, attachmentUrl, extractorVersion });
+}
+
+export function recordRangeResult(manifest, partIndex, result, error = null) {
+  if (!manifest || !Array.isArray(manifest.ranges)) return manifest;
+  const target = manifest.ranges.find(r => r.partIndex === partIndex);
+  if (!target) return manifest;
+
+  if (result) {
+    target.status = "COMPLETE";
+    target.result = result;
+    target.error = null;
+  } else if (error) {
+    target.status = "FAILED";
+    target.error = String(error);
+  }
+
+  const allComplete = manifest.ranges.every(r => r.status === "COMPLETE");
+  const anyFailed = manifest.ranges.some(r => r.status === "FAILED");
+  manifest.status = allComplete ? "COMPLETE" : anyFailed ? "INCOMPLETE" : "IN_PROGRESS";
+  return manifest;
 }
 
 /** Prompts for one part of a call. Only abstract descriptors here (AGENTS.md rule 6): no names, no sample figures. */

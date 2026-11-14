@@ -46,6 +46,18 @@ describe('Evidence Ledger & Sentence-Level Grounding (borrowed from earnings-ana
     const sanitized = sanitizeConcallHighlights(hallucinatedHighlights, transcriptText, null);
     expect(sanitized.growth_initiatives).toEqual([]);
   });
+
+  it('general year/period rule handles future horizon years (e.g. 2032, 2035) without treating calendar years as ungrounded financial figures', () => {
+    const rawDoc = "Company management announced Vision 2035 targeting expansion into new international markets.";
+    const highlights = {
+      multi_year_targets: [
+        "Vision 2035: expansion into international markets"
+      ]
+    };
+    const sanitized = sanitizeConcallHighlights(highlights, rawDoc, null);
+    expect(sanitized.multi_year_targets).toHaveLength(1);
+    expect(sanitized.multi_year_targets[0]).toContain("2035");
+  });
 });
 
 describe('XBRL Document Scope Resolution (borrowed from india-xbrl-filings)', () => {

@@ -21,6 +21,7 @@ import { classifyThesisStateV2, reconcileSnapshotThesisState, THESIS_STATES } fr
 import { getThesisContract } from '../services/thesis-driver-context.service.js';
 import { compareFiscalQuarters } from '../utils/fiscal-quarter.js';
 import { loadEarningsReactionBoard, reactionBoardMarkdown } from '../services/earnings-reaction-board.service.js';
+import { loadThesisHealthInputs, buildThesisHealthReport, thesisHealthMarkdown } from '../services/thesis-health-tracker.service.js';
 
 const OUTPUT_DIR = path.resolve('reports/thesis_board');
 
@@ -33,13 +34,13 @@ function getOperationalMetadataForTicker(ticker) {
   const contract = getThesisContract(ticker);
   if (!contract || !contract.drivers || contract.drivers.length === 0) {
     return {
-      coreDriver: contract?.thesisTitle || 'Core Business Operations',
+      coreDriver: contract?.thesisTitle || null,
       category: 'General',
       relevance: 'Core',
       direction: 'FLAT',
       kpiEvidence: 'Quarterly financial compounding and operating margins tracked in snapshots.',
       decisionQuestion: 'Is quarterly performance maintaining thesis trajectory?',
-      bucket: '🟡 Intact (Monitoring)'
+      bucket: '⚪ Unassessed (No Contract)'
     };
   }
 
@@ -66,6 +67,96 @@ function getOperationalMetadataForTicker(ticker) {
   };
 }
 
+export function buildPortfolioBoardRows({
+  rankings = [],
+  healthReport = null,
+  snapshotMap = new Map(),
+  reactionMap = new Map(),
+  trackedStocks = []
+} = {}) {
+  const rankingList = Array.isArray(rankings) ? rankings : [];
+  const rankingMap = new Map(rankingList.map(r => [r.ticker, r]));
+
+  const candidates = [];
+  const seenTickers = new Set();
+
+  for (const r of rankingList) {
+    if (r.ticker && !seenTickers.has(r.ticker)) {
+      seenTickers.add(r.ticker);
+      candidates.push({
+        ticker: r.ticker,
+        rank: r.rank ?? null,
+        latestQuarter: r.latest_quarter ?? null,
+        consolidatedScore: r.consolidated_score ?? null,
+        trajectoryBonus: r.trajectory_bonus ?? null,
+        thesisStatus: r.thesis_status ?? null
+      });
+    }
+  }
+
+  const healthStocks = Array.isArray(healthReport?.stocks) ? healthReport.stocks : [];
+  for (const h of healthStocks) {
+    if (h.ticker && !seenTickers.has(h.ticker)) {
+      seenTickers.add(h.ticker);
+      candidates.push({
+        ticker: h.ticker,
+        rank: null,
+        latestQuarter: null,
+        consolidatedScore: null,
+        trajectoryBonus: null,
+        thesisStatus: null
+      });
+    }
+  }
+
+  const stockList = Array.isArray(trackedStocks) ? trackedStocks : [];
+  for (const s of stockList) {
+    if (s.ticker && !seenTickers.has(s.ticker)) {
+      seenTickers.add(s.ticker);
+      candidates.push({
+        ticker: s.ticker,
+        rank: null,
+        latestQuarter: null,
+        consolidatedScore: null,
+        trajectoryBonus: null,
+        thesisStatus: null
+      });
+    }
+  }
+
+  const healthMap = new Map(healthStocks.map(s => [s.ticker, s]));
+
+  return candidates.map(r => {
+    const snap = snapshotMap.get(r.ticker) || {};
+    const meta = getOperationalMetadataForTicker(r.ticker);
+    const health = healthMap.get(r.ticker) || null;
+
+    let bucket = meta.bucket;
+    if (!meta.coreDriver || health?.fundamental?.status === 'INSUFFICIENT_EVIDENCE' || meta.bucket.includes('Unassessed')) {
+      bucket = '⚪ Unassessed';
+    }
+
+    return {
+      rank: r.rank,
+      ticker: r.ticker,
+      companyName: snap.company_name || r.ticker,
+      latestQuarter: r.latestQuarter || snap.quarter || null,
+      consolidatedScore: r.consolidatedScore,
+      trajectoryBonus: r.trajectoryBonus,
+      thesisStatus: r.thesisStatus || snap.thesis_status || null,
+      marketReaction: reactionMap.get(r.ticker) || null,
+      thesisHealth: health,
+      coreDriver: meta.coreDriver || 'Core Business Operations',
+      category: meta.category,
+      economicRelevance: meta.relevance,
+      operationalDirection: meta.direction,
+      kpiEvidence: meta.kpiEvidence,
+      decisionQuestion: meta.decisionQuestion,
+      thesisBucket: bucket
+    };
+  });
+}
+
 export async function generatePortfolioThesisBoard() {
   console.log('--- 🏛️ Generating 18-Stock Portfolio Thesis State Board ---');
   if (!fs.existsSync(OUTPUT_DIR)) {
@@ -76,8 +167,21 @@ export async function generatePortfolioThesisBoard() {
   const rankingPath = path.resolve('reports/kpi_shadow/ranking_before.json');
   let rankings = [];
   if (fs.existsSync(rankingPath)) {
-    rankings = JSON.parse(fs.readFileSync(rankingPath, 'utf-8'));
+    try {
+      rankings = JSON.parse(fs.readFileSync(rankingPath, 'utf-8'));
+    } catch {
+      rankings = [];
+    }
   }
+  const rankingMap = new Map((rankings || []).map(r => [r.ticker, r]));
+
+  // Query all tracked stocks so the board renders all active companies even when frozen ranking file is absent locally
+  const { rows: trackedStocks } = await pool.query(`
+    SELECT s.id, s.ticker, s.company_name
+    FROM stocks s
+    WHERE s.category IN ('Core', 'Watchlist') OR s.category IS NULL
+    ORDER BY s.ticker ASC
+  `);
 
   // 2. Fetch latest snapshot evidence chronologically (eliminates ASCII max(quarter) corruption)
   const { rows: snapshots } = await pool.query(`
@@ -111,28 +215,29 @@ export async function generatePortfolioThesisBoard() {
   }
   const reactionMap = new Map((reactionReport?.stocks || []).map(s => [s.ticker, s]));
 
-  // 3. Build unified portfolio board rows
-  const boardRows = rankings.map(r => {
-    const snap = snapshotMap.get(r.ticker) || {};
-    const meta = getOperationalMetadataForTicker(r.ticker);
+  // The frozen ranking may omit newly added stocks; health covers all tracked stocks.
+  let healthReport = null;
+  try {
+    const inputs = await loadThesisHealthInputs(pool);
+    healthReport = buildThesisHealthReport({ ...inputs, reactions: reactionReport?.stocks || [] });
+    fs.writeFileSync(path.join(OUTPUT_DIR, 'thesis-health.json'), JSON.stringify(healthReport, null, 2));
+    fs.writeFileSync(path.join(OUTPUT_DIR, 'thesis-health.md'), thesisHealthMarkdown(healthReport));
+    fs.writeFileSync(path.join(OUTPUT_DIR, 'thesis-health-status.json'),
+      JSON.stringify({ generatedAt: healthReport.generatedAt, status: 'COMPLETE', stocks: healthReport.stocks.length }, null, 2));
+  } catch (err) {
+    console.error('[THESIS BOARD] Thesis health refresh failed:', err);
+    fs.writeFileSync(path.join(OUTPUT_DIR, 'thesis-health-status.json'),
+      JSON.stringify({ generatedAt: new Date().toISOString(), status: 'FAILED', reason: err.message }, null, 2));
+  }
+  const healthMap = new Map((healthReport?.stocks || []).map(s => [s.ticker, s]));
 
-    return {
-      rank: r.rank,
-      ticker: r.ticker,
-      companyName: snap.company_name || r.ticker,
-      latestQuarter: r.latest_quarter,
-      consolidatedScore: r.consolidated_score,
-      trajectoryBonus: r.trajectory_bonus,
-      thesisStatus: r.thesis_status,
-      marketReaction: reactionMap.get(r.ticker) || null,
-      coreDriver: meta.coreDriver,
-      category: meta.category,
-      economicRelevance: meta.relevance,
-      operationalDirection: meta.direction,
-      kpiEvidence: meta.kpiEvidence,
-      decisionQuestion: meta.decisionQuestion,
-      thesisBucket: meta.bucket
-    };
+  // 3. Build unified portfolio board rows
+  const boardRows = buildPortfolioBoardRows({
+    rankings,
+    healthReport,
+    snapshotMap,
+    reactionMap,
+    trackedStocks
   });
 
   // 4. Save JSON Artifact
@@ -175,7 +280,13 @@ export async function generatePortfolioThesisBoard() {
 
 | Rank | Stock | Financial Score | Operational Business Driver | Economic Relevance | Operational Direction | Thesis State Bucket |
 | :---: | :--- | :---: | :--- | :--- | :---: | :--- |
-${boardRows.map(b => `| **#${b.rank}** | **\`${b.ticker}\`** | **${b.consolidatedScore.toLocaleString()}** (${b.trajectoryBonus >= 0 ? '+' + b.trajectoryBonus : b.trajectoryBonus} bonus) | ${b.coreDriver} | \`${b.economicRelevance}\` | ${b.operationalDirection.includes('UP') ? '🟢 **' + b.operationalDirection + '**' : b.operationalDirection.includes('DOWN') ? '🔴 **' + b.operationalDirection + '**' : '🟡 **' + b.operationalDirection + '**'} | ${b.thesisBucket} |`).join('\n')}
+${boardRows.map(b => {
+  const rankStr = b.rank !== 'N/A' && b.rank !== null && b.rank !== undefined ? `**#${b.rank}**` : `**-**`;
+  const scoreStr = b.consolidatedScore !== null && b.consolidatedScore !== undefined
+    ? `**${b.consolidatedScore.toLocaleString()}** (${b.trajectoryBonus >= 0 ? '+' + b.trajectoryBonus : b.trajectoryBonus} bonus)`
+    : `*Unavailable*`;
+  return `| ${rankStr} | **\`${b.ticker}\`** | ${scoreStr} | ${b.coreDriver} | \`${b.economicRelevance}\` | ${b.operationalDirection.includes('UP') ? '🟢 **' + b.operationalDirection + '**' : b.operationalDirection.includes('DOWN') ? '🔴 **' + b.operationalDirection + '**' : '🟡 **' + b.operationalDirection + '**'} | ${b.thesisBucket} |`;
+}).join('\n')}
 
 ---
 
@@ -186,10 +297,21 @@ ${boardRows.map(b => `| **#${b.rank}** | **\`${b.ticker}\`** | **${b.consolidate
 `;
 
   for (const b of boardRows) {
-    md += `### ${b.rank}. ${b.ticker} (${b.companyName})
-* **Financial Thesis Score:** \`${b.consolidatedScore}\` (Base: \`${b.consolidatedScore - b.trajectoryBonus}\`, Trajectory Bonus: \`${b.trajectoryBonus >= 0 ? '+' + b.trajectoryBonus : b.trajectoryBonus}\`)
+    const healthSummary = b.thesisHealth
+      ? [b.thesisHealth.fundamental.status,
+        `recorded conviction ${b.thesisHealth.fundamental.recordedSnapshotConviction ?? 'unavailable'}/10`,
+        b.thesisHealth.fundamental.evidenceSignal,
+        `price attribution ${b.thesisHealth.attribution}`].join(' | ')
+      : 'Unavailable; see thesis-health-status.json';
+    const rankHeader = b.rank !== 'N/A' && b.rank !== null && b.rank !== undefined ? `${b.rank}. ${b.ticker}` : b.ticker;
+    const scoreLine = b.consolidatedScore !== null && b.consolidatedScore !== undefined
+      ? `\`${b.consolidatedScore}\` (Base: \`${b.consolidatedScore - b.trajectoryBonus}\`, Trajectory Bonus: \`${b.trajectoryBonus >= 0 ? '+' + b.trajectoryBonus : b.trajectoryBonus}\`)`
+      : '`Unavailable` (baseline ranking absent; scores not invented)';
+    md += `### ${rankHeader} (${b.companyName})
+* **Financial Thesis Score:** ${scoreLine}
 * **Thesis State Bucket:** **${b.thesisBucket}**
 * **Market reaction:** ${b.marketReaction?.context || 'Unavailable: no current verified results reaction.'}
+* **Thesis health:** ${healthSummary} ([all tracked stocks](thesis-health.md))
 * **Core Operational Driver:** **${b.coreDriver}** (${b.category})
 * **Economic Relevance:** \`${b.economicRelevance}\` | **Operational Direction:** \`${b.operationalDirection}\`
 * **Underlying Operational Evidence:**  

@@ -22,7 +22,7 @@ import { decideLlmFailureAction, backoffDelayMs, audioBackoffDelayMs, quotaPause
 import { dbStore } from "../services/llm-health.service.js";
 import { extractDeterministicFinancials, detectDocumentUnit, quarterEndBefore } from "../services/financial-validator.service.js";
 import { extractOrderBookMetrics } from "../services/orderbook-parser.service.js";
-import { resolveXbrlFinancialsForFiling, parseXbrlXmlToFinancials, reconcileOrEnrichFinancials } from "../services/xbrl-alert-bridge.service.js";
+import { resolveXbrlFinancialsForFiling, reconcileOrEnrichFinancials } from "../services/xbrl-alert-bridge.service.js";
 import {
   extractDeterministicCashFlow,
   extractEarningsQualityMetrics,
@@ -89,7 +89,7 @@ import {
   getWhisperApiKey,
   analyzeAudioWithGemini
 } from "../services/audio-transcript-analyzer.service.js";
-import { splitTranscript, transcriptCoverage, buildHighlightPrompts, parseHighlightReply, mergeConcallHighlights, promoteExplicitForwardTargets } from "../services/concall-highlights.service.js";
+import { splitTranscript, transcriptCoverage, buildHighlightPrompts, parseHighlightReply, mergeConcallHighlights, promoteExplicitForwardTargets, resumeOrInitManifest, recordRangeResult, reconcileQualifyingAnswers } from "../services/concall-highlights.service.js";
 import { countTickersHoldingDocument, isForeignCopy, setAsideForeignFiling } from "../services/foreign-filing.service.js";
 import { scaleSanity } from "../services/scale-sanity.service.js";
 
@@ -2002,6 +2002,15 @@ async function processOneDeepDive(item, ctx) {
     return { success: true, skipped: true };
   }
 
+  if (/\.xml(?:[?#]|$)/i.test(String(item.attachment_url || "")) &&
+      (item.is_earnings_release === true || item.filing_category === "QUARTERLY_EARNINGS" ||
+       /(?:financial|quarterly)\s+results/i.test(String(item.title || "")))) {
+    // XML is not a PDF. The legacy mapper cannot validate taxonomy imports, units,
+    // context dimensions or exact filing identity, so never send its figures as verified.
+    await escalateToReview(item, "Results XBRL XML requires taxonomy, unit, context and filing-identity validation before its figures can be used in an alert", suppressTelegram);
+    return { success: false, review: true };
+  }
+
   // ── 1. Document text ──
   let docText = "";
   let extractedSourceUrl = item.attachment_url;
@@ -2318,21 +2327,9 @@ async function processOneDeepDive(item, ctx) {
     finSource = "THIS_FILING";
   }
 
-  // If the document is an official XBRL XML attachment, parse verified numbers directly
-  if (item.attachment_url && item.attachment_url.toLowerCase().endsWith(".xml")) {
-    const xmlFin = await parseXbrlXmlToFinancials(docText);
-    if (xmlFin && xmlFin.revenue) {
-      extractedFin = xmlFin;
-      deterministicFin = xmlFin;
-      finSource = "THIS_FILING";
-      periodLabel = resolveReportingQuarter(item, xmlFin);
-      console.log(`[XBRL INGESTION] ${item.ticker}: parsed verified financials directly from XBRL XML attachment.`);
-    }
-  }
-
   // If PDF parser could not parse numbers, check if verified official XBRL metrics exist in the DB for this quarter
   if (!deterministicFin && looksLikeStatementDoc && !scaleSuspect) {
-    const xbrlFin = await resolveXbrlFinancialsForFiling(item.ticker, periodEndHint, pool);
+    const xbrlFin = await resolveXbrlFinancialsForFiling(item.ticker, periodEndHint, pool, { attachmentUrl: item.attachment_url });
     if (xbrlFin && xbrlFin.revenue) {
       deterministicFin = xbrlFin;
       finSource = "THIS_FILING";
@@ -2343,15 +2340,16 @@ async function processOneDeepDive(item, ctx) {
 
   // Enrich deterministic numbers with XBRL if available (e.g. EBITDA or segments if PDF missed them)
   if (deterministicFin && deterministicFin.revenue && looksLikeStatementDoc) {
-    const xbrlFin = await resolveXbrlFinancialsForFiling(item.ticker, periodEndHint, pool);
+    const xbrlFin = await resolveXbrlFinancialsForFiling(item.ticker, periodEndHint, pool, { attachmentUrl: item.attachment_url });
     if (xbrlFin && xbrlFin.revenue) {
       deterministicFin = reconcileOrEnrichFinancials(deterministicFin, xbrlFin);
     }
   }
 
   // Extract structured order book metrics from filing text
-  const trailingRev = (deterministicFin?.revenue || extractedFin?.revenue) ? (deterministicFin?.revenue || extractedFin?.revenue) * 4 : undefined;
-  const obMetrics = extractOrderBookMetrics(docText, { trailingRevenueCr: trailingRev });
+  // One quarter times four is an annualised run rate, not trailing twelve-month revenue.
+  // Leave book-to-bill blank until four same-scope verified quarters can provide its denominator.
+  const obMetrics = extractOrderBookMetrics(docText);
   if (obMetrics && obMetrics.orderBookTotalCr) {
     if (deterministicFin) deterministicFin.orderBook = obMetrics;
   }
@@ -2666,7 +2664,23 @@ async function processOneDeepDive(item, ctx) {
 
   if (isTranscriptDoc || isDeckDoc) {
     console.log(`[WORKER] Generating ${isDeckDoc ? "presentation" : "concall"} highlights for ${item.ticker}...`);
-    const rawCh = await generateStructuredConcallHighlights(item.ticker, item.company_name, docText, { docKind: isDeckDoc ? "presentation" : "call" });
+    const rawCh = await generateStructuredConcallHighlights(item.ticker, item.company_name, docText, {
+      docKind: isDeckDoc ? "presentation" : "call",
+      existingManifest: item.event_analysis?.source_manifest,
+      attachmentUrl: item.attachment_url,
+      onProgress: async (manifest) => {
+        try {
+          await pool.query(
+            `UPDATE corporate_announcements
+             SET event_analysis = jsonb_set(COALESCE(event_analysis, '{}'::jsonb), '{source_manifest}', $1::jsonb)
+             WHERE id = $2`,
+            [JSON.stringify(manifest), item.id]
+          );
+        } catch (err) {
+          console.warn(`[WORKER] Failed to persist source_manifest progress for ${item.ticker}:`, err.message);
+        }
+      }
+    });
     const coverage = rawCh?.extraction_coverage || { parts: 0, parsed: 0 };
     verdict.highlight_extraction = {
       status: coverage.parts > 0 && coverage.parsed === coverage.parts && !coverage.source_truncated && !sourceTextTruncated ? "COMPLETE" : "INCOMPLETE",
@@ -2677,7 +2691,10 @@ async function processOneDeepDive(item, ctx) {
       source_chars: coverage.source_chars || null,
       submitted_chars: coverage.submitted_chars || null
     };
-    const ch = promoteExplicitForwardTargets(sanitizeConcallHighlights(rawCh, docText, gateFin));
+    if (rawCh?.source_manifest) {
+      verdict.source_manifest = rawCh.source_manifest;
+    }
+    const ch = reconcileQualifyingAnswers(promoteExplicitForwardTargets(sanitizeConcallHighlights(rawCh, docText, gateFin)), docText);
     const hasHighlightContent = ch && [
       "guidance_changes", "quarterly_guidance", "annual_guidance", "multi_year_targets",
       "segment_highlights", "business_performance", "financial_performance", "operational_highlights",
@@ -2696,6 +2713,18 @@ async function processOneDeepDive(item, ctx) {
         if (verdict.thesis_gate_result) {
           verdict.thesis_gate_result = { ...verdict.thesis_gate_result, decisionExplanation: `Management cut guidance on the call (${cuts[0].slice(0, 140)}), so no buy is authorised. ${verdict.thesis_gate_result.decisionExplanation || ""}`.trim() };
         }
+      }
+    }
+    if (verdict.highlight_extraction.status === "INCOMPLETE") {
+      // An unexamined page, turn or model part can contain a guidance cut or contrary explanation.
+      // Keep the sourced partial highlights visible, but do not present the filing as a decisive buy.
+      verdict.final_action = "HOLD / REVIEW";
+      verdict.action_signal = "HOLD / REVIEW";
+      verdict.conviction_score = Math.min(Number(verdict.conviction_score) || 5, 5);
+      verdict.verdict_summary = dropContradictingStance(verdict.verdict_summary, "HOLD / REVIEW");
+      if (verdict.thesis_gate_result) {
+        verdict.thesis_gate_result = { ...verdict.thesis_gate_result,
+          decisionExplanation: `The document highlight read is incomplete; review the unread source before acting. ${verdict.thesis_gate_result.decisionExplanation || ""}`.trim() };
       }
     }
   }
@@ -3640,34 +3669,69 @@ YOU MUST CORRECTION THESE ERRORS IN THIS RE-PROMPT:
 /**
  * Generates structured, segment-by-segment institutional concall highlights for Telegram.
  */
-export async function generateStructuredConcallHighlights(ticker, companyName, docText, { docKind = "call" } = {}) {
+export async function generateStructuredConcallHighlights(
+  ticker,
+  companyName,
+  docText,
+  { docKind = "call", existingManifest = null, onProgress = null, attachmentUrl = null, exhaustive = null } = {}
+) {
   if (!docText || docText.length < 300) return { extraction_coverage: { parts: 0, parsed: 0 } };
 
-  // Clean boilerplate cover letters
-  let cleanText = docText;
-  const concallStart = docText.toLowerCase().search(/(?:management:|moderator:|management\s+opening|presentation|executive\s+summary|q&a|question\s+and\s+answer|remarks|highlights)/i);
-  if (concallStart !== -1 && concallStart < 5000) {
-    cleanText = docText.substring(concallStart);
-  }
+  // For concalls, read exhaustively so late Q&A guidance / qualifiers are never dropped.
+  // Presentations are capped at MAX_PARTS (3) to bound slide text; if oversized, skipped middle is flagged as incomplete.
+  const isExhaustive = typeof exhaustive === "boolean" ? exhaustive : docKind !== "presentation";
+  const parts = splitTranscript(docText, { exhaustive: isExhaustive });
+  const sourceCoverage = transcriptCoverage(docText, parts);
+  const manifest = resumeOrInitManifest(existingManifest, { docText, attachmentUrl });
 
-  // A call is read in up to three parts, so guidance changes explained in the Q&A are not cut off (the old single 24k-character
-  // read saw roughly the first 40% of an hour-long call).
-  const parts = splitTranscript(cleanText);
-  const sourceCoverage = transcriptCoverage(cleanText, parts);
   const results = [];
   for (let i = 0; i < parts.length; i++) {
+    const range = manifest?.ranges?.[i];
+    if (range && range.status === "COMPLETE" && range.result) {
+      console.log(`[CONCALL HIGHLIGHTS] Reusing completed part ${i + 1}/${parts.length} for ${ticker} from source manifest.`);
+      results.push(range.result);
+      continue;
+    }
+
     const { system, user } = buildHighlightPrompts({ ticker, companyName, text: parts[i], partIndex: i, partCount: parts.length, docKind });
     try {
       const parsed = parseHighlightReply(await runNimPrompt(system, user, 0.05));
-      if (parsed) results.push(parsed);
-      else console.warn(`[CONCALL HIGHLIGHTS WARN] Part ${i + 1}/${parts.length} returned no usable JSON for ${ticker}.`);
+      if (parsed) {
+        results.push(parsed);
+        recordRangeResult(manifest, i, parsed);
+      } else {
+        console.warn(`[CONCALL HIGHLIGHTS WARN] Part ${i + 1}/${parts.length} returned no usable JSON for ${ticker}.`);
+        recordRangeResult(manifest, i, null, "No usable JSON returned");
+      }
     } catch (err) {
       console.warn(`[CONCALL HIGHLIGHTS WARN] Part ${i + 1}/${parts.length} failed for ${ticker}:`, err.message);
+      recordRangeResult(manifest, i, null, err.message);
+      if (err?.chainExhausted) {
+        if (typeof onProgress === "function") {
+          try { await onProgress(manifest); } catch {}
+        }
+        throw err;
+      }
+    }
+
+    if (typeof onProgress === "function") {
+      try { await onProgress(manifest); } catch (e) {
+        console.warn(`[CONCALL HIGHLIGHTS WARN] Failed to update progress for ${ticker}:`, e.message);
+      }
     }
   }
-  return { ...(mergeConcallHighlights(results) || {}), extraction_coverage: {
-    parts: parts.length, parsed: results.length, source_truncated: !sourceCoverage.complete,
-    source_chars: sourceCoverage.sourceChars, submitted_chars: sourceCoverage.submittedChars
-  } };
+
+  const merged = mergeConcallHighlights(results) || {};
+  return {
+    ...merged,
+    source_manifest: manifest,
+    extraction_coverage: {
+      parts: parts.length,
+      parsed: results.length,
+      source_truncated: !sourceCoverage.complete,
+      source_chars: sourceCoverage.sourceChars,
+      submitted_chars: sourceCoverage.submittedChars
+    }
+  };
 }
 
