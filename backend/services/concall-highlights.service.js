@@ -191,6 +191,19 @@ export function splitTranscript(text = "") {
   return splitEqually(t);
 }
 
+/** Reports when the bounded model input omitted source passages. The source itself remains available for reprocessing. */
+export function transcriptCoverage(text = "", parts = []) {
+  const sourceChars = String(text || "").trim().length;
+  const submittedChars = parts.reduce((total, part) => total + String(part || "").length, 0);
+  const shortened = parts.some(part => String(part).includes(" […] "));
+  return {
+    complete: !shortened && sourceChars <= MAX_TOTAL_CHARS && submittedChars >= sourceChars - parts.length * 2,
+    sourceChars,
+    submittedChars,
+    omittedChars: Math.max(0, sourceChars - submittedChars)
+  };
+}
+
 function splitEqually(input) {
   let t = input;
   if (t.length > MAX_TOTAL_CHARS) {
@@ -289,5 +302,26 @@ export function mergeConcallHighlights(parts = []) {
   const takeaways = usable.map((p) => p.key_takeaway).filter((t) => typeof t === "string" && t.trim().length >= 10);
   out.key_takeaway = takeaways.find((t) => /\b(cut|reduc|lower|revis|recalibrat|downgrad)/i.test(t)) || takeaways[0] || null;
   out.management_guidance = [...out.quarterly_guidance, ...out.annual_guidance, ...out.multi_year_targets];
+  return out;
+}
+
+/** Preserve explicit future operational targets that a model put in a general highlights list.
+ * Call only after the highlight grounding guard has checked each bullet against the source text.
+ */
+export function promoteExplicitForwardTargets(highlights) {
+  if (!highlights) return highlights;
+  const out = { ...highlights, annual_guidance: [...(highlights.annual_guidance || [])] };
+  const other = ['operational_highlights', 'key_positives', 'business_performance', 'key_monitorables']
+    .flatMap(field => Array.isArray(highlights[field]) ? highlights[field] : []);
+  for (const bullet of other) {
+    if (typeof bullet !== 'string') continue;
+    const future = /\b(?:should|expect(?:s|ed)?|target(?:s|ed)?|plan(?:s|ned)?|aim(?:s|ed)?|will|forecast(?:s|ed)?|project(?:s|ed)?)\b/i.test(bullet);
+    const horizon = /\b(?:by (?:the )?end of (?:this|the|next) (?:year|fiscal year)|year.end|by FY\s*\d{2,4}|in FY\s*\d{2,4}|this fiscal year)\b/i.test(bullet);
+    const metric = /\b(?:capacity|utili[sz]ation|revenue|growth|margin|volume|capex|order|production|sales)\b/i.test(bullet);
+    const amount = /\b\d+(?:\.\d+)?\s*(?:%(?!\w)|(?:crore|cr|million|billion|mw|gw|units?)\b)/i.test(bullet);
+    const historical = /\b(?:last|previous|prior)\s+(?:financial |fiscal )?year\b|\b(?:was|were|had been)\b.{0,40}\b(?:last|prior|previous)\b/i.test(bullet);
+    if (future && horizon && metric && amount && !historical && !out.annual_guidance.includes(bullet)) out.annual_guidance.push(bullet);
+  }
+  out.management_guidance = [...(out.quarterly_guidance || []), ...out.annual_guidance, ...(out.multi_year_targets || [])];
   return out;
 }

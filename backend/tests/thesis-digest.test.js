@@ -283,6 +283,62 @@ describe('investor presentations get the call write-up structure; verified numbe
   const hl = { guidance_changes: ['EBITDA margin guidance: raised to 29-30% (raised)'], financial_performance: ['Revenue of 282.7 Cr, up 16.9%'], business_performance: ['Passenger vehicle segment grew strongly'], operational_highlights: ['Display plant commissioning by Q2 FY28'], growth_initiatives: [], key_challenges: ['Global macro environment'], key_positives: [], key_monitorables: [], annual_guidance: [], quarterly_guidance: [], multi_year_targets: [] };
   const deck = { kind: 'DECK', title: 'Investor Presentation', highlights: hl };
 
+  it('keeps a deck decision-focused: guidance and new orders survive, static company profile and unverified result figures do not', async () => {
+    const { formatConcallHighlightsBlock } = await import('../services/thesis-digest.service.js');
+    const item = { kind: 'DECK', title: 'Investor Presentation', highlights: {
+      ...hl,
+      business_performance: ['Secured a new radar order worth Rs. 120 Cr in Q2.', 'Exports components to several countries.', 'Trusted supplier of components for launch vehicles.', 'Strong product mix driven by existing production orders.', 'Supplies sensors making a significant share of the market.'],
+      operational_highlights: ['Commissioning a new line by Q2 FY28.', 'Has three existing assembly lines.'],
+      growth_initiatives: ['Launched a new product in Q2 FY27.', 'New EV sensor platform for commercial vehicles.', 'A subsidiary was incorporated in 2024.'],
+      key_positives: ['Revenue rose to Rs. 282.7 Cr.', 'Order book increased 20% YoY.'],
+      key_takeaway: 'Revenue rose to Rs. 282.7 Cr and management is confident.', management_tone: 'Confident',
+    } };
+    const out = formatConcallHighlightsBlock(item);
+    expect(out).toContain('EBITDA margin guidance: raised');
+    expect(out).toContain('Secured a new radar order');
+    expect(out).toContain('Commissioning a new line');
+    expect(out).toContain('Launched a new product');
+    expect(out).toContain('New EV sensor platform');
+    expect(out).not.toContain('Revenue of 282.7');
+    expect(out).not.toContain('Revenue rose to Rs. 282.7');
+    expect(out).not.toContain('Exports components to several countries');
+    expect(out).not.toContain('Trusted supplier of components for launch vehicles');
+    expect(out).not.toContain('Strong product mix driven by existing production orders');
+    expect(out).not.toContain('Supplies sensors making a significant share');
+    expect(out).not.toContain('Has three existing assembly lines');
+    expect(out).not.toContain('incorporated in 2024');
+    expect(out).not.toContain('Tone:');
+  });
+
+  it('collapses a profile-only deck to its source link instead of reintroducing the same facts through the generic block', () => {
+    const item = { kind: 'DECK', title: 'Investor Presentation', url: 'https://example.test/deck.pdf', filedAt: '2026-11-12T10:00:00Z',
+      summary: 'Company exports to many countries.', positives: ['Has three existing assembly lines.'],
+      highlights: { financial_performance: ['Revenue of Rs. 100 Cr.'], operational_highlights: ['Has three existing assembly lines.'] } };
+    const out = formatThesisDigestMessage({ ticker: 'EXAMPLE', items: [item], board: [], overall: overallThesisStatus([]), fin: null });
+    expect(out).toContain('Also filed:');
+    expect(out).not.toContain('Has three existing assembly lines');
+    expect(out).not.toContain('Revenue of Rs. 100 Cr');
+  });
+
+  it('preserves grounded forward commitments when a press release has no structured guidance highlights', () => {
+    const item = { kind: 'PRESS', title: 'Press release', url: 'https://example.test/release.pdf',
+      guidance: ['Revenue growth target of 15% for FY28.'],
+      highlights: { business_performance: ['Secured a new order in the quarter.'], annual_guidance: [] } };
+    const out = formatThesisDigestMessage({ ticker: 'EXAMPLE', items: [item], board: [], overall: overallThesisStatus([]) });
+    expect(out).toContain('Revenue growth target of 15% for FY28');
+    expect(out).toContain('Secured a new order');
+  });
+
+  it('a deck paired with a call contributes distinct guidance without a company-profile block', () => {
+    const call = { kind: 'CONCALL', title: 'Concall', highlights: { business_performance: ['Secured an order this quarter.'] } };
+    const deck = { kind: 'DECK', title: 'Presentation', guidance: ['New capacity target of 30,000 units by FY28.'],
+      positives: ['Has four established factories.'], operations: ['Has four established factories.'],
+      highlights: { operational_highlights: ['Has four established factories.'] } };
+    const out = formatThesisDigestMessage({ ticker: 'EXAMPLE', items: [call, deck], board: [], overall: overallThesisStatus([]) });
+    expect(out).toContain('New capacity target of 30,000 units by FY28');
+    expect(out).not.toContain('Has four established factories');
+  });
+
   it('a deck with highlights is rendered in numbered sections with its own label, guidance first', async () => {
     const { formatConcallHighlightsBlock } = await import('../services/thesis-digest.service.js');
     const out = formatConcallHighlightsBlock(deck, 'Deck link');
@@ -291,12 +347,13 @@ describe('investor presentations get the call write-up structure; verified numbe
     expect(out).toContain('🔺');
   });
 
-  it('when verified results exist, the deck\'s own QUARTERLY NUMBERS section is omitted (the numbers are printed once, from the parser); a call keeps it', async () => {
+  it('a deck never promotes its own result figures, and a call only reports figures alongside verified results', async () => {
     const { formatConcallHighlightsBlock } = await import('../services/thesis-digest.service.js');
     const fin = { revenue: 282.7, ebitda: 87.6 };
     expect(formatConcallHighlightsBlock(deck, '', (l) => l, fin)).not.toContain('QUARTERLY NUMBERS');
-    expect(formatConcallHighlightsBlock(deck, '', (l) => l, null)).toContain('QUARTERLY NUMBERS');
+    expect(formatConcallHighlightsBlock(deck, '', (l) => l, null)).not.toContain('QUARTERLY NUMBERS');
     expect(formatConcallHighlightsBlock({ ...deck, kind: 'CONCALL' }, '', (l) => l, fin)).toContain('QUARTERLY NUMBERS');
+    expect(formatConcallHighlightsBlock({ ...deck, kind: 'CONCALL' }, '', (l) => l, null)).not.toContain('QUARTERLY NUMBERS');
   });
 });
 
@@ -371,6 +428,28 @@ describe('alert volume: fewer, fuller messages (user: "I get overwhelmed with al
     expect(repeatsEarlierCallWriteup({ items: [{ ...transcript(audio.highlights), kind: 'DECK' }], earlierItems: [audio] })).toBe(false);
     expect(repeatsEarlierCallWriteup({ items: [{ ...transcript(audio.highlights), source: 'audio' }], earlierItems: [audio] })).toBe(false);
     expect(repeatsEarlierCallWriteup({ items: [{ kind: 'CONCALL', source: null, highlights: null }], earlierItems: [audio] })).toBe(false);
+  });
+
+  it('a written transcript with the same figures but a new explanation of an apparent decline is sent', async () => {
+    const { repeatsEarlierCallWriteup } = await import('../services/thesis-digest.service.js');
+    const recording = { kind: 'CONCALL', source: 'audio', highlights: {
+      financial_performance: ['Regional sales declined 10% YoY.'], key_challenges: ['Regional sales declined 10% YoY.'],
+    } };
+    const written = transcript({ financial_performance: ['Regional sales declined 10% YoY.'],
+      key_challenges: ['Regional sales declined 10% YoY because shipments to those customers now go directly to end users in another region.'] });
+    expect(repeatsEarlierCallWriteup({ items: [written], earlierItems: [recording] })).toBe(false);
+  });
+
+  it('prefers a written transcript over its audio transcription and labels audio figures provisional', () => {
+    const heard = { kind: 'CONCALL', source: 'audio', title: 'Call recording', filedAt: '2026-11-12T10:00:00Z',
+      highlights: { business_performance: ['Order book expected to reach Rs. 1,2001,500 Cr.'] } };
+    const written = { kind: 'CONCALL', source: null, title: 'Written transcript', filedAt: '2026-11-12T11:00:00Z',
+      highlights: { business_performance: ['Order book expected to reach Rs. 1,200-1,500 Cr.'] } };
+    const msg = formatThesisDigestMessage({ ticker: 'EXAMPLE', items: [heard, written], board: [], overall: overallThesisStatus([]) });
+    expect(msg.indexOf('Written transcript')).toBeLessThan(msg.indexOf('Call recording'));
+    expect(msg).not.toContain('1,2001,500');
+    const audioOnly = formatThesisDigestMessage({ ticker: 'EXAMPLE', items: [heard], board: [], overall: overallThesisStatus([]) });
+    expect(audioOnly).toContain('Audio transcription; figures and names need written confirmation');
   });
 
   it('the digest header carries the live price context with its date, and says so when it is stale', async () => {

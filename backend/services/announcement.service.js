@@ -1936,8 +1936,7 @@ export async function ocrPdfWithGemini(uint8Buffer, apiKey, { statementsOnly = f
           .replace(/[^\S\r\n]+/g, ' ')
           .replace(/\r\n/g, '\n')
           .replace(/\n{3,}/g, '\n\n')
-          .trim()
-          .substring(0, 60000);
+          .trim();
         // The caller decides what a usable transcription is (e.g. "parses into financial statements"); a fragment
         // from one model must not stop the next model from trying.
         if (typeof accept === "function" && !accept(cleaned)) {
@@ -1958,6 +1957,41 @@ export async function ocrPdfWithGemini(uint8Buffer, apiKey, { statementsOnly = f
 }
 
 const DOWNLOAD_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
+
+/** A one-page exchange letter may link the actual written call; the letter itself is not a transcript. */
+export function isSubstantiveConcallTranscript(text) {
+  const body = String(text || '');
+  return body.length >= 2500 && (body.match(/^[A-Z][A-Za-z .()&'-]{2,90}:\s+\S/gm) || []).length >= 3;
+}
+
+export function transcriptPdfLinkFromCover(text) {
+  const body = String(text || '');
+  if (body.length > 4000 || isSubstantiveConcallTranscript(body) || !/transcript/i.test(body) || !/\blink\b|website/i.test(body)) return null;
+  for (const match of body.matchAll(/https?:\/\/[^\s<>"']+?\.pdf(?:\?[^\s<>"']*)?/gi)) {
+    try {
+      const url = new URL(match[0]);
+      const host = url.hostname.toLowerCase();
+      if (url.protocol === 'https:' && !/^(?:localhost|\d+\.\d+\.\d+\.\d+)$/.test(host) && !host.endsWith('.local')) return url.href;
+    } catch { /* Ignore a malformed printed URL. */ }
+  }
+  return null;
+}
+
+/** A filing may be only a letter pointing at the actual presentation PDF. */
+export function presentationPdfLinkFromCover(text) {
+  const body = String(text || '');
+  if (body.length > 4000 || !/(?:investor|earnings|results|corporate)\s+presentation/i.test(body) ||
+      !/\blink\b|\bwebsite\b|\bavailable\b/i.test(body)) return null;
+  for (const match of body.matchAll(/https?:\/\/[^\s<>"']+?\.pdf(?:\?[^\s<>"']*)?/gi)) {
+    try {
+      const url = new URL(match[0]);
+      const host = url.hostname.toLowerCase();
+      if (url.protocol === 'https:' && !/^(?:localhost|\d+\.\d+\.\d+\.\d+)$/.test(host) &&
+          !host.endsWith('.local') && !/annual[-_ ]?report|transcript|notice|invitation/i.test(url.pathname)) return url.href;
+    } catch { /* Ignore a malformed printed URL. */ }
+  }
+  return null;
+}
 
 /**
  * Downloads a binary document. BSE's file server emits headers that undici (Node's fetch) rejects as malformed
@@ -2038,7 +2072,7 @@ async function withPdfParser(bytes, read) {
  *   with Gemini vision even when a text layer exists; acceptOcr: a transcription is only taken when this returns true
  * @returns {Promise<{text: string, reason: null|"FETCH_FAILED"|"NO_TEXT"|"OCR_UNAVAILABLE", detail: string, ocrUsed: boolean}>}
  */
-export async function extractPdfTextDetailed(url, { forceOcr = false, acceptOcr = null, allowOcr = true } = {}) {
+export async function extractPdfTextDetailed(url, { forceOcr = false, acceptOcr = null, allowOcr = true, maxTextChars = null } = {}) {
   let downloadUrl = url;
   if (downloadUrl.includes("drive.google.com/file/d/")) {
     const match = downloadUrl.match(/\/file\/d\/([^\/]+)/);
@@ -2085,6 +2119,7 @@ export async function extractPdfTextDetailed(url, { forceOcr = false, acceptOcr 
 
       let cleanText = "";
       let pageList = [];
+      let textTruncated = false;
       try {
         const data = await withPdfParser(uint8, parser => parser.getText());
         if (data && data.text) {
@@ -2099,8 +2134,9 @@ export async function extractPdfTextDetailed(url, { forceOcr = false, acceptOcr 
           // A call transcript is NOT a combined filing: its Q&A is the second half, and a 60,000-character cut lost it (POLICYBZR's
           // call was cut mid-sentence with its later analysts and closing remarks missing). Everything downstream is bounded
           // (the verdict by capContext, the highlights by splitTranscript), so a transcript keeps up to 160,000 characters.
-          const textCap = /transcript/i.test(String(url)) ? 160000 : 60000;
-          cleanText = normalised.length > textCap && pageList.length ? capDocumentText(pageList, textCap) : normalised.substring(0, textCap);
+          const textCap = maxTextChars === 160000 || /transcript/i.test(String(url)) ? 160000 : 60000;
+          textTruncated = normalised.length > textCap;
+          cleanText = normalised.length > textCap && pageList.length && textCap === 60000 ? capDocumentText(pageList, textCap) : normalised.substring(0, textCap);
           if (!hasSubstantivePdfText(cleanText)) cleanText = "";
         }
       } catch (parseErr) {
@@ -2192,7 +2228,7 @@ export async function extractPdfTextDetailed(url, { forceOcr = false, acceptOcr 
           }
         }
         const joined = `${cleanText}\n\n${transcribed.join('\n\n')}`.trim();
-        return { text: joined, reason: null, detail: '', ocrUsed: true, ocrAttempted: true };
+        return { text: joined, reason: null, detail: '', ocrUsed: true, ocrAttempted: true, textTruncated };
       }
 
       // Statement pages whose text layer is garbled (a scan with broken labels): re-read ONLY those few pages by vision, not the
@@ -2232,7 +2268,9 @@ export async function extractPdfTextDetailed(url, { forceOcr = false, acceptOcr 
               ocrUsed = true;
               const keep = cleanText.includes("[statement pages]") ? cleanText.slice(0, cleanText.indexOf("[statement pages]")) : cleanText.slice(0, 40000);
               // Clean statements must precede the garbled layer so the parser does not select broken rows first.
-              cleanText = forceOcr ? pageOcr : `${pageOcr}\n\n[embedded text layer]\n${keep.trim()}`.substring(0, 60000);
+              const combined = `${pageOcr}\n\n[embedded text layer]\n${keep.trim()}`;
+              textTruncated ||= !forceOcr && combined.length > 60000;
+              cleanText = forceOcr ? pageOcr : combined.substring(0, 60000);
               console.log(`[PDF OCR SUCCESS] Read ${images.length} statement page(s) by vision (${pageOcr.length} characters).`);
             }
           } catch (pageErr) {
@@ -2256,12 +2294,14 @@ export async function extractPdfTextDetailed(url, { forceOcr = false, acceptOcr 
           });
           if (ocrText && hasSubstantivePdfText(ocrText)) {
             ocrUsed = true;
-            cleanText = ocrText
+            const normalizedOcr = ocrText
               .replace(/[^\S\r\n]+/g, ' ')
               .replace(/\r\n/g, '\n')
               .replace(/\n{3,}/g, '\n\n')
-              .trim()
-              .substring(0, 60000);
+              .trim();
+            const ocrCap = maxTextChars === 160000 ? 160000 : 60000;
+            textTruncated ||= normalizedOcr.length > ocrCap;
+            cleanText = normalizedOcr.substring(0, ocrCap);
             console.log(`[PDF OCR SUCCESS] Extracted ${cleanText.length} characters via Gemini Vision OCR.`);
           }
         } catch (ocrErr) {
@@ -2275,7 +2315,7 @@ export async function extractPdfTextDetailed(url, { forceOcr = false, acceptOcr 
       }
       if (hasSubstantivePdfText(cleanText)) {
         console.log(`[PDF] Extracted ${cleanText.length} characters.`);
-        return { text: cleanText, reason: null, detail: "", ocrUsed, ocrAttempted };
+        return { text: cleanText, reason: null, detail: "", ocrUsed, ocrAttempted, textTruncated };
       }
       if (ocrAttempted) {
         // The models were tried under one bounded budget. Re-downloading the same image-only PDF immediately only collides

@@ -198,7 +198,12 @@ export function classifyDirectEvent({ category = "GENERAL", priority = "MEDIUM",
   const neutral = /NEUTRAL/i.test(String(impact || ""));
   const high = String(priority || "").toUpperCase() === "HIGH";
 
-  if (ALWAYS_PUSH.has(cat)) return { push: true, reason: `${label}: a structural or risk event` };
+  if (ALWAYS_PUSH.has(cat)) {
+    if (neutral && !high) {
+      return { push: false, reason: `${label}: neutral impact, listed on the allocation board` };
+    }
+    return { push: true, reason: `${label}: a structural or risk event` };
+  }
   if (negative) return { push: true, reason: `${label} with a negative impact` };
 
   if (SIZE_GATED.has(cat)) {
@@ -210,7 +215,12 @@ export function classifyDirectEvent({ category = "GENERAL", priority = "MEDIUM",
         ? { push: true, reason: `${label} of about ₹${Math.round(amt)} Cr, ${shown}` }
         : { push: false, reason: `${label} of about ₹${Math.round(amt)} Cr, only ${shown}` };
     }
-    if (cat === "ACQUISITION") return { push: true, reason: "acquisition of unknown size" };
+    if (cat === "ACQUISITION") {
+      if (neutral && !high) {
+        return { push: false, reason: "acquisition of unknown size with neutral impact" };
+      }
+      return { push: true, reason: "acquisition of unknown size" };
+    }
     return high ? { push: true, reason: `${label} rated high priority (size unknown)` } : { push: false, reason: `${label}, size unknown` };
   }
 

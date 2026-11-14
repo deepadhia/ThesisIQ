@@ -11,16 +11,18 @@ import { fileURLToPath } from "url";
 import { pool } from "../db/pool.js";
 import { compareFiscalQuartersDesc, parseFiscalQuarter } from "../utils/fiscal-quarter.js";
 import { reconcileGuidanceVsActual, classifyGuidanceScope } from "../utils/guidance-scope.js";
-import { extractPdfTextDetailed, documentContentHash } from "../services/announcement.service.js";
+import { extractPdfTextDetailed, documentContentHash, transcriptPdfLinkFromCover, presentationPdfLinkFromCover, isSubstantiveConcallTranscript } from "../services/announcement.service.js";
 import { claimFilingExecution, releaseFilingExecution, assertFilingExecution } from "../services/filing-execution.service.js";
 import { loadEarningsReaction, formatReactionContext } from "../services/earnings-reaction.service.js";
 import { currentSyntheses } from "../services/synthesis-freshness.service.js";
-import { sendTelegramMessage, formatAnnouncementMessage, sendConcallDiscrepancyAlert, sendPipelineFailureAlert, formatPipelineFailureAlert } from "../services/telegram.service.js";
+import { sendTelegramMessage, formatAnnouncementMessage, sendPipelineFailureAlert, formatPipelineFailureAlert } from "../services/telegram.service.js";
 import { classifyFilingForWorker, looksLikeStatementFiling } from "../services/filing-classifier.service.js";
 import { runLlm } from "../services/llm.service.js";
 import { decideLlmFailureAction, backoffDelayMs, audioBackoffDelayMs, quotaPauseMs, isQuotaPaused, batchSizeAfterPause } from "../services/retry-policy.service.js";
 import { dbStore } from "../services/llm-health.service.js";
 import { extractDeterministicFinancials, detectDocumentUnit, quarterEndBefore } from "../services/financial-validator.service.js";
+import { extractOrderBookMetrics } from "../services/orderbook-parser.service.js";
+import { resolveXbrlFinancialsForFiling, parseXbrlXmlToFinancials, reconcileOrEnrichFinancials } from "../services/xbrl-alert-bridge.service.js";
 import {
   extractDeterministicCashFlow,
   extractEarningsQualityMetrics,
@@ -85,11 +87,9 @@ import {
   isYtDlpAvailable,
   transcribeAudioWithGroqWhisper,
   getWhisperApiKey,
-  analyzeAudioWithGemini,
-  analyzeTranscriptWithGemini, 
-  auditDiscrepancies 
+  analyzeAudioWithGemini
 } from "../services/audio-transcript-analyzer.service.js";
-import { splitTranscript, buildHighlightPrompts, parseHighlightReply, mergeConcallHighlights } from "../services/concall-highlights.service.js";
+import { splitTranscript, transcriptCoverage, buildHighlightPrompts, parseHighlightReply, mergeConcallHighlights, promoteExplicitForwardTargets } from "../services/concall-highlights.service.js";
 import { countTickersHoldingDocument, isForeignCopy, setAsideForeignFiling } from "../services/foreign-filing.service.js";
 import { scaleSanity } from "../services/scale-sanity.service.js";
 
@@ -1396,7 +1396,7 @@ const fmtPct = (v) => (v === null || v === undefined || isNaN(v)) ? null : `${v 
 /**
  * Verified-number block built straight from the deterministic parser (never from LLM text).
  */
-export function buildVerifiedFinancialsBlock(fin, { carried = false, periodLabel = null } = {}) {
+export function buildVerifiedFinancialsBlock(fin, { carried = false, periodLabel = null, orderBook = null } = {}) {
   if (!fin || fin.revenue === null || fin.revenue === undefined) return "";
   const scope = fin.statementScope && fin.statementScope !== "UNKNOWN" ? fin.statementScope.toLowerCase() : "reported";
   const lines = [];
@@ -1415,6 +1415,13 @@ export function buildVerifiedFinancialsBlock(fin, { carried = false, periodLabel
     const pat = [fmtPct(fin.patYoYGrowthPct) && `${fmtPct(fin.patYoYGrowthPct)} YoY`, fmtPct(fin.patQoQGrowthPct) && `${fmtPct(fin.patQoQGrowthPct)} QoQ`].filter(Boolean).join(" | ");
     const turn = fin.patTurnaround === "LOSS_TO_PROFIT" ? " (turnaround from loss)" : fin.patTurnaround === "PROFIT_TO_LOSS" ? " (swing to loss)" : "";
     lines.push(`• *PAT (owners):* ₹${patVal} Cr${pat ? ` (${pat})` : ""}${turn}`);
+  }
+  const ob = orderBook || fin.orderBook;
+  if (ob && (ob.line || ob.orderBookTotalCr)) {
+    const obLine = ob.line ? ob.line.replace(/^📦\s*/, "") : null;
+    if (obLine) {
+      lines.push(`• ${obLine}`);
+    }
   }
   const flagLines = [];
   if (fin.exceptionalGain) {
@@ -1743,7 +1750,11 @@ export function formatManagementClarifications(verdict, fin = null, cashFlow = n
  * Stage-1 flash note: financial results / investor presentation / press release.
  */
 export function buildStage1Message({ item, verdict, activeFin, finSource, carried, stageName, periodLabel, guidanceSection, commText, degradedNote, allocationLine = "", trendSec = "", clarificationsSec = "" }) {
-  const finBlock = buildVerifiedFinancialsBlock(activeFin, { carried: finSource === "CARRIED_FORWARD", periodLabel: carried?.periodLabel || periodLabel });
+  const finBlock = buildVerifiedFinancialsBlock(activeFin, {
+    carried: finSource === "CARRIED_FORWARD",
+    periodLabel: carried?.periodLabel || periodLabel,
+    orderBook: verdict.order_book || activeFin?.orderBook
+  });
   const clarifications = (clarificationsSec !== undefined && clarificationsSec !== "")
     ? clarificationsSec
     : formatManagementClarifications(verdict, activeFin, verdict.cash_flow);
@@ -1829,12 +1840,15 @@ export function buildStage1Message({ item, verdict, activeFin, finSource, carrie
     [actionLine?.trim(), whyLine ? `   ${whyLine.trim()}` : null].filter(Boolean).join("\n")
   ].filter(Boolean).join("\n\n");
 
+  const obSec = (!finBlock && verdict.order_book?.line) ? `\n${verdict.order_book.line}\n` : "";
+
   // Reading order: what the note concludes (summary), what the numbers are, how they score against the thesis, what is
   // pending (pacing, cash quality), then supporting detail and what the concall must answer.
   const bodyBlocks = [
     degradedNote?.trim(),
     summary?.trim(),
     finBlock?.trim(),
+    obSec?.trim(),
     formatReactionContext(verdict.market_reaction),
     clarifications?.trim(),
     gateSec?.trim(),
@@ -1861,7 +1875,12 @@ function buildConcallMessage({ item, verdict, activeFin, finSource, carried, per
   const section = (title, emoji, list) => (Array.isArray(list) && list.length > 0) ? `${emoji} *${title}:*\n${list.map(p => `• ${p}`).join("\n")}` : "";
   const gateSec = buildGateSection(verdict.thesis_gate_result);
   const driverSec = formatDriverAssessmentSection(verdict.thesis_driver_assessment);
-  const finBlock = buildVerifiedFinancialsBlock(activeFin, { carried: finSource === "CARRIED_FORWARD", periodLabel: carried?.periodLabel || periodLabel });
+  const finBlock = buildVerifiedFinancialsBlock(activeFin, {
+    carried: finSource === "CARRIED_FORWARD",
+    periodLabel: carried?.periodLabel || periodLabel,
+    orderBook: verdict.order_book || activeFin?.orderBook
+  });
+  const obSec = (!finBlock && verdict.order_book?.line) ? `\n${verdict.order_book.line}\n` : "";
   const cashFlowSec = formatCashFlowAndQualitySection(verdict.cash_flow, verdict.earnings_quality, activeFin?.patConsolidated || activeFin?.patAttributable);
   const valSec = formatValuationSection(verdict.market_data);
   const perf = section("FINANCIAL HIGHLIGHTS & ORDER BOOK (from the call)", "📊", ch.financial_performance || ch.performance_overview);
@@ -1888,6 +1907,7 @@ function buildConcallMessage({ item, verdict, activeFin, finSource, carried, per
     degradedNote?.trim(),
     gateSec?.trim(),
     finBlock?.trim(),
+    obSec?.trim(),
     cashFlowSec?.trim(),
     valSec?.trim(),
     guidanceSection?.trim(),
@@ -1984,17 +2004,50 @@ async function processOneDeepDive(item, ctx) {
 
   // ── 1. Document text ──
   let docText = "";
+  let extractedSourceUrl = item.attachment_url;
   let figuresFromOcr = false;
   let ocrAlreadyAttempted = false;
+  let sourceTextTruncated = false;
   let pdfFailure = { reason: null, detail: "" };
   if (item.attachment_url) {
-    const pdf = await extractPdfTextDetailed(item.attachment_url);
+    const transcriptTextBudget = item.deep_dive_status === 'pending_stage2' || /transcript|earnings call/i.test(String(item.title || ''));
+    const pdf = await extractPdfTextDetailed(item.attachment_url, transcriptTextBudget ? { maxTextChars: 160000 } : undefined);
     await assertFilingExecution(pool, executionClaim);
     if (/^OCR_/.test(pdf.reason || "")) return deferOcrRetry(item, pdf, suppressTelegram);
     figuresFromOcr = Boolean(pdf.ocrUsed);
     ocrAlreadyAttempted = Boolean(pdf.ocrAttempted || pdf.ocrUsed);
+    sourceTextTruncated = Boolean(pdf.textTruncated);
     docText = pdf.text || "";
     pdfFailure = { reason: pdf.reason, detail: pdf.detail || "" };
+    const transcriptLink = transcriptPdfLinkFromCover(docText);
+    if (transcriptTextBudget || transcriptLink) {
+      const linkedUrl = transcriptLink;
+      if (linkedUrl) {
+        const linked = await extractPdfTextDetailed(linkedUrl, { maxTextChars: 160000 });
+        await assertFilingExecution(pool, executionClaim);
+        if (/^OCR_/.test(linked.reason || "")) return deferOcrRetry(item, linked, suppressTelegram);
+        if (!isSubstantiveConcallTranscript(linked.text)) throw new Error(`Linked transcript PDF is not readable: ${linked.reason || 'no substantive speaker turns'}`);
+        docText = linked.text;
+        sourceTextTruncated = Boolean(linked.textTruncated);
+        extractedSourceUrl = linkedUrl;
+      } else if (!isSubstantiveConcallTranscript(docText)) {
+        throw new Error('Filing is a transcript cover or incomplete transcript; no substantive speaker turns were read');
+      }
+    }
+    if (!transcriptTextBudget && item.deep_dive_status === 'pending_stage1' && /presentation/i.test(String(item.title || ''))) {
+      const linkedUrl = presentationPdfLinkFromCover(docText);
+      if (linkedUrl) {
+        const linked = await extractPdfTextDetailed(linkedUrl);
+        await assertFilingExecution(pool, executionClaim);
+        if (/^OCR_/.test(linked.reason || "")) return deferOcrRetry(item, linked, suppressTelegram);
+        if (!linked.text || linked.text.length < 800 || presentationPdfLinkFromCover(linked.text)) {
+          throw new Error(`Linked presentation PDF is not substantive: ${linked.reason || 'cover or incomplete text'}`);
+        }
+        docText = linked.text;
+        sourceTextTruncated = Boolean(linked.textTruncated);
+        extractedSourceUrl = linkedUrl;
+      }
+    }
   }
   const hasDocText = Boolean(docText) && docText.trim().length >= 50;
   if (!hasDocText) {
@@ -2265,6 +2318,44 @@ async function processOneDeepDive(item, ctx) {
     finSource = "THIS_FILING";
   }
 
+  // If the document is an official XBRL XML attachment, parse verified numbers directly
+  if (item.attachment_url && item.attachment_url.toLowerCase().endsWith(".xml")) {
+    const xmlFin = await parseXbrlXmlToFinancials(docText);
+    if (xmlFin && xmlFin.revenue) {
+      extractedFin = xmlFin;
+      deterministicFin = xmlFin;
+      finSource = "THIS_FILING";
+      periodLabel = resolveReportingQuarter(item, xmlFin);
+      console.log(`[XBRL INGESTION] ${item.ticker}: parsed verified financials directly from XBRL XML attachment.`);
+    }
+  }
+
+  // If PDF parser could not parse numbers, check if verified official XBRL metrics exist in the DB for this quarter
+  if (!deterministicFin && looksLikeStatementDoc && !scaleSuspect) {
+    const xbrlFin = await resolveXbrlFinancialsForFiling(item.ticker, periodEndHint, pool);
+    if (xbrlFin && xbrlFin.revenue) {
+      deterministicFin = xbrlFin;
+      finSource = "THIS_FILING";
+      periodLabel = resolveReportingQuarter(item, xbrlFin);
+      console.log(`[XBRL INGESTION] ${item.ticker}: recovered verified consolidated financials from official XBRL metrics.`);
+    }
+  }
+
+  // Enrich deterministic numbers with XBRL if available (e.g. EBITDA or segments if PDF missed them)
+  if (deterministicFin && deterministicFin.revenue && looksLikeStatementDoc) {
+    const xbrlFin = await resolveXbrlFinancialsForFiling(item.ticker, periodEndHint, pool);
+    if (xbrlFin && xbrlFin.revenue) {
+      deterministicFin = reconcileOrEnrichFinancials(deterministicFin, xbrlFin);
+    }
+  }
+
+  // Extract structured order book metrics from filing text
+  const trailingRev = (deterministicFin?.revenue || extractedFin?.revenue) ? (deterministicFin?.revenue || extractedFin?.revenue) * 4 : undefined;
+  const obMetrics = extractOrderBookMetrics(docText, { trailingRevenueCr: trailingRev });
+  if (obMetrics && obMetrics.orderBookTotalCr) {
+    if (deterministicFin) deterministicFin.orderBook = obMetrics;
+  }
+
   // The rule-based reader could not parse a results statement: let the model LOCATE the printed figures, keep only
   // those that literally appear in the filing, and run them through the same deterministic arithmetic.
   // These are shown as unverified and can never authorise a buy.
@@ -2395,10 +2486,13 @@ async function processOneDeepDive(item, ctx) {
   // (evaluateInstitutionalVerdict already guarded the verdict with this very filing's parsed numbers; only
   // re-apply when the benchmark ground truth supplied different figures, to avoid duplicated injections.)
   rawVerdict._raw_text = docText;
+  if (obMetrics && obMetrics.orderBookTotalCr) rawVerdict.order_book = obMetrics;
   const verdict = (deterministicFin && deterministicFin !== extractedFin)
     ? applyInstitutionalGuard(rawVerdict, deterministicFin, item.title, item.ticker)
     : rawVerdict;
+  if (obMetrics && obMetrics.orderBookTotalCr) verdict.order_book = obMetrics;
   const activeFin = deterministicFin;
+  if (activeFin && obMetrics && obMetrics.orderBookTotalCr) activeFin.orderBook = obMetrics;
 
   // ── 6. Gate: financials for statement filings; carried-forward verified results for transcripts / decks ──
   let gateFin = activeFin;
@@ -2437,6 +2531,7 @@ async function processOneDeepDive(item, ctx) {
   verdict.source_document = {
     announcement_id: item.id,
     attachment_url: item.attachment_url,
+    ...(extractedSourceUrl !== item.attachment_url ? { extracted_url: extractedSourceUrl } : {}),
     text_sha256: documentContentHash(docText),
     source_kind: audioTranscriptDoc ? 'AUDIO_TRANSCRIPT' : 'PDF'
   };
@@ -2574,11 +2669,15 @@ async function processOneDeepDive(item, ctx) {
     const rawCh = await generateStructuredConcallHighlights(item.ticker, item.company_name, docText, { docKind: isDeckDoc ? "presentation" : "call" });
     const coverage = rawCh?.extraction_coverage || { parts: 0, parsed: 0 };
     verdict.highlight_extraction = {
-      status: coverage.parts > 0 && coverage.parsed === coverage.parts ? "COMPLETE" : "INCOMPLETE",
+      status: coverage.parts > 0 && coverage.parsed === coverage.parts && !coverage.source_truncated && !sourceTextTruncated ? "COMPLETE" : "INCOMPLETE",
       parts: coverage.parts,
-      parsed: coverage.parsed
+      parsed: coverage.parsed,
+      source_truncated: Boolean(coverage.source_truncated),
+      pdf_text_truncated: sourceTextTruncated,
+      source_chars: coverage.source_chars || null,
+      submitted_chars: coverage.submitted_chars || null
     };
-    const ch = sanitizeConcallHighlights(rawCh, docText, gateFin);
+    const ch = promoteExplicitForwardTargets(sanitizeConcallHighlights(rawCh, docText, gateFin));
     const hasHighlightContent = ch && [
       "guidance_changes", "quarterly_guidance", "annual_guidance", "multi_year_targets",
       "segment_highlights", "business_performance", "financial_performance", "operational_highlights",
@@ -2700,7 +2799,7 @@ async function processOneDeepDive(item, ctx) {
     const digestItem = buildDigestItem({
       kind: isTranscriptDoc ? "CONCALL" : digestKindFor(item.title),
       title: item.title,
-      url: item.attachment_url,
+      url: extractedSourceUrl,
       filedAt: item.filing_date ? new Date(item.filing_date).toISOString() : new Date().toISOString(),
       verdict,
       source: audioTranscriptDoc ? "audio" : null,
@@ -2741,50 +2840,9 @@ async function processOneDeepDive(item, ctx) {
     console.warn(`[WORKER] Commitment reconciliation warning for ${item.ticker}:`, err.message);
   }
 
-  if (isTranscriptDoc) {
-    try {
-      const { rows: prevAudio } = await pool.query(
-        `SELECT id, attachment_url, event_analysis FROM corporate_announcements
-         WHERE ticker = $1 
-           AND event_analysis->'audio_analysis' IS NOT NULL
-           AND (event_analysis->>'foreign_filing' IS NULL OR event_analysis->>'foreign_filing' != 'true')
-           AND created_at >= $2::timestamptz - INTERVAL '14 days'
-         ORDER BY created_at DESC LIMIT 1`,
-        [item.ticker, item.created_at || new Date().toISOString()]
-      );
-      if (prevAudio.length > 0 && prevAudio[0].event_analysis?.audio_analysis && (!deadlineAt || Date.now() < deadlineAt - 45000)) {
-        const audioUrl = prevAudio[0].attachment_url || "";
-        const audioPrefix = audioUrl.split("?")[0].split("/").pop().match(/^([A-Za-z&-]+?)\d*_/)?.[1]?.toUpperCase() || "";
-        const sym = String(item.ticker).toUpperCase();
-        const matchesSym = !audioPrefix || sym.startsWith(audioPrefix) || audioPrefix.startsWith(sym) || sym.includes(audioPrefix) || audioPrefix.includes(sym);
-        if (!matchesSym) {
-          console.warn(`[WORKER AUDIT SKIP] Audio filing ${prevAudio[0].id} prefix '${audioPrefix}' does not match ticker '${item.ticker}'. Skipping discrepancy check.`);
-        } else {
-          console.log(`[WORKER AUDIT] Running Audio-vs-Transcript Discrepancy check for ${item.ticker}...`);
-          const transcriptAnalysis = await analyzeTranscriptWithGemini(docText, item.ticker, item.company_name, item.investment_thesis);
-          const discrepancyAudit = await auditDiscrepancies(prevAudio[0].event_analysis.audio_analysis, transcriptAnalysis, item.ticker);
-          if (discrepancyAudit) {
-            await pool.query(
-              `UPDATE corporate_announcements SET event_analysis = COALESCE(event_analysis, '{}'::jsonb) || $2::jsonb WHERE id = $1`,
-              [item.id, JSON.stringify({ discrepancy_audit: discrepancyAudit })]
-            );
-          }
-          if (discrepancyAudit?.has_material_discrepancy && !suppressTelegram) {
-            await sendConcallDiscrepancyAlert({
-              ticker: item.ticker,
-              companyName: item.company_name,
-              discrepancyScore: discrepancyAudit.discrepancy_score,
-              summaryVerdict: discrepancyAudit.summary_verdict,
-              discrepancies: discrepancyAudit.discrepancies,
-              docUrl: item.attachment_url
-            });
-          }
-        }
-      }
-    } catch (auditErr) {
-      console.warn(`[WORKER AUDIT WARN] Discrepancy audit error for ${item.ticker}:`, auditErr.message);
-    }
-  }
+  // A model comparing two summaries cannot establish that a written transcript
+  // omitted a claim. Keep forensic alerts disabled until each variance is
+  // verified against the retained raw audio and complete written source.
 
   // Heavy multi-report synthesis is best-effort and time-boxed; skipped runs are flagged for a later cycle.
   const timeLeft = deadlineAt ? deadlineAt - Date.now() : Infinity;
@@ -2862,7 +2920,7 @@ async function flushThesisDigestsOnce({ now = Date.now() } = {}) {
   let sent = 0;
   try {
     const { rows } = await pool.query(
-      `SELECT ca.id, ca.ticker, ca.filing_date, s.company_name, ca.event_analysis->'digest_item' AS digest_item
+      `SELECT ca.id, ca.ticker, ca.stock_id, ca.filing_date, s.company_name, ca.event_analysis->'digest_item' AS digest_item
        FROM corporate_announcements ca
        JOIN stocks s ON s.id = ca.stock_id
        WHERE ca.event_analysis->>'digest_pending' = 'true'
@@ -2955,7 +3013,8 @@ async function flushThesisDigestsOnce({ now = Date.now() } = {}) {
       const entries = [...items.map(i => ({ filedAt: i.filedAt, source: i.title, assessment: i.assessment })), ...history];
       const board = buildThesisStatusBoard(entries, drivers);
 
-      const carried = await loadCarriedFinancials(ticker);
+      const digestAsOf = group.reduce((latest, row) => new Date(row.filing_date) > new Date(latest) ? row.filing_date : latest, group[0].filing_date);
+      const carried = await loadCarriedFinancials(ticker, group[0].stock_id, digestAsOf);
       const carriedPeriod = carried ? (quarterFromPeriodEnd(carried.fin?.quarterEnded) || getIndianFiscalQuarter(carried.filingDate)) : null;
       const financialsBlock = carried
         ? buildVerifiedFinancialsBlock(carried.fin, { carried: true, periodLabel: carriedPeriod })
@@ -3594,6 +3653,7 @@ export async function generateStructuredConcallHighlights(ticker, companyName, d
   // A call is read in up to three parts, so guidance changes explained in the Q&A are not cut off (the old single 24k-character
   // read saw roughly the first 40% of an hour-long call).
   const parts = splitTranscript(cleanText);
+  const sourceCoverage = transcriptCoverage(cleanText, parts);
   const results = [];
   for (let i = 0; i < parts.length; i++) {
     const { system, user } = buildHighlightPrompts({ ticker, companyName, text: parts[i], partIndex: i, partCount: parts.length, docKind });
@@ -3605,6 +3665,9 @@ export async function generateStructuredConcallHighlights(ticker, companyName, d
       console.warn(`[CONCALL HIGHLIGHTS WARN] Part ${i + 1}/${parts.length} failed for ${ticker}:`, err.message);
     }
   }
-  return { ...(mergeConcallHighlights(results) || {}), extraction_coverage: { parts: parts.length, parsed: results.length } };
+  return { ...(mergeConcallHighlights(results) || {}), extraction_coverage: {
+    parts: parts.length, parsed: results.length, source_truncated: !sourceCoverage.complete,
+    source_chars: sourceCoverage.sourceChars, submitted_chars: sourceCoverage.submittedChars
+  } };
 }
 

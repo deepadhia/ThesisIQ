@@ -63,6 +63,16 @@ describe('PDF OCR deferral propagation', () => {
     expect(fetch).toHaveBeenCalledTimes(1);
     expect(state.destroyed).toBe(1);
   });
+  it('reports when a successful OCR response is clipped at the text budget', async () => {
+    state.parseError = true;
+    const longOcr = 'Management expects expansion next year. '.repeat(1900);
+    vi.stubGlobal('fetch', vi.fn(async url => String(url) === pdfUrl
+      ? { ok: true, arrayBuffer: async () => new Uint8Array([37,80,68,70]).buffer }
+      : { ok: true, json: async () => ({ candidates: [{ finishReason: 'STOP', content: { parts: [{ text: longOcr }] } }] }) }));
+    const pdf = await extractPdfTextDetailed(pdfUrl);
+    expect(pdf.text.length).toBe(60000);
+    expect(pdf.textTruncated).toBe(true);
+  });
   it('does not certify an image-only deck from its readable cover letter', async () => {
     state.text = 'Cover letter enclosing investor presentation. '.repeat(6);
     state.pages = [

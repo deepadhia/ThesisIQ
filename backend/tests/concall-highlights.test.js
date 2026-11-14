@@ -9,7 +9,7 @@ import path from "path";
 import { fileURLToPath } from "url";
 import { describe, it, expect } from "vitest";
 import {
-  segmentCall, splitTranscript, mergeConcallHighlights, parseHighlightReply, buildHighlightPrompts, HIGHLIGHT_LIST_FIELDS
+  segmentCall, splitTranscript, transcriptCoverage, mergeConcallHighlights, parseHighlightReply, buildHighlightPrompts, HIGHLIGHT_LIST_FIELDS, promoteExplicitForwardTargets
 } from "../services/concall-highlights.service.js";
 import {
   buildDigestItem, compactHighlights, guidanceCutsOf, formatConcallHighlightsBlock, formatThesisDigestMessage, buildSignalRationale
@@ -17,6 +17,17 @@ import {
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const real = (name) => fs.readFileSync(path.resolve(here, "fixtures/real-layouts", name), "utf8");
+
+describe('explicit forward target retention', () => {
+  it('promotes a grounded year-end operational target when the model filed it outside guidance', () => {
+    const highlights = { annual_guidance: [], multi_year_targets: [], operational_highlights: ['By the end of this year, capacity utilisation should be around 55%.'] };
+    expect(promoteExplicitForwardTargets(highlights).annual_guidance).toEqual(['By the end of this year, capacity utilisation should be around 55%.']);
+  });
+  it('does not promote historical metrics or vague plans', () => {
+    const highlights = { annual_guidance: [], multi_year_targets: [], operational_highlights: ['Capacity utilisation was 55% last year.', 'Management plans to increase capacity over time.', 'Revenue rose 25% in the quarter.'] };
+    expect(promoteExplicitForwardTargets(highlights).annual_guidance).toEqual([]);
+  });
+});
 
 const SJS_HIGHLIGHTS = {
   guidance_changes: [
@@ -60,6 +71,11 @@ describe("transcript splitting: an hour-long call is read in parts, not cut at i
     expect(parts.length).toBeLessThanOrEqual(3);
     expect(parts[0]).toContain("START");
     expect(parts[parts.length - 1]).toContain("END-OF-QA");
+    expect(transcriptCoverage(text, parts).complete).toBe(false);
+  });
+  it("reports full coverage when every source passage fits", () => {
+    const text = sentence.repeat(500);
+    expect(transcriptCoverage(text, splitTranscript(text)).complete).toBe(true);
   });
 });
 
@@ -110,7 +126,7 @@ describe("guidance cuts are recognised by the marker the model writes, not by wo
 
 describe("the analyst write-up block", () => {
   const item = { kind: "CONCALL", title: "Earnings Call", url: "https://example.org/call.pdf", highlights: compactHighlights(SJS_HIGHLIGHTS) };
-  const block = formatConcallHighlightsBlock(item, "[Earnings Call](https://example.org/call.pdf)");
+  const block = formatConcallHighlightsBlock(item, "[Earnings Call](https://example.org/call.pdf)", list => list, { revenue: 2827.3 });
 
   it("has the seven sections in the analyst's order", () => {
     const order = ["GUIDANCE & OUTLOOK", "QUARTERLY NUMBERS", "BUSINESS & SEGMENTS", "CAPACITY & CAPEX", "NEW INITIATIVES", "RISKS & CONCERNS", "ANALYST TAKE"].map((t) => block.indexOf(t));
@@ -127,9 +143,11 @@ describe("the analyst write-up block", () => {
     expect(block).toContain("🔑 Record Q2 margin, but management cut its FY27 revenue growth outlook");
   });
   it("an empty section is left out, and a filing without highlights renders nothing", () => {
-    const sparse = formatConcallHighlightsBlock({ kind: "CONCALL", highlights: compactHighlights({ guidance_changes: [], financial_performance: ["Revenue: 10% growth to Rs. 100 crore"], key_takeaway: null }) }, "x");
+    const sparseItem = { kind: "CONCALL", highlights: compactHighlights({ guidance_changes: [], financial_performance: ["Revenue: 10% growth to Rs. 100 crore"], key_takeaway: null }) };
+    const sparse = formatConcallHighlightsBlock(sparseItem, "x", list => list, { revenue: 100 });
     expect(sparse).toContain("QUARTERLY NUMBERS");
     expect(sparse).not.toContain("NEW INITIATIVES");
+    expect(formatConcallHighlightsBlock(sparseItem, "x", list => list, null)).not.toContain("Revenue: 10% growth");
     expect(formatConcallHighlightsBlock({ kind: "CONCALL" }, "x")).toBe("");
     expect(compactHighlights({})).toBeNull();
   });

@@ -37,13 +37,15 @@ const state = vi.hoisted(() => {
   ocrText: '',
   pdfFailReason: 'NO_TEXT',
   pdfFailDetail: '',
+  linkedDocText: '',
   digestStore: new Map(),
   otherPending: 0,
   previousRows: [],
   guidanceRows: [],
   outcomeRows: [],
   healthStuck: [],
-  boardRows: new Map()
+  boardRows: new Map(),
+  prevAudio: []
 };
 });
 
@@ -83,7 +85,7 @@ vi.mock('../db/pool.js', () => ({
       if (state.snapshotError && text.includes('INSERT INTO quarterly_snapshots')) throw new Error('snapshot write failed');
       // ── thesis digest queue (event_analysis.digest_pending), emulated in memory ──
       if (text.includes("'digest_pending', true")) {
-        state.digestStore.set(params[1], { id: params[1], ticker: state.item?.ticker, company_name: state.item?.company_name, filing_date: state.item?.filing_date, digest_item: JSON.parse(params[0]) });
+        state.digestStore.set(params[1], { id: params[1], ticker: state.item?.ticker, stock_id: state.item?.stock_id, company_name: state.item?.company_name, filing_date: state.item?.filing_date, digest_item: JSON.parse(params[0]) });
         return { rows: [] };
       }
       // a recording whose call already has an analysed written transcript
@@ -114,6 +116,7 @@ vi.mock('../db/pool.js', () => ({
       // a batch folded into the record instead of sent (press release restating results / transcript repeating a recording write-up)
       if (text.includes("'digest_folded'")) { for (const id of params[1]) { const r = state.digestStore.get(id); if (r) { r.sent = true; r.folded = params[0]; } } return { rows: [] }; }
       if (text.includes('earlier_recording_writeup')) return { rows: state.earlierRecordingItems.map(di => ({ di })) };
+      if (text.includes("event_analysis->'audio_analysis' IS NOT NULL")) return {rows:state.prevAudio};
       if (text.includes('FROM market_data_snapshots') && text.includes('digest_price_line')) return { rows: state.marketSnapshot ? [state.marketSnapshot] : [] };
       if (text.includes('GROUP BY ticker')) return { rows: state.otherPending ? [{ ticker: state.item?.ticker, n: state.otherPending }] : [] };
       if (text.includes('digest_sent_at')) { for (const id of params[0]) { const r = state.digestStore.get(id); if (r) r.sent = true; } return { rows: [] }; }
@@ -143,7 +146,7 @@ vi.mock('../services/announcement.service.js', async () => {
     extractTextFromPdfUrl: vi.fn(async () => state.docText),
     // The worker reads PDFs through the detailed extractor so it can tell "download failed" from "scanned PDF".
     extractPdfTextDetailed: vi.fn(async (_url, opts = {}) => {
-      const text = opts.forceOcr ? state.ocrText : state.docText;
+      const text = opts.forceOcr ? state.ocrText : /\/q2-(?:transcript|presentation)\.pdf/.test(_url) ? state.linkedDocText : state.docText;
       return text ? { text, reason: null, detail: '' } : { text: '', reason: state.pdfFailReason, detail: state.pdfFailDetail };
     })
   };
@@ -177,13 +180,15 @@ vi.mock('../services/audio-transcript-analyzer.service.js', async () => {
     downloadYouTubeAudio: vi.fn(async (_url, out) => out),
     downloadAndExtractMp3: vi.fn(async (_url, out) => out),
     transcribeAudioWithGroqWhisper: vi.fn(async () => state.whisperText),
-    analyzeAudioWithGemini: vi.fn(async () => ({ executive_summary: 'Gemini audio summary', catalysts: [], commitments: [] }))
+    analyzeAudioWithGemini: vi.fn(async () => ({ executive_summary: 'Gemini audio summary', catalysts: [], commitments: [] })),
+    analyzeTranscriptWithGemini: vi.fn(async () => ({ executive_summary: 'Written call summary' })),
+    auditDiscrepancies: vi.fn(async () => ({ has_material_discrepancy: true, discrepancy_score: 8, summary_verdict: 'Transcript omitted guidance', discrepancies: [] }))
   };
 });
 
 import { processPendingDeepDives, flushThesisDigests, flushAllocationBoard, flushHealthReport, generateInstitutionalSyntheses, reconcileStockCommitments } from '../workers/quarterly-deepdive-worker.js';
 import { getThesisContract } from '../services/thesis-driver-context.service.js';
-import { sendPipelineFailureAlert } from '../services/telegram.service.js';
+import { sendPipelineFailureAlert, sendConcallDiscrepancyAlert } from '../services/telegram.service.js';
 import { extractPdfTextDetailed } from '../services/announcement.service.js';
 import { resetLlmState } from '../services/llm-failover.service.js';
 
@@ -288,6 +293,8 @@ describe('quarterly deep-dive worker', () => {
     state.ocrText = '';
     state.pdfFailReason = 'NO_TEXT';
     state.pdfFailDetail = '';
+    state.linkedDocText = '';
+    state.prevAudio = [];
     state.item = baseItem();
     state.queueItems = null;
     state.snapshotError = false;
@@ -568,7 +575,7 @@ describe('quarterly deep-dive worker', () => {
       Array.from({ length: 60 }, (_, i) => turn('Management', `Point ${i}: dispatch run-rate under PM-KUSUM Component B and C continues; receivable days from state discoms were 128 days and we expect improvement of 10 days by Q4 as subsidy tranches get released.`)).join('') +
       turn('Moderator', 'Question and Answer session begins.');
     state.docText = transcript;
-    state.item = { ...baseItem(), title: 'Analysts/Institutional Investor Meet/Con. Call Updates', deep_dive_status: 'pending_stage2', attachment_url: 'https://nsearchives.nseindia.com/corporate/SHAKTIPUMP_Transcript.pdf', is_earnings_release: false };
+    state.item = { ...baseItem(), title: 'Analysts/Institutional Investor Meet/Con. Call Updates', deep_dive_status: 'pending_stage2', attachment_url: 'https://www.bseindia.com/xml-data/corpfiling/AttachLive/72f60a8d-098f-4614-a050-8e6ee063fc32.pdf', is_earnings_release: false };
     // Evidence is only kept when this transcript states it (it says 128 days and a 10-day improvement).
     state.llmVerdict = llmVerdictJson({
       thesis_driver_assessment: [
@@ -579,6 +586,7 @@ describe('quarterly deep-dive worker', () => {
 
     const res = await processPendingDeepDives({ announcementIds: ['aaaaaaaa-0000-0000-0000-000000000001'], deadlineAt: Date.now() + 20000 });
     expect(res.processed).toBe(1);
+    expect(vi.mocked(extractPdfTextDetailed).mock.calls.find(c => c[0] === state.item.attachment_url)?.[1]).toMatchObject({ maxTextChars: 160000 });
     expect(state.sends).toHaveLength(1);
     const msg = state.sends[0];
     expect(msg).toContain('THESIS STATUS');
@@ -590,6 +598,45 @@ describe('quarterly deep-dive worker', () => {
   });
 
   describe('thesis digest delivery', () => {
+    it('reads a presentation PDF linked by a short exchange cover letter', async () => {
+      state.item = { ...baseItem(), title:'Investor Presentation', deep_dive_status:'pending_stage1', attachment_url:'https://exchange.test/presentation-cover.pdf' };
+      state.docText = 'Investor Presentation is available on our website at the following link: https://www.company.example/q2-presentation.pdf';
+      state.linkedDocText = 'Investor Presentation Q2 FY27. ' + 'Management outlined capacity additions and segment outlook. '.repeat(35);
+      const res = await processPendingDeepDives({announcementIds:[state.item.id], deadlineAt:Date.now()+120000});
+      expect(res.processed).toBe(1);
+      expect(vi.mocked(extractPdfTextDetailed).mock.calls.some(c=>c[0]==='https://www.company.example/q2-presentation.pdf')).toBe(true);
+      const write=state.calls.find(c=>c.sql.includes('event_analysis = COALESCE(event_analysis') && c.params?.[1]?.includes('institutional_verdict'));
+      expect(JSON.parse(write.params[1]).institutional_verdict.source_document.extracted_url).toBe('https://www.company.example/q2-presentation.pdf');
+    });
+    it('reads a linked transcript PDF instead of treating its exchange cover letter as the call', async () => {
+      state.item = { ...baseItem(), title:'Analysts/Institutional Investor Meet/Con. Call Updates', deep_dive_status:'pending_stage2', attachment_url:'https://exchange.test/cover.pdf' };
+      state.docText = 'Transcript of the Conference Call. Please find the link to the transcript on our website: https://www.company.example/q2-transcript.pdf';
+      state.linkedDocText = `Moderator: Welcome to the call.\n${'Analyst: What are the targets?\nManagement: We will discuss the outlook after results.\n'.repeat(100)}`;
+      state.prevAudio=[{id:'older-audio',attachment_url:'https://exchange.test/audio.pdf',event_analysis:{audio_analysis:{executive_summary:'Targets were discussed.'}}}];
+      const res = await processPendingDeepDives({announcementIds:[state.item.id], deadlineAt:Date.now()+20000});
+      expect(res.processed).toBe(1);
+      expect(vi.mocked(extractPdfTextDetailed).mock.calls.some(c => c[0] === 'https://www.company.example/q2-transcript.pdf')).toBe(true);
+      const write=state.calls.find(c=>c.sql.includes('event_analysis = COALESCE(event_analysis') && c.params?.[1]?.includes('institutional_verdict'));
+      expect(JSON.parse(write.params[1]).institutional_verdict.source_document.extracted_url).toBe('https://www.company.example/q2-transcript.pdf');
+      expect(vi.mocked(sendConcallDiscrepancyAlert)).not.toHaveBeenCalled();
+    });
+    it('follows a transcript link in a generic exchange cover even when it was queued in stage one', async () => {
+      state.item = { ...baseItem(), title:'Analysts/Institutional Investor Meet/Con. Call Updates', deep_dive_status:'pending_stage1', attachment_url:'https://exchange.test/cover.pdf' };
+      state.docText = 'Transcript of the Conference Call. Link to the transcript: https://www.company.example/q2-transcript.pdf';
+      state.linkedDocText = `Moderator: Welcome.\n${'Analyst: What are the targets?\nManagement: We expect growth next year.\n'.repeat(100)}`;
+      const res = await processPendingDeepDives({announcementIds:[state.item.id], deadlineAt:Date.now()+120000});
+      expect(res.processed).toBe(1);
+      expect(vi.mocked(extractPdfTextDetailed).mock.calls.some(c=>c[0]==='https://www.company.example/q2-transcript.pdf')).toBe(true);
+    });
+    it('never sends a summary-versus-summary forensic omission accusation even with both raw texts retained', async () => {
+      state.item = { ...baseItem(), title:'Analysts/Institutional Investor Meet/Con. Call Updates', deep_dive_status:'pending_stage2', attachment_url:'https://exchange.test/cover.pdf' };
+      state.docText = 'Transcript of the Conference Call. Link: https://www.company.example/q2-transcript.pdf';
+      state.linkedDocText = `Moderator: Welcome.\n${'Analyst: What are the targets?\nManagement: We expect growth next year.\n'.repeat(100)}`;
+      state.prevAudio=[{id:'older-audio',attachment_url:'https://exchange.test/audio.mp3',event_analysis:{audio_transcript_text:state.linkedDocText,audio_analysis:{executive_summary:'Audio mentioned targets.'}}}];
+      await processPendingDeepDives({announcementIds:[state.item.id], deadlineAt:Date.now()+120000});
+      expect(vi.mocked(sendConcallDiscrepancyAlert)).not.toHaveBeenCalled();
+      expect(state.digestStore.get(state.item.id)?.digest_item?.url).toBe('https://www.company.example/q2-transcript.pdf');
+    });
     const transcriptItem = () => {
       const turn = (who, text) => `${who}: ${text}\n`;
       state.docText = 'Transcript of the Earnings Conference Call held on October 24, 2026\n' +
@@ -863,7 +910,16 @@ describe('quarterly deep-dive worker', () => {
     });
 
     describe('decks, calls and recordings (digest)', () => {
-      const mk = (id, kind, extra = {}) => state.digestStore.set(id, { id, ticker: 'SHAKTIPUMP', company_name: 'Shakti Pumps (India) Limited', filing_date: '2026-10-24T10:00:00.000Z', digest_item: { kind, title: kind === 'DECK' ? 'Investor Presentation' : 'Transcript', url: 'https://example.test/' + id + '.pdf', filedAt: '2026-10-24T10:00:00.000Z', queuedAt: new Date().toISOString(), summary: 'Management reiterated the plan.', positives: ['Order book healthy'], concerns: [], guidance: [], commitmentFlags: [], assessment: [], action: 'HOLD / MONITOR', conviction: 5, ...extra } });
+      const mk = (id, kind, extra = {}) => state.digestStore.set(id, { id, ticker: 'SHAKTIPUMP', stock_id: 'stock-1', company_name: 'Shakti Pumps (India) Limited', filing_date: '2026-10-24T10:00:00.000Z', digest_item: { kind, title: kind === 'DECK' ? 'Investor Presentation' : 'Transcript', url: 'https://example.test/' + id + '.pdf', filedAt: '2026-10-24T10:00:00.000Z', queuedAt: new Date().toISOString(), summary: 'Management reiterated the plan.', positives: ['Order book healthy'], concerns: [], guidance: [], commitmentFlags: [], assessment: [], action: 'HOLD / MONITOR', conviction: 5, ...extra } });
+
+      it('loads same-stock prior verified results using the queued filing date', async () => {
+        process.env.ALLOCATION_GATE = 'off';
+        state.item = baseItem();
+        mk('d1', 'DECK');
+        expect(await flushThesisDigests()).toBe(1);
+        const lookup = state.calls.find(c => c.sql.includes("verified_financials' AS vf"));
+        expect(lookup?.params).toEqual(['SHAKTIPUMP', state.item.stock_id, '2026-10-24T10:00:00.000Z']);
+      });
 
       it('a deck / call that says nothing new goes to the board, not to Telegram', async () => {
         state.item = baseItem();
@@ -1280,6 +1336,26 @@ describe('quarterly deep-dive worker', () => {
       expect(state.sends[0]).toMatch(/highlight extraction incomplete/i);
       const saved = state.calls.find(c => c.sql.includes('institutional_verdict:') || (c.sql.includes('SET event_analysis') && c.params?.[1]?.includes('institutional_verdict')));
       expect(saved?.params?.[1]).toContain('INCOMPLETE');
+    });
+
+    it('a long presentation with skipped middle source text cannot claim complete highlight coverage', async () => {
+      state.item = { ...baseItem(), title: 'Investor Presentation', attachment_url: 'https://nsearchives.nseindia.com/corporate/deck_Q2.pdf', deep_dive_status: 'pending_stage1' };
+      state.docText = 'Investor Presentation Q2 FY27. ' + 'Operating discussion without a target. '.repeat(2600);
+      state.highlightsJson = JSON.stringify({ operational_highlights: ['Operating discussion without a target'] });
+      await runOne();
+      const queued = [...state.digestStore.values()][0]?.digest_item;
+      expect(queued?.highlightExtractionIncomplete).toBe(true);
+      expect(state.sends[0]).toMatch(/highlight extraction incomplete/i);
+    });
+
+    it('a PDF truncated before highlight splitting cannot claim complete presentation coverage', async () => {
+      state.item = { ...baseItem(), title: 'Investor Presentation', attachment_url: 'https://nsearchives.nseindia.com/corporate/deck_Q2.pdf', deep_dive_status: 'pending_stage1' };
+      state.docText = 'Investor Presentation Q2 FY27. ' + 'Operating discussion without a target. '.repeat(15);
+      vi.mocked(extractPdfTextDetailed).mockResolvedValueOnce({ text: state.docText, reason: null, detail: '', textTruncated: true });
+      state.highlightsJson = JSON.stringify({ operational_highlights: ['Operating discussion without a target'] });
+      await runOne();
+      const queued = [...state.digestStore.values()][0]?.digest_item;
+      expect(queued?.highlightExtractionIncomplete).toBe(true);
     });
 
     it('a deck whose highlights come back empty or unusable is still queued with its ordinary verdict (never lost, never blocked)', async () => {

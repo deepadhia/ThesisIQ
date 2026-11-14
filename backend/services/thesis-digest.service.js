@@ -155,6 +155,7 @@ export function quietBatchReason({ items = [], resultsAlerted = false } = {}) {
 const NUMBER_TOKEN = /\d[\d,]*(?:\.\d+)?/g;
 const numbersOf = (text) => new Set([...String(text || "").matchAll(NUMBER_TOKEN)].map((m) => m[0].replace(/,/g, "")).filter((n) => n.length >= 2 || n.includes(".")));
 const CALL_LISTS = ["guidance_changes", "annual_guidance", "quarterly_guidance", "multi_year_targets", "financial_performance", "operational_highlights"];
+const CALL_CONTEXT_LISTS = ["key_challenges", "key_monitorables", "business_performance", "growth_initiatives"];
 
 /**
  * True when a call's WRITTEN transcript adds nothing the recording write-up (sent earlier for the same call) did not already
@@ -170,6 +171,23 @@ export function repeatsEarlierCallWriteup({ items = [], earlierItems = [] } = {}
   if (known.size === 0) return false;
   let sawFigure = false;
   for (const i of items) {
+    // Figures alone cannot establish that the written transcript repeats audio:
+    // a later answer can explain an apparent decline without adding a number.
+    for (const key of CALL_CONTEXT_LISTS) {
+      const prior = earlier.flatMap(e => asList(e.highlights[key]));
+      for (const current of asList(i.highlights[key])) {
+        const currentTokens = tokenSet(current);
+        const covered = prior.some(previous => {
+          if (norm(previous) === norm(current)) return true;
+          if (currentTokens.size < 4) return false;
+          const previousTokens = tokenSet(previous);
+          let shared = 0;
+          for (const token of currentTokens) if (previousTokens.has(token)) shared++;
+          return shared / currentTokens.size >= 0.8;
+        });
+        if (!covered) return false;
+      }
+    }
     for (const k of CALL_LISTS) {
       for (const bullet of asList(i.highlights[k])) {
         for (const n of numbersOf(bullet)) {
@@ -504,6 +522,12 @@ function changeMarker(t) {
   return "•";
 }
 
+// A deck often repeats a company profile. Keep only an event, a measured change,
+// or a forward milestone in its execution sections; guidance and risks are separate.
+function isDecisionRelevantUpdate(text) {
+  return /\b(?:secur\w*|award\w*|receiv\w*|won|wins?|signed|signing|commission\w*|launched|launching|start\w*|began|increas\w*|rais\w*|grew|growing|rose|declin\w*|fell|reduc\w*|cut|guid\w*|target\w*|plan\w*|expect\w*|will|acquir\w*|approv\w*|delay\w*|expand\w*|ramp\w*|compar\w*)\b|\b(?:YoY|QoQ)\b|\bnew(?:\s+[\w-]+){0,2}\s+(?:product|platform|contract|order|plant|facility|line|capacity|segment|business|market|customer|program|programme|service|technology|vertical|project)\b/i.test(String(text || ""));
+}
+
 /**
  * A concall rendered the way an analyst writes it up: guidance & outlook (what CHANGED first), quarterly numbers, business &
  * segments, capacity & capex, new initiatives, risks & concerns, analyst take (positives, what to monitor, bottom line).
@@ -514,29 +538,33 @@ export function formatConcallHighlightsBlock(item = {}, link = "", fresh = (l) =
   if (!h) return "";
   // A deck or press release restates the quarter's results: when the parser has verified numbers they are printed once (in the
   // verified block), so this document's own copy of them is not shown (the source of "three different revenues" in one quarter).
-  const hideOwnNumbers = Boolean(fin) && item.kind !== "CONCALL" && item.source !== "audio";
+  const isDeckLike = item.kind === "DECK" || item.kind === "PRESS";
+  const hideOwnNumbers = !fin || isDeckLike || item.source === "audio";
   const take = (list, n) => fresh(dedupeNearDuplicates(list || [])).slice(0, n);
+  const takeUpdates = (list, n) => take(isDeckLike ? (list || []).filter(isDecisionRelevantUpdate) : list, n);
   const sections = [];
   const add = (title, lines) => { if (lines.length) sections.push(`${title}\n${lines.join("\n")}`); };
 
   const changes = take(h.guidance_changes, 2).map((t) => `${changeMarker(t)} ${clip(t)}`);
-  const rest = take([...(h.annual_guidance || []), ...(h.quarterly_guidance || []), ...(h.multi_year_targets || [])], 3 - Math.min(changes.length, 2)).map((t) => `• ${clip(t)}`);
-  add("1️⃣ *GUIDANCE & OUTLOOK*", [...changes, ...rest]);
-  if (!hideOwnNumbers) add("2️⃣ *QUARTERLY NUMBERS*", take(h.financial_performance, 3).map((t) => `• ${clip(t)}`));
-  add("3️⃣ *BUSINESS & SEGMENTS*", take(h.business_performance, 3).map((t) => `• ${clip(t)}`));
-  add("4️⃣ *CAPACITY & CAPEX*", take(h.operational_highlights, 3).map((t) => `• ${clip(t)}`));
-  add("5️⃣ *NEW INITIATIVES*", take(h.growth_initiatives, 2).map((t) => `• ${clip(t)}`));
-  add("6️⃣ *RISKS & CONCERNS*", take(h.key_challenges, 3).map((t) => `• ${clip(t)}`));
+  const structuredGuidance = [...(h.annual_guidance || []), ...(h.quarterly_guidance || []), ...(h.multi_year_targets || [])];
+  const rest = take(structuredGuidance.length ? structuredGuidance : item.guidance, 3 - Math.min(changes.length, 2)).map((t) => `• ${clip(t)}`);
+  add("*GUIDANCE & OUTLOOK*", [...changes, ...rest]);
+  if (!hideOwnNumbers) add("*QUARTERLY NUMBERS*", take(h.financial_performance, 3).map((t) => `• ${clip(t)}`));
+  add("*BUSINESS & SEGMENTS*", takeUpdates(h.business_performance, 3).map((t) => `• ${clip(t)}`));
+  add("*CAPACITY & CAPEX*", takeUpdates(h.operational_highlights, 3).map((t) => `• ${clip(t)}`));
+  add("*NEW INITIATIVES*", takeUpdates(h.growth_initiatives, 2).map((t) => `• ${clip(t)}`));
+  add("*RISKS & CONCERNS*", take(h.key_challenges, 3).map((t) => `• ${clip(t)}`));
   const takeLines = [
-    ...take(h.key_positives, 2).map((t) => `✅ ${clip(t)}`),
-    ...take(h.key_monitorables, 2).map((t) => `👀 Monitor: ${clip(t)}`)
+    ...takeUpdates(h.key_positives, 2).filter(t => !isDeckLike || !/\b(?:revenue|sales|pat|net\s+profit|ebitda)\b/i.test(t)).map((t) => `✅ ${clip(t)}`),
+    ...(!isDeckLike ? take(h.key_monitorables, 2) : []).map((t) => `👀 Monitor: ${clip(t)}`)
   ];
-  if (h.key_takeaway) takeLines.push(`🔑 ${clip(h.key_takeaway, 220)}`);
-  if (h.management_tone) takeLines.push(`🗣️ Tone: ${clip(h.management_tone, 40)}`);
-  add("7️⃣ *ANALYST TAKE*", takeLines);
+  if (!isDeckLike && h.key_takeaway) takeLines.push(`🔑 ${clip(h.key_takeaway, 220)}`);
+  if (!isDeckLike && h.management_tone) takeLines.push(`🗣️ Tone: ${clip(h.management_tone, 40)}`);
+  add("*ANALYST TAKE*", takeLines);
   if (!sections.length) return "";
   const label = item.source === "audio" ? "🎧 Concall (heard from the company's recording)" : (KIND_LABEL[item.kind] || KIND_LABEL.CONCALL);
-  return `${label} — ${link || plain(item.title) || "Concall"}\n\n${sections.join("\n\n")}`;
+  const audioCaveat = item.source === "audio" ? "\n⚠️ Audio transcription; figures and names need written confirmation." : "";
+  return `${label} — ${link || plain(item.title) || "Concall"}${audioCaveat}\n\n${sections.join("\n\n")}`;
 }
 
 /**
@@ -572,7 +600,9 @@ export function formatThesisDigestMessage({ ticker, companyName, items = [], boa
     seenSets.push(ts);
     return true;
   });
-  const ordered = [...items].sort((x, y) => KIND_ORDER.indexOf(x.kind) - KIND_ORDER.indexOf(y.kind));
+  const ordered = [...items].sort((x, y) =>
+    KIND_ORDER.indexOf(x.kind) - KIND_ORDER.indexOf(y.kind) ||
+    Number(x.source === "audio") - Number(y.source === "audio"));
   const hasCallBlock = [...ordered].some((it) => it.kind === "CONCALL" || it.source === "audio");
   // A call with highlights is rendered as the analyst write-up (it replaces the generic per-filing bullets) and leads the message.
   const callBlocks = new Map();
@@ -634,15 +664,21 @@ export function formatThesisDigestMessage({ ticker, companyName, items = [], boa
   for (const it of ordered) {
     const link = it.url ? `[${filingLinkText(it)}](${it.url})` : filingLinkText(it);
     if (callBlocks.has(it)) continue; // already printed above as the call write-up
-    const summary = it.summary && !seen.has(norm(it.summary)) ? (seen.add(norm(it.summary)), plain(it.summary)) : "";
-    const pos = fresh(it.positives).map((t) => `  ✅ ${plain(t)}`);
+    if ((it.kind === "DECK" || it.kind === "PRESS") && it.highlights &&
+        !it.guidance?.length && !it.commitmentFlags?.length && !it.concerns?.length) {
+      collapsed.push(link);
+      continue;
+    }
+    const deckAlongsideCall = it.kind === "DECK" && hasCallBlock;
+    const summary = !deckAlongsideCall && it.summary && !seen.has(norm(it.summary)) ? (seen.add(norm(it.summary)), plain(it.summary)) : "";
+    const pos = fresh(deckAlongsideCall ? [] : it.positives).map((t) => `  ✅ ${plain(t)}`);
     const con = fresh(it.concerns).map((t) => `  ⚠️ ${plain(t)}`);
     const gui = fresh(it.guidance).map((t) => `  ⏱️ ${plain(t)}`);
-    const growth = fresh(it.growthInitiatives || []).map((t) => `• ${plain(t)}`);
-    const ops = fresh(it.operations || []).map((t) => `• ${plain(t)}`);
-    const biz = fresh(it.businessExecution || []).map((t) => `• ${plain(t)}`);
+    const growth = fresh(deckAlongsideCall ? [] : it.growthInitiatives || []).map((t) => `• ${plain(t)}`);
+    const ops = fresh(deckAlongsideCall ? [] : it.operations || []).map((t) => `• ${plain(t)}`);
+    const biz = fresh(deckAlongsideCall ? [] : it.businessExecution || []).map((t) => `• ${plain(t)}`);
     // Filter facts so they never duplicate bullets already listed in other sections
-    const fct = fresh(it.facts)
+    const fct = fresh(deckAlongsideCall ? [] : it.facts)
       .filter((t) => {
         const normT = norm(t);
         const inOther = [...(it.positives || []), ...(it.concerns || []), ...(it.growthInitiatives || []), ...(it.operations || []), ...(it.businessExecution || [])]

@@ -8,6 +8,16 @@ export function parseContexts(xmlContent) {
   const $ = cheerio.load(xmlContent, { xmlMode: true });
   const contexts = {};
 
+  // Detect overall filing nature from NatureOfReportStandaloneConsolidated or TypeOfFiling
+  let filingIsConsolidated = false;
+  $('*').filter((i, el) => {
+    const name = (el.name || '').toLowerCase();
+    return name.includes('natureofreportstandaloneconsolidated') || name.includes('typeoffiling');
+  }).each((i, el) => {
+    const text = $(el).text().toLowerCase();
+    if (text.includes('consolidated')) filingIsConsolidated = true;
+  });
+
   // Handle both <xbrli:context> and <context>
   const contextElements = $('*').filter((i, el) => el.name === 'context' || el.name.endsWith(':context'));
 
@@ -64,7 +74,11 @@ export function parseContexts(xmlContent) {
           contexts[id].isSegment = true;
         }
       } else {
-        contexts[id].isStandalone = true;
+        if (filingIsConsolidated) {
+          contexts[id].isConsolidated = true;
+        } else {
+          contexts[id].isStandalone = true;
+        }
       }
 
       // Calculate duration in days

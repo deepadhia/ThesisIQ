@@ -630,18 +630,123 @@ function groundSentences(text, isGrounded) {
     .trim();
 }
 
+const ABBREV_RE = /\b(?:rs|inr|no|nos|vs|mr|ms|mrs|dr|prof|ltd|pvt|co|inc|corp|approx|fig|dept|sec|[a-z])\.$/i;
+
+/**
+ * Deterministically splits text into sentences with absolute character offsets (borrowed from earnings-analyser).
+ * @param {string} text Source text
+ * @returns {Array<{index: number, start: number, end: number, text: string}>}
+ */
+export function splitSentencesWithOffsets(text) {
+  if (typeof text !== "string" || !text) return [];
+  const sentences = [];
+  const sentenceEndRe = /(?<=[.!?])\s+(?=[A-Z0-9"'₹\n])/g;
+  let cursor = 0;
+  let match;
+
+  while ((match = sentenceEndRe.exec(text)) !== null) {
+    const rawChunk = text.slice(cursor, match.index + 1);
+    const trimmed = rawChunk.trim();
+    if (trimmed.length > 0) {
+      if (ABBREV_RE.test(trimmed)) {
+        // Skip abbreviation periods like "Rs.", "No.", "Ltd."
+        continue;
+      }
+      const lead = rawChunk.indexOf(trimmed);
+      const start = cursor + lead;
+      const end = start + trimmed.length;
+      sentences.push({ index: sentences.length, start, end, text: trimmed });
+    }
+    cursor = match.index + match[0].length;
+  }
+
+  const finalChunk = text.slice(cursor);
+  const trimmedFinal = finalChunk.trim();
+  if (trimmedFinal.length > 0) {
+    const lead = finalChunk.indexOf(trimmedFinal);
+    const start = cursor + lead;
+    const end = start + trimmedFinal.length;
+    sentences.push({ index: sentences.length, start, end, text: trimmedFinal });
+  }
+
+  return sentences;
+}
+
+/**
+ * Checks that numbers and named entities in a bullet co-occur within a sentence or adjacent 2-3 sentence window,
+ * preventing cross-paragraph hallucinated combinations (borrowed from earnings-call-analyst).
+ */
+export function buildSentenceCooccurrenceCheck(rawDocText) {
+  const doc = String(rawDocText || "");
+  if (doc.length < 50) return () => true;
+  const sentences = splitSentencesWithOffsets(doc);
+  if (sentences.length === 0) return () => true;
+
+  const windows = [];
+  for (let i = 0; i < sentences.length; i++) {
+    const s1 = sentences[i].text.toLowerCase();
+    const s2 = i + 1 < sentences.length ? sentences[i + 1].text.toLowerCase() : "";
+    const combined = s1 + " " + s2;
+    windows.push(combined.replace(/[,]/g, ""));
+  }
+
+  return (bullet) => {
+    if (typeof bullet !== "string" || GUARD_INJECTED.test(bullet)) return true;
+
+    // Extract significant numbers
+    const numbers = [];
+    for (const m of bullet.matchAll(/(?:₹|rs\.?|inr)?\s*(\d+(?:,\d+)*(?:\.\d+)?)\s*(?:crores?|crs?\b|cr\b|%|lakhs?|mw|gw|mtpa)?/gi)) {
+      const clean = m[1].replace(/,/g, "");
+      if (clean.length >= 2 && !["2024", "2025", "2026", "2027", "2028"].includes(clean)) {
+        numbers.push(clean);
+      }
+    }
+
+    // Extract named entities from the bullet (words with capital letters not in stop words)
+    const entities = [];
+    for (const m of bullet.matchAll(/\b[A-Z][A-Za-z]{2,}\b/g)) {
+      const w = m[0].toLowerCase();
+      if (!isEntityStopword(w) && w.length >= 3) {
+        entities.push(w);
+      }
+    }
+
+    // If bullet has both key numbers and entities, all entities must co-occur with the numbers in at least one window
+    if (numbers.length > 0 && entities.length > 0) {
+      const hasCooccurrence = windows.some(win =>
+        numbers.every(num => win.includes(num)) && entities.every(ent => win.includes(ent))
+      );
+      if (!hasCooccurrence) return false;
+    }
+
+    return true;
+  };
+}
+
 // Lines the guard itself injects from parser-verified numbers; they are never model claims.
 const GUARD_INJECTED = /^(?:⚠️\s*EXCEPTIONAL GAIN|EBITDA:|SEGMENT RED FLAG)|EXCEPTIONAL ITEM DISCLOSURE|YoY Earnings Contraction|SEGMENT RED FLAG/i;
 
 // Capitalised words a model uses freely in generic finance prose; they are not named entities worth grounding.
 const ENTITY_STOPWORDS = new Set([
-  "january", "february", "march", "april", "june", "july", "august", "september", "october", "november", "december",
+  "january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december",
   "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday",
   "revenue", "quarter", "margin", "margins", "order", "orders", "next", "full", "year", "fiscal", "target", "targets",
   "capex", "growth", "guidance", "management", "company", "group", "volume", "volumes", "sales", "export", "exports",
-  "domestic", "cash", "debt", "capacity", "plant", "phase", "total", "segment", "business", "ebitda", "mtpa", "cagr",
-  "roce", "capital", "profit", "income", "demand", "pricing", "price", "prices", "market", "markets", "product", "products"
+  "domestic", "cash", "debt", "capacity", "plant", "phase", "total", "segment", "business", "ebitda", "ebit", "mtpa", "cagr",
+  "roce", "roe", "roic", "capital", "profit", "income", "demand", "pricing", "price", "prices", "market", "markets", "product", "products",
+  "storage", "cascades", "composite", "cylinder", "cylinders", "type", "inr", "cng", "ltd", "limited", "india",
+  "quarterly", "annual", "annually", "half", "yearly", "h1", "h2", "q1", "q2", "q3", "q4",
+  "standalone", "consolidated", "audited", "unaudited", "yoy", "qoq", "mom", "ttm", "arr", "mrr",
+  "pat", "pbt", "eps", "bps", "dps", "cr", "crore", "crores", "lakh", "lakhs", "lac", "lacs", "million", "millions", "billion", "billions",
+  "rs", "inrs", "rupee", "rupees", "highlights", "overview", "summary", "performance", "results", "statement", "statements", "operations", "operational", "financial"
 ]);
+
+function isEntityStopword(word) {
+  const w = String(word || "").toLowerCase();
+  if (ENTITY_STOPWORDS.has(w)) return true;
+  if (/^(?:fy\d{2,4}|[qh][1-4](?:fy\d{2,4})?|[qh][1-2](?:fy\d{2,4})?)$/i.test(w)) return true;
+  return false;
+}
 
 /**
  * Names and acronyms (e.g. a partner, plant or subsidiary) the model writes must be said somewhere in the source.
@@ -694,6 +799,30 @@ function editDistanceAtMost(a, b, max) {
   return prev[b.length] <= max;
 }
 
+/** The PDF text layer can print adjacent scope headings followed by the matching tables in order. */
+function scopeAmountMatchesPairedTables(bullet, source) {
+  const scope = /\b(standalone|consolidated)\b/i.exec(bullet)?.[1]?.toLowerCase();
+  const amount = /(?:\bRs\.?|\bINR|₹)\s*([\d,]+(?:\.\d+)?)/i.exec(bullet)?.[1];
+  const metric = /\brevenue\b/i.test(bullet) ? 'revenue' : /\bebitda\b/i.test(bullet) ? 'ebitda' : /\bPAT\b|profit after tax/i.test(bullet) ? 'pat' : null;
+  const h1 = /\bH1\s*FY\s*\d/i.test(bullet);
+  const q = /\bQ\d\s*FY\s*\d/i.test(bullet);
+  if (!scope || !amount || !metric || (!h1 && !q)) return true;
+  const heading = /\b(standalone|consolidated)\s+highlights\s+(standalone|consolidated)\s+highlights\b/i.exec(source);
+  if (!heading || heading[1].toLowerCase() === heading[2].toLowerCase()) return true;
+  const after = source.slice(heading.index + heading[0].length);
+  const tables = [...after.matchAll(/\([^)]*\b(?:in\s+)?(?:cr|crores)\s*\)/gi)].slice(0, 2);
+  if (tables.length < 2) return true;
+  const tableIndex = heading[1].toLowerCase() === scope ? 0 : 1;
+  const start = tables[tableIndex].index;
+  const end = tableIndex === 0 ? tables[1].index : Math.min(after.length, start + 1600);
+  const table = after.slice(start, end);
+  const row = table.split('\n').find(line => metric === 'revenue' ? /^\s*revenue\s+from\s+operations?\b/i.test(line) : metric === 'ebitda' ? /^\s*ebitda\b/i.test(line) : /^\s*(?:pat|profit\s+after\s+tax)\b/i.test(line));
+  if (!row) return true;
+  const values = row.replace(/^\s*(?:revenue\s+from\s+operations?|ebitda|pat|profit\s+after\s+tax)\s*/i, '').match(/[\d,]+(?:\.\d+)?%?/g) || [];
+  const expected = values[h1 ? 3 : 0];
+  return !expected || Number(expected.replace(/[,%]/g, '')) === Number(amount.replace(/,/g, ''));
+}
+
 /**
  * Grounds the structured concall highlight block against the transcript text: unfilled template items, and any
  * figure or name the call never states, are dropped (AGENTS.md rule 6). Empty sections stay empty rather than invented.
@@ -702,9 +831,10 @@ export function sanitizeConcallHighlights(highlights, rawDocText, financialData 
   if (!highlights || typeof highlights !== "object") return highlights;
   const numbersGrounded = buildGroundingCheck(rawDocText);
   const namesGrounded = buildEntityCheck(rawDocText);
+  const sentenceWindowGrounded = buildSentenceCooccurrenceCheck(rawDocText);
   // With verified results (a deck or press release is judged against the parsed statement) a bullet may not hang a verified
   // percentage on the wrong measure either.
-  const isGrounded = (s) => numbersGrounded(s) && namesGrounded(s) && !mislabelsMarginOrGrowth(s, financialData);
+  const isGrounded = (s) => numbersGrounded(s) && namesGrounded(s) && sentenceWindowGrounded(s) && !mislabelsMarginOrGrowth(s, financialData) && scopeAmountMatchesPairedTables(s, rawDocText);
   const out = { ...highlights };
   const LIST_FIELDS = [
     "financial_performance", "business_performance", "growth_initiatives", "operational_highlights",

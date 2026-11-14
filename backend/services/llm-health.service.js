@@ -48,7 +48,9 @@ export function evaluateLlmHealth(stats, configuredCount) {
     if (p.permanent) {
       issues.push({
         id: `llm:dead:${name}`, severity: "warning", cooldownHours: DEAD_COOLDOWN_HOURS,
-        text: `Provider ${name} is permanently failing (HTTP ${p.lastStatus}): the model was retired or the key is invalid. The chain is skipping it and the model list is re-discovered automatically; if this repeats, check that provider's API key.`
+        text: p.lastStatus === 402
+          ? `Provider ${name} returned HTTP 402 (billing, payment or credits required). The chain is temporarily skipping it; check that provider account's billing and credit status.`
+          : `Provider ${name} is permanently failing (HTTP ${p.lastStatus}): the model was retired or the key is invalid. The chain is skipping it and the model list is re-discovered automatically; if this repeats, check that provider's API key.`
       });
     }
   }

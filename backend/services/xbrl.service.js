@@ -13,6 +13,7 @@ import { mergeXbrlData } from "./xbrl/canonicalMergeEngine.js";
 import { uploadSingleFiling, isDriveConfigured } from "./drive.service.js";
 import { saveAnnouncement, generateAnnouncementHash } from "./announcement.service.js";
 import { formatFinancial } from '../utils/financialFormatter.js';
+import { discoverNseIntegratedFilings, checkLegacyResultFreshness } from './xbrl/integratedFilingDiscovery.js';
 
 const NSE_HEADERS = {
   "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -212,6 +213,20 @@ export async function fetchAndStoreXbrlMetrics({ stock_id, ticker, bse_scrip_cod
 
   if (normalized.length === 0) {
     return { ok: false, quarters: 0, error: "No quarterly data returned" };
+  }
+
+  // The comparison endpoint can lag years behind current filings. Check before any
+  // Drive upload or database write; this legacy schema cannot preserve revisions.
+  let officialFilings;
+  try {
+    officialFilings = await discoverNseIntegratedFilings({ symbol: nseSymbol });
+  } catch (err) {
+    return { ok: false, quarters: 0, error: `Official filing freshness unavailable: ${err.message}` };
+  }
+  const freshness = checkLegacyResultFreshness(normalized, officialFilings);
+  if (!freshness.fresh) {
+    return { ok: false, quarters: 0,
+      error: `Legacy comparison results not verified current (legacy ${freshness.legacyPeriodEnd ?? 'none'}, official ${freshness.officialPeriodEnd ?? 'none'})` };
   }
 
   // DUAL ENGINE MERGE (V2 + V3)

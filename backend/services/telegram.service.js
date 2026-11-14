@@ -1,5 +1,6 @@
 import { TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID } from "../config/env.js";
 import { pool } from "../db/pool.js";
+import { deduplicateCommitments, deduplicateGuidanceBullets } from "./guidance-dedup.service.js";
 
 /**
  * Telegram Bot Service
@@ -474,7 +475,8 @@ export function formatAnnouncementMessage(params) {
     const data = audioData || {};
     // Forward Guidance & Commitments
     if (Array.isArray(data.commitments) && data.commitments.length > 0) {
-      const commItems = data.commitments.map(c => {
+      const dedupedComm = deduplicateCommitments(data.commitments, 4);
+      const commItems = dedupedComm.map(c => {
         const target = c.target_value ? ` [Target: ${c.target_value}]` : "";
         const timeline = c.timeline ? ` [Timeline: ${c.timeline}]` : "";
         return `• *${c.metric || 'Guidance'}:* ${cleanReaderFriendlyText(cleanBullet(c.statement))}${target}${timeline}`;
@@ -521,12 +523,10 @@ export function formatAnnouncementMessage(params) {
     if ((ch.growth_initiatives || []).length > 0) {
       message += `🚀 *Growth Initiatives & Partnerships:*\n${ch.growth_initiatives.map(g => `• ${cleanReaderFriendlyText(cleanBullet(g))}`).join('\n')}\n\n`;
     }
-    const guidItems = [
-      ...(ch.quarterly_guidance || []),
-      ...(ch.annual_guidance || []),
-      ...(ch.multi_year_targets || []),
-      ...(ch.management_guidance || [])
-    ];
+    const rawGuidItems = (ch.quarterly_guidance?.length || ch.annual_guidance?.length || ch.multi_year_targets?.length)
+      ? [...(ch.quarterly_guidance || []), ...(ch.annual_guidance || []), ...(ch.multi_year_targets || [])]
+      : (ch.management_guidance || []);
+    const guidItems = deduplicateGuidanceBullets(rawGuidItems, 4);
     if (guidItems.length > 0) {
       message += `📈 *Forward Guidance & Targets:*\n${guidItems.map(g => `• ${cleanReaderFriendlyText(cleanBullet(g))}`).join('\n')}\n\n`;
     }

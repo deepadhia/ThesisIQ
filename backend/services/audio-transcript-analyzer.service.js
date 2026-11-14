@@ -5,6 +5,13 @@ import https from "https";
 import { execFile } from "child_process";
 import { promisify } from "util";
 import { getGeminiModelNames, runLlm } from "./llm.service.js";
+import {isSubstantiveConcallTranscript} from './announcement.service.js';
+
+/** Summary-to-summary comparison cannot prove a corporate omission. */
+export function canCompareConcallSources({audioId, writtenId, audioText, writtenText}) {
+  return Boolean(audioId && writtenId && audioId !== writtenId &&
+    isSubstantiveConcallTranscript(audioText) && isSubstantiveConcallTranscript(writtenText));
+}
 
 const execFileAsync = promisify(execFile);
 

@@ -13,6 +13,11 @@ const T0 = new Date('2026-10-31T06:00:00.000Z'); // 11:30 IST
 beforeEach(() => resetLlmState());
 
 describe('evaluateLlmHealth', () => {
+  it('describes HTTP 402 as a billing or credit refusal, not a retired model', () => {
+    const issue=evaluateLlmHealth(stats({calls:2,succeeded:1,providers:{'openrouter-model':{permanent:true,lastStatus:402}}}),1)[0];
+    expect(issue.text).toMatch(/billing|credit|payment/i);
+    expect(issue.text).not.toMatch(/retired|key is invalid|permanently failing/i);
+  });
   it('is quiet when calls succeed, even if a provider hit a normal rate limit', () => {
     const s = stats({ calls: 5, succeeded: 5, providers: { 'groq-gpt-oss-120b': { ok: 3, fail: 2, permanent: false, lastStatus: 429, lastError: 'groq HTTP 429' } } });
     expect(evaluateLlmHealth(s, 7)).toEqual([]);

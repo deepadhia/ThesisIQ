@@ -20,6 +20,18 @@ function daysUntilIst(ymd, now) {
   return Math.round((Date.UTC(+m[1], +m[2] - 1, +m[3]) - Date.parse(`${todayIst}T00:00:00Z`)) / 86400e3);
 }
 
+/** Returns true when a filing summary or announcement letter only announces procedural availability with no financial data. */
+export function isContentFreeNotice(text) {
+  if (typeof text !== "string" || !text.trim()) return false;
+  const s = text.toLowerCase();
+  return (
+    /only announces the availability/i.test(s) ||
+    /discloses? no (?:new )?(?:operational or )?financial (?:metrics|information)/i.test(s) ||
+    /audio recording (?:is )?(?:now )?available on (?:the )?(?:company'?s )?website.*no new/i.test(s) ||
+    /no substantive business (?:insights|information) (?:were|was) disclosed/i.test(s)
+  );
+}
+
 export async function decideDirectAlertGate({
   shouldHaveAlerted, isDuplicateEvent = false, isConcallScheduleAlert = false, gateEnabled = true,
   ticker, title = "", filingCategory = "GENERAL", aiResult = {}, announcementText = "", eventAnalysis = null,
@@ -28,6 +40,16 @@ export async function decideDirectAlertGate({
   const pass = { boarded: false, eventAnalysis };
   // Only a filing that was about to be alerted on its own is judged.
   if (!gateEnabled || !shouldHaveAlerted || isDuplicateEvent) return pass;
+
+  // Suppress content-free notices (e.g. "only announces availability of audio and contains no financial metrics")
+  if (isContentFreeNotice(aiResult?.summary) || isContentFreeNotice(announcementText?.slice(0, 500))) {
+    const summary = firstSentence(aiResult?.summary) || "Content-free administrative notice.";
+    console.log(`[ALLOCATION GATE] ${ticker}: content-free administrative filing; listed on the allocation board, not pushed: ${title}`);
+    return {
+      boarded: true,
+      eventAnalysis: { ...(eventAnalysis || {}), board_pending: true, board_item: boardEntryFrom({ ticker, kinds: [filingCategory], gist: summary }) }
+    };
+  }
 
   // A concall-date heads-up says only WHEN a call is: one message per stock per quarter. A call more than a day away goes on the
   // daily board with its date; a call today or tomorrow, or with no readable date, is pushed (the board would come too late).
