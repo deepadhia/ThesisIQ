@@ -299,6 +299,7 @@ ${boardRows.map(b => {
   for (const b of boardRows) {
     const healthSummary = b.thesisHealth
       ? [b.thesisHealth.fundamental.status,
+        b.thesisHealth.fundamental.currentness,
         `recorded conviction ${b.thesisHealth.fundamental.recordedSnapshotConviction ?? 'unavailable'}/10`,
         b.thesisHealth.fundamental.evidenceSignal,
         `price attribution ${b.thesisHealth.attribution}`].join(' | ')

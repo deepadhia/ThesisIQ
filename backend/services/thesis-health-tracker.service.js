@@ -1,4 +1,4 @@
-import { compareFiscalQuarters } from '../utils/fiscal-quarter.js';
+import { compareFiscalQuarters, parseFiscalQuarter } from '../utils/fiscal-quarter.js';
 import { THESIS_STATES } from './thesis-state-engine.service.js';
 
 const DRIVER_STATES = new Set(['CONFIRMED', 'ON_TRACK', 'AT_RISK', 'BROKEN']);
@@ -55,6 +55,21 @@ export function assessThesisHealth({ stock, snapshots = [], filings = [], reacti
     adverse ? 'ADVERSE_RECORDED' : positive ? 'POSITIVE_RECORDED' : 'INSUFFICIENT_EVIDENCE';
   const recordedSnapshotStatus = latestSnapshot?.thesis_status || null;
   const snapshotState = recordedSnapshotStatus || THESIS_STATES.INSUFFICIENT_EVIDENCE;
+  const snapshotQuarterKey = parseFiscalQuarter(latestSnapshot?.quarter).key;
+  const resultQuarter = row => {
+    const vf = row.event_analysis?.institutional_verdict?.verified_financials;
+    if (vf?.isFinancialResult !== true) return 0;
+    const date = vf.quarterEnded;
+    if (typeof date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      const label = new Intl.DateTimeFormat('en-US', { month: 'short', year: 'numeric', timeZone: 'UTC' })
+        .format(new Date(`${date}T00:00:00Z`));
+      return parseFiscalQuarter(label).key;
+    }
+    return parseFiscalQuarter(row.event_analysis.institutional_verdict.reporting_period).key;
+  };
+  const newerResult = sourceRows.find(row => resultQuarter(row) > snapshotQuarterKey);
+  const currentness = newerResult ? 'NEWER_RESULT_UNASSESSED' :
+    latestSnapshot ? 'SNAPSHOT_CURRENT_FOR_KNOWN_RESULTS' : 'NO_SNAPSHOT';
 
   const measured = reaction?.reaction?.status === 'OBSERVED' ? reaction.reaction : null;
   const observedReturns = measured ? [
@@ -67,6 +82,7 @@ export function assessThesisHealth({ stock, snapshots = [], filings = [], reacti
   const reviewReasons = [];
   if (recordedSnapshotStatus && !VALID_THESIS_STATES.has(recordedSnapshotStatus)) reviewReasons.push('LEGACY_STATUS_VOCABULARY');
   if (!verifiedResult) reviewReasons.push('NO_STRICTLY_VERIFIED_RESULT_CONVICTION');
+  if (newerResult) reviewReasons.push('NEWER_RESULT_THAN_SNAPSHOT');
   if (sourceRows.length < filings.length) reviewReasons.push('INCOMPLETE_OR_UNLINKED_FILING');
   if (adverse && /STRENGTHEN|CONFIRMED|BEAT/i.test(snapshotState)) reviewReasons.push('ADVERSE_DRIVER_VS_POSITIVE_SNAPSHOT');
 
@@ -74,6 +90,8 @@ export function assessThesisHealth({ stock, snapshots = [], filings = [], reacti
     ticker, companyName: stock?.company_name || ticker,
     fundamental: {
       status: snapshotState, recordedSnapshotStatus, statusQuarter: latestSnapshot?.quarter || null,
+      currentness, newerResultFilingId: newerResult?.id || null,
+      newerResultSourceUrl: newerResult?.attachment_url || null,
       quarterlyHistory: orderedSnapshots.slice(0, 4).map(s => ({
         quarter: s.quarter, recordedStatus: s.thesis_status || null,
         recordedConviction: finiteScore(s.conviction_score)
@@ -153,7 +171,7 @@ export function thesisHealthMarkdown(report) {
     '|---|---|---:|---|---|---|'
   ];
   for (const row of report.stocks) {
-    lines.push(`| ${row.ticker} | ${row.fundamental.status} (${row.fundamental.statusQuarter || 'no quarter'}) | ${row.fundamental.recordedSnapshotConviction ?? 'unavailable'} / ${row.fundamental.conviction ?? 'unavailable'} | ${row.fundamental.evidenceSignal}${row.fundamental.reviewRequired ? '; REVIEW' : ''} | ${row.market.reactionStatus}${row.market.observedWindowMaxToLatestPp === null ? '' : `; observed window maximum to latest ${row.market.observedWindowMaxToLatestPp} pp`} | ${row.attribution} |`);
+    lines.push(`| ${row.ticker} | ${row.fundamental.status} (${row.fundamental.statusQuarter || 'no quarter'}; ${row.fundamental.currentness}) | ${row.fundamental.recordedSnapshotConviction ?? 'unavailable'} / ${row.fundamental.conviction ?? 'unavailable'} | ${row.fundamental.evidenceSignal}${row.fundamental.reviewRequired ? '; REVIEW' : ''} | ${row.market.reactionStatus}${row.market.observedWindowMaxToLatestPp === null ? '' : `; observed window maximum to latest ${row.market.observedWindowMaxToLatestPp} pp`} | ${row.attribution} |`);
   }
   for (const row of report.stocks) {
     lines.push('', `## ${row.ticker}`, '', `Fundamental status source: ${row.fundamental.statusBasis}. Strictly verified conviction: ${row.fundamental.conviction ?? 'unavailable'}; recorded snapshot conviction: ${row.fundamental.recordedSnapshotConviction ?? 'unavailable'}. Conviction source: ${row.fundamental.convictionSourceUrl || 'unavailable'}. Review reasons: ${row.fundamental.reviewReasons.join(', ') || 'none'}.`);

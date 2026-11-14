@@ -70,6 +70,20 @@ describe("segment red flags come from the table of the statement's own scope, re
     const old = ["Segment Information", "Alpha 100 110 300 210 600 1200", "Beta 90 80 85 170 160 330"];
     expect(extractSegmentRedFlags(old, 600, null)).toEqual([{ segment: "ALPHA", metric: "revenue", currentValue: 100, prevValue: 300, yoyDeclinePct: -66.7 }]);
   });
+  it("withholds a segment table whose known scope differs from the selected statement", () => {
+    expect(extractSegmentRedFlags(table("Consolidated", "793.59"), 1173, "STANDALONE")).toEqual([]);
+  });
+  it("withholds a lost-decimal comparison cell that exceeds the entire prior company revenue", () => {
+    const lines = [
+      "Unaudited Consolidated Segment Information",
+      "Segment Revenue",
+      "Ayurvedic products 14388.63 11828.31 959227 26216.94 17594.78 41669.28",
+      "Ayurvedic services 8983.46 10474.66 939224 19458.12 18818.32 38340.37",
+      "Segment Results"
+    ];
+    expect(extractSegmentRedFlags(lines, 189.85, "CONSOLIDATED", { unitFactor: 0.01, currentRevenue: 235.13 })).toEqual([]);
+    expect(extractSegmentRedFlags(lines, null, "CONSOLIDATED", { unitFactor: 0.01, currentRevenue: 235.13 })).toEqual([]);
+  });
 });
 
 describe("the verified-financials block says what each segment flag measures", () => {

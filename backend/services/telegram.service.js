@@ -481,7 +481,7 @@ export function formatAnnouncementMessage(params) {
         const timeline = c.timeline ? ` [Timeline: ${c.timeline}]` : "";
         return `• *${c.metric || 'Guidance'}:* ${cleanReaderFriendlyText(cleanBullet(c.statement))}${target}${timeline}`;
       });
-      message += `🎯 *Forward Guidance & Commitments:*\n${commItems.join("\n")}\n\n`;
+      message += `🎯 *Forward Guidance & Commitments:*\n\n${commItems.join("\n\n")}\n\n`;
     }
 
     // Capacity & Operational Run-Rate
@@ -498,43 +498,43 @@ export function formatAnnouncementMessage(params) {
     if (Array.isArray(data.qa_highlights) && data.qa_highlights.length > 0) {
       const qaItems = data.qa_highlights.slice(0, 3).map(qa => {
         const who = qa.analyst_or_shareholder ? ` (${qa.analyst_or_shareholder})` : "";
-        const ans = truncateAtBoundary(cleanReaderFriendlyText(cleanBullet(qa.management_answer)), 600);
+        const ans = truncateAtBoundary(cleanReaderFriendlyText(cleanBullet(qa.management_answer)), 1200);
         return `• *Q${who}:* ${cleanReaderFriendlyText(cleanBullet(qa.question))}\n  *A:* ${ans}`;
       });
-      message += `💬 *Key Management Q&A Insights:*\n${qaItems.join("\n")}\n\n`;
+      message += `💬 *Key Management Q&A Insights:*\n\n${qaItems.join("\n\n")}\n\n`;
     }
 
     // Strategic Catalysts
     const catalysts = Array.isArray(data.catalysts) && data.catalysts.length > 0 ? data.catalysts : (forward_catalysts || []);
     if (Array.isArray(catalysts) && catalysts.length > 0) {
-      message += `🚀 *Strategic Catalysts:*\n${catalysts.map(c => `• ${cleanReaderFriendlyText(cleanBullet(c))}`).join("\n")}\n\n`;
+      message += `🚀 *Strategic Catalysts:*\n\n${catalysts.map(c => `• ${cleanReaderFriendlyText(cleanBullet(c))}`).join("\n\n")}\n\n`;
     }
   } else if (concallData) {
     const ch = concallData;
     if ((ch.financial_performance || ch.performance_overview || []).length > 0) {
-      message += `📊 *Financial Metrics & Order Book:*\n${(ch.financial_performance || ch.performance_overview).map(p => `• ${cleanReaderFriendlyText(cleanBullet(p))}`).join('\n')}\n\n`;
+      message += `📊 *Financial Metrics & Order Book:*\n\n${(ch.financial_performance || ch.performance_overview).map(p => `• ${cleanReaderFriendlyText(cleanBullet(p))}`).join('\n\n')}\n\n`;
     }
     if ((ch.business_performance || ch.segment_highlights || []).length > 0) {
-      message += `📦 *Business Execution & Contract Wins:*\n${(ch.business_performance || ch.segment_highlights).map(b => `• ${cleanReaderFriendlyText(cleanBullet(b))}`).join('\n')}\n\n`;
+      message += `📦 *Business Execution & Contract Wins:*\n\n${(ch.business_performance || ch.segment_highlights).map(b => `• ${cleanReaderFriendlyText(cleanBullet(b))}`).join('\n\n')}\n\n`;
     }
     if ((ch.operational_highlights || []).length > 0) {
-      message += `🏭 *Capex & Capacity Expansion:*\n${ch.operational_highlights.map(o => `• ${cleanReaderFriendlyText(cleanBullet(o))}`).join('\n')}\n\n`;
+      message += `🏭 *Capex & Capacity Expansion:*\n\n${ch.operational_highlights.map(o => `• ${cleanReaderFriendlyText(cleanBullet(o))}`).join('\n\n')}\n\n`;
     }
     if ((ch.growth_initiatives || []).length > 0) {
-      message += `🚀 *Growth Initiatives & Partnerships:*\n${ch.growth_initiatives.map(g => `• ${cleanReaderFriendlyText(cleanBullet(g))}`).join('\n')}\n\n`;
+      message += `🚀 *Growth Initiatives & Partnerships:*\n\n${ch.growth_initiatives.map(g => `• ${cleanReaderFriendlyText(cleanBullet(g))}`).join('\n\n')}\n\n`;
     }
     const rawGuidItems = (ch.quarterly_guidance?.length || ch.annual_guidance?.length || ch.multi_year_targets?.length)
       ? [...(ch.quarterly_guidance || []), ...(ch.annual_guidance || []), ...(ch.multi_year_targets || [])]
       : (ch.management_guidance || []);
     const guidItems = deduplicateGuidanceBullets(rawGuidItems, 4);
     if (guidItems.length > 0) {
-      message += `📈 *Forward Guidance & Targets:*\n${guidItems.map(g => `• ${cleanReaderFriendlyText(cleanBullet(g))}`).join('\n')}\n\n`;
+      message += `📈 *Forward Guidance & Targets:*\n\n${guidItems.map(g => `• ${cleanReaderFriendlyText(cleanBullet(g))}`).join('\n\n')}\n\n`;
     }
     if ((ch.key_positives || []).length > 0) {
-      message += `✅ *Key Positives:*\n${ch.key_positives.map(p => `• ${cleanReaderFriendlyText(cleanBullet(p))}`).join('\n')}\n\n`;
+      message += `✅ *Key Positives:*\n\n${ch.key_positives.map(p => `• ${cleanReaderFriendlyText(cleanBullet(p))}`).join('\n\n')}\n\n`;
     }
     if ((ch.key_challenges || ch.key_risks || []).length > 0) {
-      message += `⚠️ *Key Risks & Challenges:*\n${(ch.key_challenges || ch.key_risks).map(c => `• ${cleanReaderFriendlyText(cleanBullet(c))}`).join('\n')}\n\n`;
+      message += `⚠️ *Key Risks & Challenges:*\n\n${(ch.key_challenges || ch.key_risks).map(c => `• ${cleanReaderFriendlyText(cleanBullet(c))}`).join('\n\n')}\n\n`;
     }
     if (ch.management_tone) {
       message += `🗣️ *Management Tone:* ${ch.management_tone}\n\n`;

@@ -671,8 +671,11 @@ function editDistance(a, b) {
  * label of the same table it is one or two edits from, so one segment never appears under two names.
  * @returns {Array<{segment:string, metric:"revenue"|"result", currentValue:number, prevValue:number, yoyDeclinePct:number}>}
  */
-export function extractSegmentRedFlags(lines, totalRevenueYoyBase, scope = null) {
+export function extractSegmentRedFlags(lines, totalRevenueYoyBase, scope = null, { unitFactor = 1, currentRevenue = null } = {}) {
   const flags = [];
+  // Without a trustworthy prior company total, neither the segment's scale nor its
+  // materiality can be checked. A corrupted comparison cell must not create an alert.
+  if (!Number.isFinite(totalRevenueYoyBase) || totalRevenueYoyBase <= 0) return flags;
   const tables = [];
   lines.forEach((l, i) => {
     if (!SEG_REVENUE_HEADER.test(l) || l.length > 60) return;
@@ -682,6 +685,8 @@ export function extractSegmentRedFlags(lines, totalRevenueYoyBase, scope = null)
   let start;
   let split = true;
   if (tables.length) {
+    // A known consolidated table is not evidence for a selected standalone statement, or vice versa.
+    if (scope && tables.some(t => t.scope) && !tables.some(t => t.scope === scope)) return flags;
     start = ((scope && tables.find((t) => t.scope === scope)) || tables[0]).start;
   } else {
     // no "Segment Revenue / Segment Results" split: the older single-section layout, every row read as revenue
@@ -698,21 +703,25 @@ export function extractSegmentRedFlags(lines, totalRevenueYoyBase, scope = null)
     const row = parseRow(lines[i], null);
     if (!row || row.values.length < 3) continue;
     const label = row.label.replace(/^\W*(?:\d+[.)]?|[a-z]\))\s*/i, "").trim();
-    if (label.length < 3 || SEGMENT_EXCLUDE_LABEL.test(label)) continue;
+    if (label.length < 3 || SEGMENT_EXCLUDE_LABEL.test(label) || /^others?$/i.test(label)) continue;
     let name = label.toUpperCase();
     if (section === "revenue") revenueLabels.push(name);
     else if (!revenueLabels.includes(name) && name.length >= 5) {
       const near = revenueLabels.find((r) => editDistance(r, name) <= 2);
       if (near) name = near;
     }
-    const cur = row.values[0];
-    const prev = row.values[2];
+    const cur = row.values[0] === null ? null : row.values[0] * unitFactor;
+    const prev = row.values[2] === null ? null : row.values[2] * unitFactor;
     if (cur === null || prev === null || prev <= 0 || cur < 0) continue;
+    // OCR/text layers can drop a decimal separator (9,592.27 -> 959227).
+    // A segment cannot exceed the whole company's same-period revenue by orders of magnitude.
+    if ((Number.isFinite(totalRevenueYoyBase) && totalRevenueYoyBase > 0 && prev > totalRevenueYoyBase * 1.5) ||
+        (Number.isFinite(currentRevenue) && currentRevenue > 0 && cur > currentRevenue * 1.5)) continue;
     const yoy = ((cur - prev) / prev) * 100;
     // Materiality: segment must be a meaningful slice of the year-ago revenue base
-    const material = !totalRevenueYoyBase || prev >= 0.03 * totalRevenueYoyBase;
+    const material = prev >= 0.03 * totalRevenueYoyBase;
     if (yoy < -25 && material && !flags.some((f) => f.segment === name && f.metric === section)) {
-      flags.push({ segment: name, metric: section, currentValue: cur, prevValue: prev, yoyDeclinePct: parseFloat(yoy.toFixed(1)) });
+      flags.push({ segment: name, metric: section, currentValue: round2(cur), prevValue: round2(prev), yoyDeclinePct: parseFloat(yoy.toFixed(1)) });
     }
   }
   return flags;
@@ -997,7 +1006,7 @@ function buildResult(primary, standalone, lines, { periodEndHint = null } = {}) 
   }
 
   // Segment red flags (generic, materiality-filtered)
-  result.segmentRedFlags = extractSegmentRedFlags(lines, revYoy, result.statementScope);
+  result.segmentRedFlags = extractSegmentRedFlags(lines, revYoy, result.statementScope, { unitFactor: f, currentRevenue: result.revenue });
   if (result.segmentRedFlags.some(fl => fl.yoyDeclinePct < -30)) result.isYoYDecline = true;
 
   // Unit sanity: when no unit was declared and the magnitude looks like Lakhs, rescale

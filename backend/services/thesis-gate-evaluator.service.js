@@ -283,6 +283,7 @@ export function evaluateThesisSpecificHurdle(ticker, fin = {}, operational = {})
     status: 'PASS',
     passed: true,
     structuralConfirmed,
+    primary: hurdles?.primary || null,
     reason: `All primary thesis hurdle rates satisfied (${hurdles.description})`,
     hurdlesEvaluated: hurdles.description
   };
@@ -390,6 +391,16 @@ export function evaluateDualLayerActionGate({
       statusClassification = 'GATES_PASS_ANALYSIS_BEARISH';
       decisionExplanation = withDriverNote('Financial gates cleared, but the filing analysis raised a bearish flag (governance, guidance or segment risk).');
       authorized = false;
+    } else if (
+      (safeOperational.bookToBill !== null && safeOperational.bookToBill !== undefined && Number(safeOperational.bookToBill) < 0.8) ||
+      safeOperational.orderInflowDepleted === true ||
+      (safeOperational.orderInflowCr === 0 && safeOperational.hasOrderDrivenModel === true)
+    ) {
+      finalAction = 'HOLD / MONITOR';
+      calibratedConviction = Math.min(baseConviction, 6);
+      statusClassification = 'BACKLOG_DEPLETION_RISK';
+      decisionExplanation = withDriverNote('Reported revenue & PAT expansion recognized from historical order backlog, but forward order inflows stalled / book-to-bill below 0.8x. Buy signal vetoed pending order book replenishment.');
+      authorized = false;
     } else {
       // Both gates cleared and nothing vetoes -> authorise a buy.
       const structural = thesis.structuralConfirmed;
@@ -422,10 +433,37 @@ export function evaluateDualLayerActionGate({
     statusClassification = drivers.highBroken.length > 0 ? 'THESIS_DRIVER_BROKEN' : 'TEMPORARY_FRICTION';
     decisionExplanation = withDriverNote(`Temporary operating friction: ${universal.reason}.`);
   } else if (universal.status === 'FAIL') {
-    finalAction = 'REASSESS THESIS';
-    calibratedConviction = Math.min(baseConviction, 4);
-    statusClassification = 'THESIS_DEVIATION';
-    decisionExplanation = withDriverNote(`Universal financial health failure: ${universal.reason}.`);
+    const hasAbsoluteRevenueHurdle = thesis.primary?.minRevenueCr !== undefined &&
+      Number(safeFin.revenue ?? safeFin.revenueCr ?? 0) >= thesis.primary.minRevenueCr;
+
+    const isProfitable = (safeFin.patTurnaround !== 'PROFIT_TO_LOSS' && safeFin.patTurnaround !== 'LOSS_WIDENED') &&
+      (safeFin.patConsolidated === null || safeFin.patConsolidated === undefined || Number(safeFin.patConsolidated) > 0);
+
+    const hasNoSegmentRedFlags = !(Array.isArray(safeFin.segmentRedFlags) && safeFin.segmentRedFlags.length > 0);
+
+    const isHighBaseCandidate = thesis.status === 'PASS' &&
+      hasAbsoluteRevenueHurdle &&
+      isProfitable &&
+      hasNoSegmentRedFlags &&
+      drivers.highBroken.length === 0 &&
+      (
+        (safeFin.ebitdaMarginPct !== null && safeFin.ebitdaMarginPct !== undefined && Number(safeFin.ebitdaMarginPct) >= 15) ||
+        (thesis.primary?.minEbitdaMarginPct && Number(safeFin.ebitdaMarginPct) >= thesis.primary.minEbitdaMarginPct)
+      );
+
+    if (isHighBaseCandidate) {
+      finalAction = 'HOLD / MONITOR';
+      calibratedConviction = Math.min(Math.max(baseConviction, 6), 7);
+      statusClassification = 'THESIS_INTACT_HIGH_BASE_MONITORING';
+      const runRate = safeFin.revenue ?? safeFin.revenueCr ?? '';
+      const margin = safeFin.ebitdaMarginPct ?? '';
+      decisionExplanation = withDriverNote(`Quarterly YoY reflects prior-year high-base delivery spike, but absolute run-rate${runRate ? ` (₹${runRate} Cr)` : ''} and operating margins${margin ? ` (${margin}%)` : ''} satisfy core thesis contract hurdles. Thesis intact under active monitoring.`);
+    } else {
+      finalAction = 'REASSESS THESIS';
+      calibratedConviction = Math.min(baseConviction, 4);
+      statusClassification = 'THESIS_DEVIATION';
+      decisionExplanation = withDriverNote(`Universal financial health failure: ${universal.reason}.`);
+    }
   } else {
     finalAction = 'HOLD / MONITOR';
     calibratedConviction = Math.min(baseConviction, 5);

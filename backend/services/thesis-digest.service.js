@@ -506,8 +506,8 @@ export function buildSignalRationale({ lead = null, board = [], fin = null, peri
   return lines.join("\n");
 }
 
-/** Cuts a bullet at a word boundary so no bullet runs on; "…" marks the cut. */
-function clip(text, max = 150) {
+/** Cuts a bullet at a word boundary so no bullet runs on; "…" marks the cut. Allows up to 350 chars for full context. */
+function clip(text, max = 350) {
   const t = plain(text);
   if (t.length <= max) return t;
   return `${t.slice(0, max).replace(/\s+\S*$/, "").replace(/[,;:\s-]+$/, "")}…`;
@@ -543,7 +543,7 @@ export function formatConcallHighlightsBlock(item = {}, link = "", fresh = (l) =
   const take = (list, n) => fresh(dedupeNearDuplicates(list || [])).slice(0, n);
   const takeUpdates = (list, n) => take(isDeckLike ? (list || []).filter(isDecisionRelevantUpdate) : list, n);
   const sections = [];
-  const add = (title, lines) => { if (lines.length) sections.push(`${title}\n${lines.join("\n")}`); };
+  const add = (title, lines) => { if (lines.length) sections.push(`${title}\n\n${lines.join("\n\n")}`); };
 
   const changes = take(h.guidance_changes, 2).map((t) => `${changeMarker(t)} ${clip(t)}`);
   const structuredGuidance = [...(h.annual_guidance || []), ...(h.quarterly_guidance || []), ...(h.multi_year_targets || [])];
@@ -695,40 +695,32 @@ export function formatThesisDigestMessage({ ticker, companyName, items = [], boa
     const lines = [`${KIND_LABEL[it.kind] || KIND_LABEL.OTHER} — ${link}`];
     if (summary) lines.push(`  ${summary}`);
     if (gui.length) {
-      lines.push(`  ⏱️ *Forward Guidance & Pacing:*`);
-      lines.push(...gui.map(g => `    • ${g.replace(/^  ⏱️\s*/, "")}`));
+      lines.push(`\n  ⏱️ *Forward Guidance & Pacing:*\n` + gui.map(g => `    • ${g.replace(/^  ⏱️\s*/, "")}`).join("\n\n"));
     }
     if (growth.length) {
-      lines.push(`  🚀 *New Growth Initiatives & Pilots:*`);
-      lines.push(...growth.map(g => `    ${g}`));
+      lines.push(`\n  🚀 *New Growth Initiatives & Pilots:*\n` + growth.map(g => `    ${g}`).join("\n\n"));
     }
     if (ops.length) {
       // Neutral headings: the model's operations / business fields hold claims, volumes or premiums for a financial-services
       // stock just as often as plant news for an industrial one, so a heading that names capex or an order book mislabels them.
-      lines.push(`  🏭 *Operations & Capacity:*`);
-      lines.push(...ops.map(o => `    ${o}`));
+      lines.push(`\n  🏭 *Operations & Capacity:*\n` + ops.map(o => `    ${o}`).join("\n\n"));
     }
     if (biz.length) {
-      lines.push(`  📦 *Business & Segment Execution:*`);
-      lines.push(...biz.map(b => `    ${b}`));
+      lines.push(`\n  📦 *Business & Segment Execution:*\n` + biz.map(b => `    ${b}`).join("\n\n"));
     }
     if (con.length) {
-      lines.push(`  ⚠️ *Headwinds & Friction Points:*`);
-      lines.push(...con.map(c => `    • ${c.replace(/^  ⚠️\s*/, "")}`));
+      lines.push(`\n  ⚠️ *Headwinds & Friction Points:*\n` + con.map(c => `    • ${c.replace(/^  ⚠️\s*/, "")}`).join("\n\n"));
     }
     if (pos.length) {
-      lines.push(`  ✅ *Positive Highlights:*`);
-      lines.push(...pos.map(p => `    • ${p.replace(/^  ✅\s*/, "")}`));
+      lines.push(`\n  ✅ *Positive Highlights:*\n` + pos.map(p => `    • ${p.replace(/^  ✅\s*/, "")}`).join("\n\n"));
     }
     if (fct.length) {
-      lines.push(`  📌 *Key Operational Facts:*`);
-      lines.push(...fct.map(f => `    • ${f.replace(/^  📌\s*/, "")}`));
+      lines.push(`\n  📌 *Key Operational Facts:*\n` + fct.map(f => `    • ${f.replace(/^  📌\s*/, "")}`).join("\n\n"));
     }
     if (flg.length) {
-      lines.push(`  🔴 *Flagged Commitments:*`);
-      lines.push(...flg.map(fl => `    • ${fl.replace(/^  🔴\s*/, "")}`));
+      lines.push(`\n  🔴 *Flagged Commitments:*\n` + flg.map(fl => `    • ${fl.replace(/^  🔴\s*/, "")}`).join("\n\n"));
     }
-    if (it.llmFailed) lines.push("  ⚠️ _AI narrative unavailable for this filing; open it for details._");
+    if (it.llmFailed) lines.push("\n  ⚠️ _AI narrative unavailable for this filing; open it for details._");
     blocks.push(lines.join("\n"));
   }
   if (blocks.length) msg += `\n\n🆕 *NEW SINCE LAST UPDATE*\n${blocks.join("\n\n")}`;

@@ -60,4 +60,16 @@ describe('generic thesis health tracker', () => {
     expect(report.stocks[0].fundamental.status).toBe('INSUFFICIENT_EVIDENCE');
     expect(report.stocks[0].market.reactionStatus).toBe('UNAVAILABLE');
   });
+  it('flags an old strengthening snapshot when a newer result has arrived', () => {
+    const q1 = { quarter: 'Q1_FY27', thesis_status: 'strengthening', conviction_score: 8 };
+    const q2 = result({ event_analysis: { institutional_verdict: {
+      final_action: 'HOLD / MONITOR', conviction_score: 5,
+      verified_financials: { isFinancialResult: true, quarterEnded: '2026-09-30', revenue: 235.13, patAttributable: 36.34 }
+    } } });
+    const health = assessThesisHealth({ stock, snapshots: [q1], filings: [q2] });
+    expect(health.fundamental.status).toBe('strengthening');
+    expect(health.fundamental.currentness).toBe('NEWER_RESULT_UNASSESSED');
+    expect(health.fundamental.reviewReasons).toContain('NEWER_RESULT_THAN_SNAPSHOT');
+    expect(health.fundamental.conviction).toBeNull();
+  });
 });
